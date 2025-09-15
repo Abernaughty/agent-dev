@@ -1,0 +1,118 @@
+# Security baseline for all containers
+x-security-base: &security-base
+  read_only: true
+  cap_drop: ["ALL"]
+  security_opt:
+    - "no-new-privileges:true"
+  tmpfs:
+    - /tmp:noexec,nosuid,size=100m
+  mem_limit: 512m
+  cpus: 0.5
+
+# Common volume mount for workspace
+x-workspace-mount: &workspace-mount
+  - ./workspace:/workspace:ro
+
+services:
+  # Development web container (Svelte)
+  web:
+    build:
+      context: ./containers/web
+      dockerfile: Dockerfile
+    <<: *security-base
+    volumes: *workspace-mount
+    working_dir: /workspace
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=development
+    # Override network isolation for dev server
+    networks:
+      - dev-network
+    # Override some security for development needs
+    read_only: false
+    tmpfs:
+      - /tmp:noexec,nosuid,size=200m
+      - /workspace/node_modules:exec,size=500m
+    mem_limit: 1g
+    cpus: 1.0
+
+  # Azure Functions container
+  func:
+    build:
+      context: ./containers/func
+      dockerfile: Dockerfile
+    <<: *security-base
+    volumes: *workspace-mount
+    working_dir: /workspace
+    ports:
+      - "7071:7071"
+    environment:
+      - AzureWebJobsStorage=UseDevelopmentStorage=true
+      - FUNCTIONS_WORKER_RUNTIME=node
+    networks:
+      - dev-network
+    depends_on:
+      - azurite
+    # Override some restrictions for Azure Functions
+    read_only: false
+    tmpfs:
+      - /tmp:noexec,nosuid,size=200m
+      - /workspace/.azure-functions-core-tools:exec,size=100m
+    mem_limit: 1g
+
+  # Local Azure Storage emulator
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite:latest
+    <<: *security-base
+    ports:
+      - "10000:10000"  # Blob service
+      - "10001:10001"  # Queue service
+      - "10002:10002"  # Table service
+    networks:
+      - dev-network
+    # Azurite needs some write access for data
+    read_only: false
+    tmpfs:
+      - /tmp:noexec,nosuid,size=100m
+      - /data:exec,size=1g
+    command: azurite --blobHost 0.0.0.0 --queueHost 0.0.0.0 --tableHost 0.0.0.0 --location /data
+
+  # MCP Filesystem server (secure, isolated)
+  mcp-fs:
+    build:
+      context: ./containers/mcp-fs
+      dockerfile: Dockerfile
+    <<: *security-base
+    volumes: *workspace-mount
+    network_mode: "none"
+    stdin_open: true
+    tty: false
+    # Very restrictive for MCP tools
+    mem_limit: 256m
+    cpus: 0.25
+
+  # MCP Shell server (secure, isolated)
+  mcp-shell:
+    build:
+      context: ./containers/mcp-shell
+      dockerfile: Dockerfile
+    <<: *security-base
+    volumes: *workspace-mount
+    network_mode: "none"
+    stdin_open: true
+    tty: false
+    # Very restrictive for MCP tools
+    mem_limit: 256m
+    cpus: 0.25
+
+networks:
+  dev-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+volumes:
+  node_modules:
+  azure_functions_data:

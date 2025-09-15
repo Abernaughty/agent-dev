@@ -1,0 +1,30 @@
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "docker",
+      "args": [
+        "compose",
+        "run",
+        "--rm",
+        "-i",
+        "mcp-fs"
+      ],
+      "env": {
+        "DOCKER_COMPOSE_FILE": "docker-compose.yml"
+      }
+    },
+    "shell": {
+      "command": "docker",
+      "args": [
+        "compose", 
+        "run",
+        "--rm",
+        "-i", 
+        "mcp-shell"
+      ],
+      "env": {
+        "DOCKER_COMPOSE_FILE": "docker-compose.yml"
+      }
+    }
+  }
+}

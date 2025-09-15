@@ -1,0 +1,15 @@
+{
+  "name": "mcp-fs-server",
+  "version": "1.0.0",
+  "description": "MCP Filesystem Server - Secure file operations for AI agents",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": ["mcp", "filesystem", "ai", "agent"],
+  "author": "Your Name",
+  "license": "MIT"
+}

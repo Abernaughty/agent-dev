@@ -1,0 +1,15 @@
+{
+  "name": "mcp-shell-server",
+  "version": "1.0.0",
+  "description": "MCP Shell Server - Secure command execution for AI agents",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": ["mcp", "shell", "ai", "agent"],
+  "author": "Your Name",
+  "license": "MIT"
+}
