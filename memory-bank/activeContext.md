@@ -1,43 +1,44 @@
 # Active Context - Agent Development Environment
 
-## Current Focus: Phase 2 Complete ✅
-Successfully implemented MCP servers with JSON-RPC over stdio communication.
+## Current Focus: Phase 3 - Development Environment 🚀
+Testing VS Code integration and complete development workflow.
 
-## Phase 2 Achievements
-- MCP Filesystem Server: list, read, write, search, exists, mkdir operations
-- MCP Shell Server: allowlisted command execution (npm, git, ls, etc.)
-- JSON-RPC protocol implementation with proper error handling
-- Security features: path validation, command allowlists, timeouts
-- Testing framework and Claude Desktop configuration
+## Phase 3 Objectives
+1. **VS Code Server Integration Testing**
+   - Verify VS Code Server accessibility on port 8080
+   - Test workspace mounting and permissions
+   - Validate development tools and extensions
 
-## Next Priority: Phase 3 - Development Environment
-**Goal**: Complete development environment with VS Code integration
+2. **Auto-initialization Testing**
+   - Test Svelte project creation in web container
+   - Test Azure Functions project creation in func container
+   - Verify cross-container compatibility
 
-### Phase 2 Requirements
-1. **MCP Filesystem Server**:
-   - Implement JSON-RPC over stdio
-   - Safe file operations within /workspace
-   - Read, write, list, search capabilities
-   - Input validation and path sanitization
+3. **Development Workflow Validation**
+   - Test complete cycle: edit → build → test → run
+   - Verify hot reloading with file watching
+   - Test npm commands through containers
 
-2. **MCP Shell Server**:
-   - Allowlisted command execution
-   - Commands: npm install, npm test, npm run build, npm run dev
-   - Output capture and error handling
-   - Working directory management
+4. **Cross-container Communication**
+   - Test Svelte app → Azure Functions communication
+   - Verify Azurite storage integration
+   - Validate dev-network connectivity
 
-3. **Communication Protocol**:
-   - Standard MCP JSON-RPC format
-   - Error handling and validation
-   - Proper stdio handling in containers
+## Testing Plan
+1. Build and start development containers
+2. Access VS Code Server at http://localhost:8080
+3. Test auto-initialization of both project types
+4. Verify hot reloading and development workflow
+5. Test container communication and networking
 
-## Current Decisions
-- Using Node.js 18 for all MCP servers
-- Read-only workspace mounting for security
-- Network isolation for MCP containers
-- Container auto-removal after each run
+## Success Criteria
+- VS Code Server accessible and functional
+- Projects auto-initialize correctly
+- Development workflow works end-to-end
+- All containers communicate properly
+- MCP servers remain functional alongside development
 
-## Blockers/Considerations
-- Need to implement actual MCP protocol handlers
-- Determine specific allowlisted commands for shell server
-- Test stdio communication with Claude Desktop
+## Previous Completions
+- ✅ Phase 1: Core Infrastructure 
+- ✅ Phase 2: MCP Server Implementation + Documentation
+- 🔄 Phase 3: Development Environment (IN PROGRESS)

@@ -15,8 +15,8 @@ help:
 	@echo "  test-mcp    Test MCP servers (Phase 2)"
 	@echo "  test-fs     Test filesystem MCP server"
 	@echo "  test-shell  Test shell MCP server"
-  @echo "  shell-web   Open shell in web container"
-  @echo "  shell-func  Open shell in func container"
+	@echo "  shell-web   Open shell in web container"
+	@echo "  shell-func  Open shell in func container"
 
 # Build all containers
 build:

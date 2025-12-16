@@ -1,22 +1,38 @@
-# Sample Project
+# sv
 
-This is a placeholder for your actual project code.
+Everything you need to build a Svelte project, powered by [`sv`](https://github.com/sveltejs/cli).
 
-When you run the containers, they will mount this workspace directory and can initialize:
-- A new Svelte project (via the web container)
-- A new Azure Functions project (via the func container)
+## Creating a project
 
-## Getting Started
+If you're seeing this, you've probably already done this step. Congrats!
 
-1. Start the development environment:
-   ```bash
-   docker-compose up -d web func azurite
-   ```
+```sh
+# create a new project in the current directory
+npx sv create
 
-2. The web container will automatically initialize a Svelte project if one doesn't exist
-3. The func container will automatically initialize an Azure Functions project if one doesn't exist
+# create a new project in my-app
+npx sv create my-app
+```
 
-## Files that will be created:
-- `package.json` (Svelte project)
-- `host.json` (Azure Functions project)
-- Various other project files
+## Developing
+
+Once you've created a project and installed dependencies with `npm install` (or `pnpm install` or `yarn`), start a development server:
+
+```sh
+npm run dev
+
+# or start the server and open the app in a new browser tab
+npm run dev -- --open
+```
+
+## Building
+
+To create a production version of your app:
+
+```sh
+npm run build
+```
+
+You can preview the production build with `npm run preview`.
+
+> To deploy your app, you may need to install an [adapter](https://svelte.dev/docs/kit/adapters) for your target environment.

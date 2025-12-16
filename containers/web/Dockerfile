@@ -1,49 +1,25 @@
-# Web Development Container (Svelte + VS Code Server)
-FROM node:18-alpine
+# Web Development Container (Svelte) — Alpine hardened
+FROM node:22-alpine
 
-# Install security updates and VS Code Server dependencies
-RUN apk update && apk upgrade && \
-    apk add --no-cache \
-    git \
-    curl \
-    bash \
-    sudo \
-    shadow
+# VS Code Server & npm prereqs (install once)
+RUN apk update && apk upgrade && apk add --no-cache \
+    bash curl git ca-certificates libstdc++ tar xz \
+ && rm -rf /var/cache/apk/*
 
-# Create non-root user
-RUN addgroup -g 1000 developer && \
-    adduser -D -s /bin/bash -G developer -u 1000 developer && \
-    echo "developer ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
+# Non-root user
+RUN adduser -D -s /bin/bash -u 1500 developer
 
-# Install VS Code Server
-USER developer
-WORKDIR /home/developer
+# Workspace + mountpoints (mkdir so Docker doesn't need to create inside RO bind)
+RUN mkdir -p /workspace /workspace/node_modules \
+ && chown -R developer:developer /workspace
 
-# Download and install code-server
-RUN curl -fsSL https://code-server.dev/install.sh | sh
-
-# Switch back to setup the workspace
-USER root
-
-# Create workspace directory with proper permissions
-RUN mkdir -p /workspace && \
-    chown -R developer:developer /workspace
-
-# Install global npm packages commonly used in Svelte development
-RUN npm install -g \
-    @sveltejs/kit \
-    vite \
-    eslint \
-    prettier
-
-# Set up the entrypoint
+# Entrypoint script (you had this earlier—put it back)
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 USER developer
 WORKDIR /workspace
+ENV SHELL=/bin/bash
 
-EXPOSE 3000 8080
-
+EXPOSE 3000
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["dev"]
