@@ -117,7 +117,7 @@ Create a configuration file to customize behavior:
 max_diff_chars: 50000
 
 # Claude model to use
-model: claude-3-5-sonnet-20241022
+model: claude-sonnet-4-5-20250929
 
 # Temperature (0.0 = deterministic, 1.0 = creative)
 temperature: 0.7

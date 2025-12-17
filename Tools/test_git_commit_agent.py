@@ -104,14 +104,14 @@ class TestConfig:
         """Test creating a Config object."""
         config = Config(
             max_diff_chars=50000,
-            model="claude-3-5-sonnet-20241022",
+            model="claude-sonnet-4-5-20250929",
             temperature=0.7,
             max_retries=3,
             commit_types=["feat", "fix", "docs"]
         )
         
         assert config.max_diff_chars == 50000
-        assert config.model == "claude-3-5-sonnet-20241022"
+        assert config.model == "claude-sonnet-4-5-20250929"
         assert config.temperature == 0.7
         assert config.max_retries == 3
         assert len(config.commit_types) == 3
@@ -121,7 +121,7 @@ class TestConfig:
         config = Config(**DEFAULT_CONFIG)
         
         assert config.max_diff_chars == 50000
-        assert config.model == "claude-3-5-sonnet-20241022"
+        assert config.model == "claude-sonnet-4-5-20250929"
         assert config.temperature == 0.7
         assert config.max_retries == 3
         assert "feat" in config.commit_types
