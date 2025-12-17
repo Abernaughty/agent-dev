@@ -20,20 +20,23 @@ services:
       context: ./containers/web
       dockerfile: Dockerfile
     <<: *security-base
-    volumes: *workspace-mount
     working_dir: /workspace
+    # docker-compose.yml (web service)
+    # web service
+    volumes:
+      - ./workspace:/workspace:ro
+      - node_modules:/workspace/node_modules
+      - vscode_server:/home/developer/.vscode-server
     ports:
       - "3000:3000"
     environment:
       - NODE_ENV=development
-    # Override network isolation for dev server
     networks:
       - dev-network
-    # Override some security for development needs
+    # override restrictive bits for dev workflow
     read_only: false
     tmpfs:
-      - /tmp:noexec,nosuid,size=200m
-      - /workspace/node_modules:exec,size=500m
+      - /tmp:noexec,nosuid,size=128m
     mem_limit: 1g
     cpus: 1.0
 
@@ -58,7 +61,6 @@ services:
     read_only: false
     tmpfs:
       - /tmp:noexec,nosuid,size=200m
-      - /workspace/.azure-functions-core-tools:exec,size=100m
     mem_limit: 1g
 
   # Local Azure Storage emulator
@@ -116,3 +118,4 @@ networks:
 volumes:
   node_modules:
   azure_functions_data:
+  vscode_server:

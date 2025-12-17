@@ -37,7 +37,7 @@ class MCPShellServer {
     this.validateCommand(command, args);
     
     return new Promise((resolve, reject) => {
-      const process = spawn(command, args, {
+      const childProcess = spawn(command, args, {
         cwd: options.cwd || this.workspaceRoot,
         env: { ...process.env, ...options.env },
         stdio: 'pipe'
@@ -46,15 +46,15 @@ class MCPShellServer {
       let stdout = '';
       let stderr = '';
       
-      process.stdout.on('data', (data) => {
+      childProcess.stdout.on('data', (data) => {
         stdout += data.toString();
       });
       
-      process.stderr.on('data', (data) => {
+      childProcess.stderr.on('data', (data) => {
         stderr += data.toString();
       });
       
-      process.on('close', (code) => {
+      childProcess.on('close', (code) => {
         resolve({
           command: `${command} ${args.join(' ')}`,
           exitCode: code,
@@ -64,13 +64,13 @@ class MCPShellServer {
         });
       });
       
-      process.on('error', (error) => {
+      childProcess.on('error', (error) => {
         reject(new Error(`Command execution failed: ${error.message}`));
       });
       
       // Timeout after 30 seconds
       setTimeout(() => {
-        process.kill('SIGTERM');
+        childProcess.kill('SIGTERM');
         reject(new Error('Command timeout after 30 seconds'));
       }, 30000);
     });

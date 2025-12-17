@@ -1,39 +1,29 @@
-#!/bin/bash
-set -e
+#!/bin/sh
+set -euo pipefail
 
-# Initialize workspace if package.json doesn't exist
-if [ ! -f "/workspace/package.json" ]; then
-    echo "Initializing new Svelte project..."
-    cd /workspace
-    npm create svelte@latest . -- --template skeleton --types typescript --no-eslint --no-prettier --no-playwright
-    npm install
+cd /workspace
+
+# Scaffold once (into an empty temp dir), then copy into /workspace
+if [ ! -f package.json ]; then
+  echo "🧱 No project found. Scaffolding SvelteKit (minimal, TS)…"
+  rm -rf /tmp/svapp && mkdir -p /tmp/svapp
+
+  npx -y sv create /tmp/svapp \
+    --template minimal \
+    --types ts \
+    --no-add-ons \
+    --no-install
+
+  # Safe copy for Windows/WSL mounts: don't preserve owner/perm/timestamps
+  tar -C /tmp/svapp -cf - . | tar -C /workspace --no-same-owner --no-same-permissions -xf -
 fi
 
-# Install dependencies if node_modules doesn't exist
-if [ ! -d "/workspace/node_modules" ]; then
-    echo "Installing dependencies..."
-    cd /workspace
-    npm install
+# Install deps unless we've already done it in this volume
+if [ ! -f node_modules/.installed ]; then
+  echo "📦 Installing dependencies…"
+  npm ci || npm install
+  date > node_modules/.installed
 fi
 
-# Start the appropriate service based on command
-case "$1" in
-    "dev")
-        echo "Starting Svelte development server..."
-        cd /workspace
-        npm run dev -- --host 0.0.0.0 --port 3000
-        ;;
-    "build")
-        echo "Building Svelte project..."
-        cd /workspace
-        npm run build
-        ;;
-    "code-server")
-        echo "Starting VS Code Server..."
-        code-server --bind-addr 0.0.0.0:8080 --auth none /workspace
-        ;;
-    *)
-        echo "Available commands: dev, build, code-server"
-        exec "$@"
-        ;;
-esac
+echo "🚀 Starting dev server on 0.0.0.0:3000"
+exec npm run dev -- --host 0.0.0.0 --port 3000
