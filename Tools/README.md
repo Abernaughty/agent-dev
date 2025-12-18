@@ -1,14 +1,14 @@
 # Git Commit Message Agent
 
-An automated agent that scans your git repository, identifies branches with unpushed changes, and generates meaningful commit messages using Claude AI.
+An AI-powered tool that generates meaningful commit messages and creates pull requests using Claude AI by analyzing your git changes.
 
 ## Features
 
-- 🔍 **Automatic Branch Scanning** - Finds all branches with unpushed commits
 - 🤖 **AI-Powered Messages** - Generates conventional commit messages using Claude
-- 📝 **Staged Changes Support** - Works with `git add` workflow
-- 🎯 **Interactive Selection** - Choose which branch to process
-- ⚡ **Auto-commit Mode** - Generate and commit in one step
+- 📝 **Smart Default Behavior** - Analyzes staged changes automatically
+- 🔒 **Safety Checks** - Validates git state before operations
+- 🚀 **PR Creation** - Complete workflow from commit to pull request
+- 🎯 **Interactive Prompts** - Always confirms before making changes
 - 🔧 **Configurable** - Customize via YAML config file
 - 📊 **JSON Output** - Perfect for CI/CD integration
 
@@ -17,6 +17,7 @@ An automated agent that scans your git repository, identifies branches with unpu
 - Python 3.8+
 - Git installed and accessible in PATH
 - Anthropic API key
+- GitHub CLI (optional, for PR creation)
 
 ## Installation
 
@@ -39,70 +40,93 @@ An automated agent that scans your git repository, identifies branches with unpu
    $env:ANTHROPIC_API_KEY='your-api-key-here'
    ```
 
-4. **Optional: Make executable** (Linux/Mac):
+4. **Optional: Install GitHub CLI** (for PR creation):
+   ```bash
+   # See: https://cli.github.com/
+   ```
+
+5. **Optional: Make executable** (Linux/Mac):
    ```bash
    chmod +x git_commit_agent.py
    ```
 
 ## Usage
 
-### Basic Usage
+### Quick Start
 
-**Scan all branches with unpushed commits:**
+The most common workflow:
+
 ```bash
+# 1. Make your changes
+echo "new feature" > feature.txt
+
+# 2. Stage them
+git add feature.txt
+
+# 3. Generate commit message and commit
 python git_commit_agent.py
+# Review the message, type 'y' to commit
+```
+
+That's it! The tool now:
+- Analyzes your staged changes by default
+- Generates a commit message
+- Prompts you to confirm before committing
+
+### Create a Pull Request
+
+```bash
+# After making commits on your feature branch
+python git_commit_agent.py --pr
 ```
 
 This will:
-1. Find all branches ahead of their upstream
-2. Show an interactive menu to select a branch
-3. Generate a commit message for the selected branch
-
-### Generate Message for Staged Changes
-
-**Stage your changes first:**
-```bash
-git add file1.py file2.py
-```
-
-**Generate commit message:**
-```bash
-python git_commit_agent.py --staged
-```
-
-### Auto-commit Mode
-
-**Generate and commit in one step:**
-```bash
-git add .
-python git_commit_agent.py --staged --auto-commit
-```
-
-You'll be prompted to confirm before committing.
+1. Check git state (blocks if merge/rebase in progress)
+2. Validate branch status (offers to pull/push if needed)
+3. Generate AI-powered PR description
+4. Create PR via GitHub CLI or open browser
 
 ### Process Specific Branch
 
-**Generate message for a specific branch:**
 ```bash
 python git_commit_agent.py --branch feature/user-auth
 ```
 
-### JSON Output
+### JSON Output (for CI/CD)
 
-**Get results as JSON (useful for scripts):**
 ```bash
+# Commit message as JSON
 python git_commit_agent.py --json
-python git_commit_agent.py --staged --json
+
+# PR description as JSON
+python git_commit_agent.py --pr --json
 ```
 
 ## Command-Line Options
 
 | Option | Description |
 |--------|-------------|
-| `--staged` | Generate message for currently staged changes |
+| *(no flags)* | Generate message for staged changes (default) |
+| `--pr` | Create pull request for current branch |
 | `--branch <name>` | Process a specific branch |
-| `--auto-commit` | Automatically commit after generating message (requires `--staged`) |
-| `--json` | Output results as JSON |
+| `--json` | Output results as JSON (no interactive prompts) |
+| `--staged` | *(Deprecated)* Now default behavior |
+| `--auto-commit` | *(Deprecated)* Now default behavior |
+
+## Safety Features
+
+The tool includes comprehensive safety checks:
+
+### Git State Validation
+- ❌ **Blocks** if merge/rebase/cherry-pick/revert in progress
+- ⚠️ **Warns** if in detached HEAD state
+- ℹ️ **Informs** if this is your first commit
+
+### PR Workflow Safety
+- ⚠️ **Offers to pull** if branch is behind upstream
+- ❌ **Blocks** if branch has diverged (requires rebase)
+- ⚠️ **Warns** about unstaged changes
+- ⚠️ **Offers to push** unpushed commits before PR creation
 
 ## Configuration
 
@@ -174,70 +198,56 @@ feat(auth): implement JWT authentication system
 - **ci**: CI/CD changes
 - **build**: Build system changes
 
+## PR Description Format
+
+For pull requests, the agent generates structured descriptions:
+
+```markdown
+## Overview
+Brief summary of what this PR does
+
+## Changes
+- Key change 1
+- Key change 2
+- Key change 3
+
+## Testing
+How this was tested (if applicable)
+```
+
 ## Git Alias Setup
 
-Add a convenient git alias to use the agent directly:
+Add a convenient git alias:
 
 **Linux/Mac:**
 ```bash
-git config --global alias.ai-commit '!python /absolute/path/to/git_commit_agent.py --staged'
+git config --global alias.ai-commit '!python /absolute/path/to/git_commit_agent.py'
+git config --global alias.ai-pr '!python /absolute/path/to/git_commit_agent.py --pr'
 ```
 
 **Windows:**
 ```bash
-git config --global alias.ai-commit "!python C:/absolute/path/to/git_commit_agent.py --staged"
+git config --global alias.ai-commit "!python C:/absolute/path/to/git_commit_agent.py"
+git config --global alias.ai-pr "!python C:/absolute/path/to/git_commit_agent.py --pr"
 ```
 
 **Usage:**
 ```bash
 git add .
 git ai-commit
+
+# Later, create PR
+git ai-pr
 ```
 
 ## Examples
 
-### Example 1: Interactive Branch Selection
-
-```bash
-$ python git_commit_agent.py
-
-🔍 Scanning repository for unpushed changes...
-
-🔍 Found branches with unpushed commits:
-
-  1. feature/user-auth (3 commits ahead of origin/feature/user-auth)
-  2. bugfix/login-error (1 commits ahead of origin/bugfix/login-error)
-  0. Exit
-
-Select a branch (0 to exit): 1
-
-📝 Analyzing branch: feature/user-auth...
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📌 feature/user-auth (3 commits ahead of origin/feature/user-auth)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Suggested commit message:
-
-feat(auth): implement JWT-based authentication system
-
-- Add JWT token generation and validation middleware
-- Implement user login and registration endpoints
-- Add password hashing with bcrypt
-- Create authentication tests with 95% coverage
-
-Files changed: 8 files (+342, -12)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-💡 Tip: Use --branch feature/user-auth to process this branch directly
-```
-
-### Example 2: Staged Changes with Auto-commit
+### Example 1: Default Workflow (Staged Changes)
 
 ```bash
 $ git add src/api.py src/tests/test_api.py
 
-$ python git_commit_agent.py --staged --auto-commit
+$ python git_commit_agent.py
 
 📝 Analyzing staged changes...
 
@@ -256,10 +266,83 @@ Commit with this message? [y/N]: y
 ✅ Committed successfully!
 ```
 
-### Example 3: JSON Output for CI/CD
+### Example 2: No Staged Changes (Helpful Guidance)
 
 ```bash
-$ python git_commit_agent.py --staged --json
+$ python git_commit_agent.py
+
+ℹ️  No staged changes found.
+
+Modified files (not staged):
+  - src/api.py
+  - src/tests/test_api.py
+
+Stage changes with:
+  git add <files>
+
+Or create a PR for current branch:
+  python git_commit_agent.py --pr
+```
+
+### Example 3: Complete PR Workflow
+
+```bash
+$ python git_commit_agent.py --pr
+
+🔄 Preparing to create pull request...
+
+⚠️  Branch has 2 unpushed commit(s)
+Push commits now? [y/N]: y
+🔄 Pushing feature/user-auth to origin...
+✅ Pushed successfully!
+
+📝 Generating PR description against main...
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📋 Pull Request Preview
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Title: Implement JWT authentication system
+Branch: feature/user-auth → main
+Files: 8 files (+342, -12)
+
+Description:
+## Overview
+This PR implements a complete JWT-based authentication system with token
+generation, validation, and secure password hashing.
+
+## Changes
+- Add JWT token generation and validation middleware
+- Implement user login and registration endpoints
+- Add password hashing with bcrypt
+- Create comprehensive authentication tests
+
+## Testing
+Added integration tests covering login, registration, and token validation
+with 95% code coverage.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Create PR with this description? [y/N]: y
+✅ Pull request created successfully!
+https://github.com/user/repo/pull/123
+```
+
+### Example 4: Safety Check (Merge in Progress)
+
+```bash
+$ python git_commit_agent.py
+
+❌ Error: Repository is in the middle of a merge
+
+Please resolve the ongoing operation before committing:
+  git merge --abort  # to abort the merge
+  # or resolve conflicts and commit
+```
+
+### Example 5: JSON Output for CI/CD
+
+```bash
+$ python git_commit_agent.py --json
 
 {
   "branch": "main",
@@ -273,7 +356,7 @@ $ python git_commit_agent.py --staged --json
 
 ## Testing
 
-Run the test suite:
+### Run Unit Tests
 
 ```bash
 # Install pytest if not already installed
@@ -282,6 +365,15 @@ pip install pytest
 # Run tests
 pytest test_git_commit_agent.py -v
 ```
+
+### Comprehensive Testing
+
+See `TESTING_GUIDE.md` for detailed testing instructions covering:
+- All core functionality
+- Safety checks and edge cases
+- PR workflow scenarios
+- Integration tests
+- Performance tests
 
 ## Troubleshooting
 
@@ -302,11 +394,25 @@ cd /path/to/your/git/repo
 python git_commit_agent.py
 ```
 
-### "No branches with unpushed commits found"
+### "No staged changes found"
 
-This means all your branches are up-to-date with their remotes. Try:
-- Making some changes and committing them
-- Using `--staged` mode for uncommitted changes
+Stage your changes first:
+```bash
+git add <files>
+python git_commit_agent.py
+```
+
+### "Repository is in the middle of a merge"
+
+Complete or abort the ongoing operation:
+```bash
+# Abort the merge
+git merge --abort
+
+# Or resolve conflicts and commit
+git add <resolved-files>
+git commit
+```
 
 ### Rate Limiting
 
@@ -321,27 +427,47 @@ For very large diffs (>50k characters), the agent automatically truncates the co
 max_diff_chars: 100000  # Increase limit
 ```
 
+### PR Creation Issues
+
+**GitHub CLI not found:**
+- Install from: https://cli.github.com/
+- Or use browser fallback (opens automatically)
+
+**Push rejected:**
+- Pull latest changes: `git pull`
+- Or rebase: `git rebase origin/main`
+
+**Branch has diverged:**
+- Rebase your branch: `git rebase origin/main`
+- Or merge: `git merge origin/main`
+
 ## How It Works
 
-1. **Branch Discovery**: Uses `git for-each-ref` to find branches ahead of their upstream
-2. **Diff Collection**: Collects `git diff`, `git diff --stat`, and `git log` for context
-3. **AI Generation**: Sends diff to Claude with a structured prompt
+### Commit Message Generation
+1. **Git Analysis**: Collects `git diff --cached`, `git diff --stat`, and file changes
+2. **Safety Checks**: Validates git state (no merge/rebase in progress, etc.)
+3. **AI Generation**: Sends diff to Claude with structured prompt
 4. **Format Validation**: Ensures output follows Conventional Commits format
-5. **Interactive Display**: Shows results with formatting and statistics
+5. **Interactive Confirmation**: Prompts user before committing
+
+### PR Creation Workflow
+1. **State Validation**: Checks for merge/rebase in progress, detached HEAD
+2. **Branch Analysis**: Checks if ahead/behind/diverged from upstream
+3. **Safety Prompts**: Offers to pull/push as needed
+4. **Merge Base Detection**: Finds common ancestor with base branch (main/master)
+5. **AI Generation**: Creates PR description from all commits since merge base
+6. **PR Creation**: Uses GitHub CLI or opens browser as fallback
 
 ## Best Practices
 
-1. **Review Generated Messages**: Always review before committing
+1. **Review Generated Messages**: Always review before confirming
 2. **Keep Changes Focused**: Smaller, focused commits generate better messages
-3. **Use Staged Mode**: Stage related changes together for coherent messages
-4. **Configure Per-Project**: Use repo-specific config for team conventions
-5. **Combine with Git Hooks**: Integrate into pre-commit workflows
+3. **Stage Related Changes**: Group related changes for coherent messages
+4. **Use Safety Checks**: Let the tool guide you through git state issues
+5. **Configure Per-Project**: Use repo-specific config for team conventions
+6. **Test Before PR**: Ensure tests pass before creating pull requests
 
 ## Advanced Usage
-
-### Custom Prompt Templates
-
-While the agent uses a built-in prompt, you can modify the source code to customize the prompt template in the `generate_commit_message()` function.
 
 ### CI/CD Integration
 
@@ -349,7 +475,7 @@ Use JSON output in your CI/CD pipeline:
 
 ```bash
 # Generate message and capture output
-MESSAGE=$(python git_commit_agent.py --staged --json | jq -r '.suggested_message')
+MESSAGE=$(python git_commit_agent.py --json | jq -r '.suggested_message')
 
 # Use in automated commit
 git commit -m "$MESSAGE"
@@ -364,10 +490,40 @@ Create `.git/hooks/prepare-commit-msg`:
 # Auto-generate commit message if none provided
 
 if [ -z "$2" ]; then
-    python /path/to/git_commit_agent.py --staged --json | \
+    python /path/to/git_commit_agent.py --json | \
         jq -r '.suggested_message' > "$1"
 fi
 ```
+
+### Custom Prompts
+
+Modify the prompts in `generate_commit_message()` or `generate_pr_description()` functions to customize AI behavior.
+
+## Migration from v1.x
+
+If you were using the old version:
+
+**Old way:**
+```bash
+python git_commit_agent.py --staged --auto-commit
+```
+
+**New way (simpler):**
+```bash
+python git_commit_agent.py
+```
+
+The `--staged` and `--auto-commit` flags are deprecated but still work with warnings.
+
+## What's New in v2.0
+
+- ✅ **Staged changes are now the default** (no flags needed)
+- ✅ **Always prompts before committing** (safer)
+- ✅ **Complete PR workflow** with `--pr` flag
+- ✅ **Comprehensive safety checks** (merge detection, branch validation)
+- ✅ **Better error messages** with helpful guidance
+- ✅ **GitHub CLI integration** for PR creation
+- ✅ **Intelligent fallbacks** (browser PR creation, base branch detection)
 
 ## Contributing
 
@@ -375,9 +531,9 @@ Contributions are welcome! Areas for improvement:
 
 - Support for more commit message formats
 - Integration with other AI providers
-- PR description generation
-- Commit message templates
+- Additional PR templates
 - Multi-language support
+- GitLab/Bitbucket support
 
 ## License
 
@@ -388,7 +544,8 @@ MIT License - feel free to use and modify as needed.
 Built with:
 - [Anthropic Claude](https://www.anthropic.com/) - AI-powered message generation
 - [Conventional Commits](https://www.conventionalcommits.org/) - Commit message format
+- [GitHub CLI](https://cli.github.com/) - PR creation
 
 ---
 
-**Need help?** Open an issue or check the troubleshooting section above.
+**Need help?** Check `TESTING_GUIDE.md` or open an issue.

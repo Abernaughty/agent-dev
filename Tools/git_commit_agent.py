@@ -6,10 +6,9 @@ Automatically generates meaningful commit messages using Claude AI by analyzing
 git diffs and branch changes.
 
 Usage:
-    python git_commit_agent.py                    # Scan all branches
-    python git_commit_agent.py --staged           # Generate message for staged changes
+    python git_commit_agent.py                    # Generate message for staged changes (default)
     python git_commit_agent.py --branch feature/x # Process specific branch
-    python git_commit_agent.py --staged --auto-commit  # Generate and commit
+    python git_commit_agent.py --pr               # Create PR for current branch
     python git_commit_agent.py --json             # Output as JSON
 
 Requirements:
@@ -279,6 +278,143 @@ def get_branch_diff(branch: str, upstream: Optional[str], config: Config) -> Opt
     )
 
 
+# ============================================================================
+# GIT STATE VALIDATION
+# ============================================================================
+
+def check_git_state() -> Tuple[str, Optional[str]]:
+    """
+    Check if git is in a special state.
+    
+    Returns:
+        Tuple of (state, message) where state is one of:
+        'clean', 'merging', 'rebasing', 'cherry-picking', 'reverting'
+    """
+    git_dir = Path(get_repo_root() or ".") / ".git"
+    
+    # Check for merge
+    if (git_dir / "MERGE_HEAD").exists():
+        return 'merging', "Repository is in the middle of a merge"
+    
+    # Check for rebase
+    if (git_dir / "rebase-merge").exists() or (git_dir / "rebase-apply").exists():
+        return 'rebasing', "Repository is in the middle of a rebase"
+    
+    # Check for cherry-pick
+    if (git_dir / "CHERRY_PICK_HEAD").exists():
+        return 'cherry-picking', "Repository is in the middle of a cherry-pick"
+    
+    # Check for revert
+    if (git_dir / "REVERT_HEAD").exists():
+        return 'reverting', "Repository is in the middle of a revert"
+    
+    return 'clean', None
+
+
+def check_working_directory_clean() -> Tuple[bool, dict]:
+    """
+    Check if working directory is clean.
+    
+    Returns:
+        Tuple of (is_clean, {'unstaged': [...], 'untracked': [...]})
+    """
+    success, output = run_git(["status", "--porcelain"], check=False)
+    
+    if not success:
+        return True, {'unstaged': [], 'untracked': []}
+    
+    unstaged = []
+    untracked = []
+    
+    for line in output.split('\n'):
+        if not line:
+            continue
+        
+        status = line[:2]
+        filename = line[3:] if len(line) > 3 else ""
+        
+        # Untracked files
+        if status == '??':
+            untracked.append(filename)
+        # Modified but not staged
+        elif status[1] in ['M', 'D']:
+            unstaged.append(filename)
+        # Deleted but not staged
+        elif status[0] == ' ' and status[1] == 'D':
+            unstaged.append(filename)
+    
+    is_clean = len(unstaged) == 0 and len(untracked) == 0
+    return is_clean, {'unstaged': unstaged, 'untracked': untracked}
+
+
+def check_branch_divergence(branch: str) -> dict:
+    """
+    Check if branch has diverged from upstream.
+    
+    Returns:
+        {
+            'ahead': int,
+            'behind': int,
+            'diverged': bool,
+            'needs_rebase': bool,
+            'needs_pull': bool,
+            'upstream': str
+        }
+    """
+    # Get upstream info
+    success, output = run_git([
+        "for-each-ref",
+        "--format=%(upstream:short)|%(upstream:track)",
+        f"refs/heads/{branch}"
+    ], check=False)
+    
+    if not success or not output:
+        return {
+            'ahead': 0,
+            'behind': 0,
+            'diverged': False,
+            'needs_rebase': False,
+            'needs_pull': False,
+            'upstream': None
+        }
+    
+    parts = output.split('|')
+    upstream = parts[0] if parts[0] else None
+    track_info = parts[1] if len(parts) > 1 else ""
+    
+    ahead, behind = parse_tracking_info(track_info)
+    
+    diverged = ahead > 0 and behind > 0
+    needs_rebase = diverged
+    needs_pull = behind > 0 and ahead == 0
+    
+    return {
+        'ahead': ahead,
+        'behind': behind,
+        'diverged': diverged,
+        'needs_rebase': needs_rebase,
+        'needs_pull': needs_pull,
+        'upstream': upstream
+    }
+
+
+def check_detached_head() -> bool:
+    """Check if HEAD is detached."""
+    success, output = run_git(["symbolic-ref", "-q", "HEAD"], check=False)
+    return not success
+
+
+def check_empty_repository() -> bool:
+    """Check if repository has no commits yet."""
+    success, _ = run_git(["rev-parse", "HEAD"], check=False)
+    return not success
+
+
+def is_interactive() -> bool:
+    """Check if running in interactive terminal."""
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
 def get_staged_changes(config: Config) -> Optional[BranchInfo]:
     """
     Get information about currently staged changes.
@@ -340,6 +476,228 @@ def get_staged_changes(config: Config) -> Optional[BranchInfo]:
         insertions=insertions,
         deletions=deletions
     )
+
+
+# ============================================================================
+# PR WORKFLOW FUNCTIONS
+# ============================================================================
+
+def get_merge_base(branch: str, base: str = "main") -> Optional[str]:
+    """
+    Get merge base between branch and base.
+    
+    Args:
+        branch: Current branch name
+        base: Base branch name (default: main)
+        
+    Returns:
+        Merge base commit SHA or None if error
+    """
+    # Try with origin prefix first
+    success, merge_base = run_git(["merge-base", "HEAD", f"origin/{base}"], check=False)
+    if success and merge_base:
+        return merge_base
+    
+    # Try without origin prefix
+    success, merge_base = run_git(["merge-base", "HEAD", base], check=False)
+    if success and merge_base:
+        return merge_base
+    
+    return None
+
+
+def has_gh_cli() -> bool:
+    """Check if GitHub CLI is installed."""
+    try:
+        result = subprocess.run(
+            ["gh", "--version"],
+            capture_output=True,
+            text=True,
+            check=False
+        )
+        return result.returncode == 0
+    except FileNotFoundError:
+        return False
+
+
+def safe_push(branch: str) -> bool:
+    """
+    Safely push branch to remote.
+    
+    Args:
+        branch: Branch name to push
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    print(f"🔄 Pushing {branch} to origin...")
+    success, output = run_git(["push", "origin", branch], check=False)
+    
+    if success:
+        print("✅ Pushed successfully!")
+        return True
+    else:
+        print(f"❌ Push failed: {output}")
+        return False
+
+
+def create_pr_with_gh(title: str, body: str, base: str = "main") -> bool:
+    """
+    Create PR using GitHub CLI.
+    
+    Args:
+        title: PR title
+        body: PR description
+        base: Base branch (default: main)
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "create", "--title", title, "--body", body, "--base", base],
+            capture_output=True,
+            text=True,
+            check=False
+        )
+        
+        if result.returncode == 0:
+            print("✅ Pull request created successfully!")
+            print(result.stdout.strip())
+            return True
+        else:
+            print(f"❌ Failed to create PR: {result.stderr.strip()}")
+            return False
+    except Exception as e:
+        print(f"❌ Error creating PR: {e}")
+        return False
+
+
+def open_pr_in_browser(branch: str, base: str = "main"):
+    """
+    Open GitHub PR creation page in browser.
+    
+    Args:
+        branch: Source branch
+        base: Base branch (default: main)
+    """
+    # Get remote URL
+    success, remote_url = run_git(["config", "--get", "remote.origin.url"], check=False)
+    
+    if not success or not remote_url:
+        print("❌ Could not determine remote URL")
+        return
+    
+    # Parse GitHub URL
+    # Handle both SSH and HTTPS formats
+    if remote_url.startswith("git@github.com:"):
+        # SSH format: git@github.com:user/repo.git
+        repo_path = remote_url.replace("git@github.com:", "").replace(".git", "")
+    elif "github.com" in remote_url:
+        # HTTPS format: https://github.com/user/repo.git
+        repo_path = remote_url.split("github.com/")[1].replace(".git", "")
+    else:
+        print("❌ Not a GitHub repository")
+        return
+    
+    # Construct PR URL
+    pr_url = f"https://github.com/{repo_path}/compare/{base}...{branch}?expand=1"
+    
+    print(f"\n🌐 Opening PR creation page in browser...")
+    print(f"   {pr_url}")
+    
+    # Open in browser
+    import webbrowser
+    webbrowser.open(pr_url)
+
+
+def generate_pr_description(branch_info: BranchInfo, config: Config) -> Optional[str]:
+    """
+    Generate a PR description using Claude AI.
+    
+    Args:
+        branch_info: Information about the branch/changes
+        config: Configuration object
+        
+    Returns:
+        Generated PR description or None if error
+    """
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        print("❌ Error: ANTHROPIC_API_KEY environment variable not set.")
+        return None
+    
+    client = anthropic.Anthropic(api_key=api_key)
+    
+    # Build prompt for PR description
+    prompt = f"""Analyze this git diff and generate a pull request description.
+
+Branch: {branch_info.name}
+Base: {branch_info.upstream}
+Commits: {branch_info.ahead} commits ahead
+
+Commit messages:
+{branch_info.commit_log}
+
+Files changed:
+{branch_info.diff_stat}
+
+Diff content:
+{branch_info.diff_content}
+
+Generate a pull request description following this format:
+
+## Overview
+[Brief summary of what this PR does]
+
+## Changes
+[Bullet points of key changes]
+
+## Testing
+[How this was tested, if applicable]
+
+Requirements:
+1. Keep the overview concise (2-3 sentences)
+2. List key changes as bullet points
+3. Mention testing approach if test files were modified
+4. Use clear, professional language
+5. Focus on WHAT changed and WHY, not HOW
+
+Return ONLY the PR description, no explanations or additional text."""
+
+    # Call Claude API
+    for attempt in range(config.max_retries):
+        try:
+            message = client.messages.create(
+                model=config.model,
+                max_tokens=2048,
+                temperature=config.temperature,
+                messages=[
+                    {"role": "user", "content": prompt}
+                ]
+            )
+            
+            if message.content and len(message.content) > 0:
+                return message.content[0].text.strip()
+            
+        except anthropic.RateLimitError:
+            if attempt < config.max_retries - 1:
+                wait_time = 2 ** attempt
+                print(f"⚠️  Rate limited. Waiting {wait_time}s before retry...")
+                import time
+                time.sleep(wait_time)
+            else:
+                print("❌ Error: Rate limit exceeded after retries.")
+                return None
+                
+        except anthropic.APIError as e:
+            print(f"❌ API Error: {e}")
+            return None
+        except Exception as e:
+            print(f"❌ Unexpected error: {e}")
+            return None
+    
+    return None
 
 
 # ============================================================================
@@ -548,10 +906,9 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  %(prog)s                          # Scan all branches
-  %(prog)s --staged                 # Generate message for staged changes
+  %(prog)s                          # Generate message for staged changes (default)
   %(prog)s --branch feature/auth    # Process specific branch
-  %(prog)s --staged --auto-commit   # Generate and commit automatically
+  %(prog)s --pr                     # Create PR for current branch
   %(prog)s --json                   # Output as JSON
         """
     )
@@ -559,7 +916,7 @@ Examples:
     parser.add_argument(
         "--staged",
         action="store_true",
-        help="Generate message for staged changes"
+        help="(Deprecated: now default behavior) Generate message for staged changes"
     )
     
     parser.add_argument(
@@ -571,7 +928,13 @@ Examples:
     parser.add_argument(
         "--auto-commit",
         action="store_true",
-        help="Automatically commit with generated message (requires --staged)"
+        help="(Deprecated: now default behavior) Automatically commit with generated message"
+    )
+    
+    parser.add_argument(
+        "--pr",
+        action="store_true",
+        help="Create pull request for current branch (coming soon)"
     )
     
     parser.add_argument(
@@ -582,6 +945,15 @@ Examples:
     
     args = parser.parse_args()
     
+    # Show deprecation warnings
+    if args.staged:
+        print("⚠️  Warning: --staged is now the default behavior and will be removed in v2.0")
+        print("    Simply run 'python git_commit_agent.py' instead\n")
+    
+    if args.auto_commit:
+        print("⚠️  Warning: --auto-commit is now default behavior and will be removed in v2.0")
+        print("    Use --json to disable interactive prompts\n")
+    
     # Validate we're in a git repo
     if not is_git_repo():
         print("❌ Error: Not a git repository.")
@@ -591,64 +963,208 @@ Examples:
     # Load configuration
     config = load_config()
     
-    # Handle staged changes mode
-    if args.staged:
+    # Handle PR mode
+    if args.pr:
         if not args.json:
-            print("📝 Analyzing staged changes...")
+            print("🔄 Preparing to create pull request...")
         
-        branch_info = get_staged_changes(config)
-        if not branch_info:
-            print("ℹ️  No staged changes found.")
-            print("Stage changes with: git add <files>")
+        # Get current branch
+        success, current_branch = run_git(["branch", "--show-current"])
+        if not success or not current_branch:
+            print("❌ Error: Could not determine current branch")
+            sys.exit(1)
+        
+        # Check git state
+        state, state_msg = check_git_state()
+        if state != 'clean':
+            print(f"❌ Error: {state_msg}")
+            print("\nPlease resolve the ongoing operation before creating a PR.")
+            sys.exit(1)
+        
+        # Check for detached HEAD
+        if check_detached_head():
+            print("❌ Error: Cannot create PR from detached HEAD state")
+            sys.exit(1)
+        
+        # Check branch divergence
+        divergence = check_branch_divergence(current_branch)
+        
+        if divergence['needs_pull']:
+            print(f"⚠️  Branch is {divergence['behind']} commits behind {divergence['upstream']}")
+            if is_interactive() and not args.json:
+                confirm = input("Pull latest changes? [y/N]: ").strip().lower()
+                if confirm == 'y':
+                    print("🔄 Pulling latest changes...")
+                    success, output = run_git(["pull"], check=False)
+                    if not success:
+                        print(f"❌ Pull failed: {output}")
+                        sys.exit(1)
+                    print("✅ Pulled successfully!")
+                else:
+                    print("❌ Please pull latest changes before creating PR")
+                    sys.exit(1)
+            else:
+                print("❌ Please pull latest changes before creating PR")
+                sys.exit(1)
+        
+        if divergence['diverged']:
+            print(f"⚠️  Branch has diverged: {divergence['ahead']} ahead, {divergence['behind']} behind")
+            print("❌ Please rebase or merge before creating PR")
+            sys.exit(1)
+        
+        # Check for unpushed commits
+        if divergence['ahead'] == 0:
+            print("ℹ️  No unpushed commits found. Nothing to create PR for.")
             sys.exit(0)
         
-        commit_message = generate_commit_message(branch_info, config)
-        if not commit_message:
+        # Check for unstaged changes
+        is_clean, files = check_working_directory_clean()
+        if not is_clean:
+            if files['unstaged']:
+                print(f"⚠️  Warning: {len(files['unstaged'])} unstaged file(s)")
+                if is_interactive() and not args.json:
+                    print("\nUnstaged files:")
+                    for f in files['unstaged'][:5]:
+                        print(f"  - {f}")
+                    if len(files['unstaged']) > 5:
+                        print(f"  ... and {len(files['unstaged']) - 5} more")
+                    
+                    confirm = input("\nContinue anyway? [y/N]: ").strip().lower()
+                    if confirm != 'y':
+                        print("❌ Cancelled")
+                        sys.exit(0)
+        
+        # Offer to push if needed
+        if divergence['ahead'] > 0:
+            print(f"\n⚠️  Branch has {divergence['ahead']} unpushed commit(s)")
+            if is_interactive() and not args.json:
+                confirm = input("Push commits now? [y/N]: ").strip().lower()
+                if confirm == 'y':
+                    if not safe_push(current_branch):
+                        sys.exit(1)
+                else:
+                    print("❌ Please push commits before creating PR")
+                    sys.exit(1)
+            else:
+                print("❌ Please push commits before creating PR")
+                sys.exit(1)
+        
+        # Determine base branch (default to main)
+        base_branch = "main"
+        
+        # Get merge base
+        merge_base = get_merge_base(current_branch, base_branch)
+        if not merge_base:
+            print(f"⚠️  Could not find merge base with {base_branch}, trying master...")
+            base_branch = "master"
+            merge_base = get_merge_base(current_branch, base_branch)
+            if not merge_base:
+                print("❌ Could not determine base branch")
+                sys.exit(1)
+        
+        print(f"📝 Generating PR description against {base_branch}...")
+        
+        # Get diff from merge base
+        success, diff_stat = run_git(["diff", "--stat", f"{merge_base}..HEAD"])
+        if not success:
+            print("❌ Error getting diff")
             sys.exit(1)
+        
+        success, diff_content = run_git(["diff", f"{merge_base}..HEAD"])
+        if not success:
+            print("❌ Error getting diff")
+            sys.exit(1)
+        
+        # Truncate if needed
+        original_size = len(diff_content)
+        if len(diff_content) > config.max_diff_chars:
+            diff_content = diff_content[:config.max_diff_chars]
+            diff_content += f"\n\n... [Truncated: showing first {config.max_diff_chars} of {original_size} characters]"
+        
+        # Get commit log
+        success, commit_log = run_git(["log", "--oneline", f"{merge_base}..HEAD"])
+        if not success:
+            commit_log = ""
+        
+        # Parse stats
+        files_changed = 0
+        insertions = 0
+        deletions = 0
+        
+        stat_match = re.search(r'(\d+) files? changed', diff_stat)
+        if stat_match:
+            files_changed = int(stat_match.group(1))
+        
+        insert_match = re.search(r'(\d+) insertions?', diff_stat)
+        if insert_match:
+            insertions = int(insert_match.group(1))
+        
+        delete_match = re.search(r'(\d+) deletions?', diff_stat)
+        if delete_match:
+            deletions = int(delete_match.group(1))
+        
+        # Create BranchInfo for PR
+        pr_branch_info = BranchInfo(
+            name=current_branch,
+            upstream=f"origin/{base_branch}",
+            ahead=divergence['ahead'],
+            behind=0,
+            diff_stat=diff_stat,
+            diff_content=diff_content,
+            commit_log=commit_log,
+            files_changed=files_changed,
+            insertions=insertions,
+            deletions=deletions
+        )
+        
+        # Generate PR description
+        pr_description = generate_pr_description(pr_branch_info, config)
+        if not pr_description:
+            sys.exit(1)
+        
+        # Extract title from first line of description
+        lines = pr_description.split('\n')
+        pr_title = lines[0].replace('## Overview', '').strip()
+        if not pr_title:
+            pr_title = f"PR: {current_branch}"
         
         if args.json:
             output = {
-                "branch": branch_info.name,
-                "staged": True,
-                "suggested_message": commit_message,
-                "files_changed": branch_info.files_changed,
-                "insertions": branch_info.insertions,
-                "deletions": branch_info.deletions
+                "branch": current_branch,
+                "base": base_branch,
+                "title": pr_title,
+                "description": pr_description,
+                "files_changed": files_changed,
+                "insertions": insertions,
+                "deletions": deletions
             }
             print(json.dumps(output, indent=2))
         else:
-            print("\nSuggested commit message:\n")
-            print(commit_message)
-            print(f"\nFiles changed: {branch_info.files_changed} files ", end="")
-            print(f"(+{branch_info.insertions}, -{branch_info.deletions})")
-        
-        # Handle auto-commit
-        if args.auto_commit:
-            if args.json:
-                print("❌ Error: --auto-commit cannot be used with --json", file=sys.stderr)
-                sys.exit(1)
-            
             print("\n" + "━" * 80)
-            confirm = input("Commit with this message? [y/N]: ").strip().lower()
+            print("📋 Pull Request Preview")
+            print("━" * 80)
+            print(f"\nTitle: {pr_title}")
+            print(f"Branch: {current_branch} → {base_branch}")
+            print(f"Files: {files_changed} files (+{insertions}, -{deletions})")
+            print("\nDescription:")
+            print(pr_description)
+            print("\n" + "━" * 80)
             
-            if confirm == 'y':
-                # Write message to temp file and commit
-                import tempfile
-                with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt') as f:
-                    f.write(commit_message)
-                    temp_file = f.name
+            if is_interactive():
+                confirm = input("Create PR with this description? [y/N]: ").strip().lower()
                 
-                try:
-                    success, output = run_git(["commit", "-F", temp_file])
-                    if success:
-                        print("✅ Committed successfully!")
-                    else:
-                        print(f"❌ Commit failed: {output}")
-                        sys.exit(1)
-                finally:
-                    os.unlink(temp_file)
-            else:
-                print("❌ Commit cancelled.")
+                if confirm == 'y':
+                    # Try GitHub CLI first
+                    if has_gh_cli():
+                        if create_pr_with_gh(pr_title, pr_description, base_branch):
+                            sys.exit(0)
+                        else:
+                            print("\n⚠️  GitHub CLI failed, falling back to browser...")
+                    
+                    # Fallback to browser
+                    open_pr_in_browser(current_branch, base_branch)
+                else:
+                    print("❌ PR creation cancelled")
         
         sys.exit(0)
     
@@ -703,60 +1219,114 @@ Examples:
         
         sys.exit(0)
     
-    # Default mode: scan all branches
+    # Default mode: Generate message for staged changes
     if not args.json:
-        print("🔍 Scanning repository for unpushed changes...")
+        # Check git state before proceeding
+        state, state_msg = check_git_state()
+        if state != 'clean':
+            print(f"❌ Error: {state_msg}")
+            print("\nPlease resolve the ongoing operation before committing:")
+            if state == 'merging':
+                print("  git merge --abort  # to abort the merge")
+                print("  # or resolve conflicts and commit")
+            elif state == 'rebasing':
+                print("  git rebase --abort  # to abort the rebase")
+                print("  # or resolve conflicts and continue")
+            elif state == 'cherry-picking':
+                print("  git cherry-pick --abort  # to abort the cherry-pick")
+            elif state == 'reverting':
+                print("  git revert --abort  # to abort the revert")
+            sys.exit(1)
+        
+        # Check for detached HEAD
+        if check_detached_head():
+            print("⚠️  Warning: You are in 'detached HEAD' state.")
+            print("    Commits made in this state may be lost.")
+            if is_interactive():
+                confirm = input("Continue anyway? [y/N]: ").strip().lower()
+                if confirm != 'y':
+                    print("❌ Cancelled.")
+                    sys.exit(0)
+        
+        # Check for empty repository
+        if check_empty_repository():
+            print("ℹ️  This appears to be your first commit in this repository.")
+        
+        print("📝 Analyzing staged changes...")
     
-    branches = get_all_branches_with_status()
-    
-    if not branches:
-        print("ℹ️  No branches with unpushed commits found.")
+    branch_info = get_staged_changes(config)
+    if not branch_info:
+        # Show helpful context when no staged changes
+        success, status_output = run_git(["status", "--short"], check=False)
+        
+        print("ℹ️  No staged changes found.\n")
+        
+        if success and status_output:
+            # Parse modified files
+            modified_files = []
+            for line in status_output.split('\n'):
+                if line and not line.startswith('??'):
+                    # Extract filename (skip status markers)
+                    parts = line.strip().split(maxsplit=1)
+                    if len(parts) > 1:
+                        modified_files.append(parts[1])
+            
+            if modified_files:
+                print("Modified files (not staged):")
+                for f in modified_files[:10]:  # Show max 10 files
+                    print(f"  - {f}")
+                if len(modified_files) > 10:
+                    print(f"  ... and {len(modified_files) - 10} more")
+                print()
+        
+        print("Stage changes with:")
+        print("  git add <files>")
+        print("\nOr create a PR for current branch:")
+        print("  python git_commit_agent.py --pr")
         sys.exit(0)
     
-    # Interactive selection
-    if not args.json:
-        selected_branch = interactive_select_branch(branches)
-        if not selected_branch:
-            print("\n👋 Exiting.")
-            sys.exit(0)
-        
-        # Process selected branch
-        branch_tuple = next(b for b in branches if b[0] == selected_branch)
-        branch_name, upstream, ahead, behind = branch_tuple
-        
-        print(f"\n📝 Analyzing branch: {branch_name}...")
-        
-        branch_info = get_branch_diff(branch_name, upstream, config)
-        if not branch_info:
-            print(f"❌ Error: Could not get diff for branch '{branch_name}'.")
-            sys.exit(1)
-        
-        commit_message = generate_commit_message(branch_info, config)
-        if not commit_message:
-            sys.exit(1)
-        
-        print_branch_info(branch_info, commit_message)
-        print(f"\n💡 Tip: Use --branch {branch_name} to process this branch directly")
+    commit_message = generate_commit_message(branch_info, config)
+    if not commit_message:
+        sys.exit(1)
+    
+    if args.json:
+        output = {
+            "branch": branch_info.name,
+            "staged": True,
+            "suggested_message": commit_message,
+            "files_changed": branch_info.files_changed,
+            "insertions": branch_info.insertions,
+            "deletions": branch_info.deletions
+        }
+        print(json.dumps(output, indent=2))
     else:
-        # JSON mode: process all branches
-        results = []
-        for branch_name, upstream, ahead, behind in branches:
-            branch_info = get_branch_diff(branch_name, upstream, config)
-            if branch_info:
-                commit_message = generate_commit_message(branch_info, config)
-                if commit_message:
-                    results.append({
-                        "branch": branch_info.name,
-                        "upstream": branch_info.upstream,
-                        "ahead": branch_info.ahead,
-                        "behind": branch_info.behind,
-                        "suggested_message": commit_message,
-                        "files_changed": branch_info.files_changed,
-                        "insertions": branch_info.insertions,
-                        "deletions": branch_info.deletions
-                    })
+        print("\nSuggested commit message:\n")
+        print(commit_message)
+        print(f"\nFiles changed: {branch_info.files_changed} files ", end="")
+        print(f"(+{branch_info.insertions}, -{branch_info.deletions})")
         
-        print(json.dumps({"branches": results}, indent=2))
+        # Always prompt for commit (new default behavior)
+        print("\n" + "━" * 80)
+        confirm = input("Commit with this message? [y/N]: ").strip().lower()
+        
+        if confirm == 'y':
+            # Write message to temp file and commit
+            import tempfile
+            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt') as f:
+                f.write(commit_message)
+                temp_file = f.name
+            
+            try:
+                success, output = run_git(["commit", "-F", temp_file])
+                if success:
+                    print("✅ Committed successfully!")
+                else:
+                    print(f"❌ Commit failed: {output}")
+                    sys.exit(1)
+            finally:
+                os.unlink(temp_file)
+        else:
+            print("❌ Commit cancelled.")
 
 
 if __name__ == "__main__":
