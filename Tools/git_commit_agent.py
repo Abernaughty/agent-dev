@@ -541,13 +541,14 @@ def safe_push(branch: str) -> bool:
         return False
 
 
-def create_pr_with_gh(title: str, body: str, base: str = "main") -> bool:
+def create_pr_with_gh(title: str, body: str, head: str, base: str = "main") -> bool:
     """
     Create PR using GitHub CLI.
     
     Args:
         title: PR title
         body: PR description
+        head: Source branch name
         base: Base branch (default: main)
         
     Returns:
@@ -555,7 +556,7 @@ def create_pr_with_gh(title: str, body: str, base: str = "main") -> bool:
     """
     try:
         result = subprocess.run(
-            ["gh", "pr", "create", "--title", title, "--body", body, "--base", base],
+            ["gh", "pr", "create", "--title", title, "--body", body, "--head", head, "--base", base],
             capture_output=True,
             text=True,
             check=False
@@ -1156,7 +1157,7 @@ Examples:
                 if confirm == 'y':
                     # Try GitHub CLI first
                     if has_gh_cli():
-                        if create_pr_with_gh(pr_title, pr_description, base_branch):
+                        if create_pr_with_gh(pr_title, pr_description, current_branch, base_branch):
                             sys.exit(0)
                         else:
                             print("\n⚠️  GitHub CLI failed, falling back to browser...")
