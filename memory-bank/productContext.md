@@ -1,28 +1,12 @@
-# Product Context - Agent Development Environment
+# Product Context
 
-## Problem Statement
-Developers need secure environments where AI agents can assist with Svelte + Azure Functions projects without compromising system security or data integrity.
+## Problem
+Developers need safe environments where AI agents can assist with code and automation tasks without compromising system security or data integrity.
 
-## Current Challenges
-- Direct AI agent access to development environments poses security risks
-- Lack of standardized, secure interfaces for AI-developer collaboration
-- Need for isolated, reproducible development environments
-- Difficulty in controlling and auditing AI agent actions
-
-## Solution Approach
-Containerized development environment with MCP (Model Context Protocol) servers providing controlled interfaces for AI agents to:
-- Perform safe file operations within project workspace
-- Execute approved commands (npm, build, test, lint)
-- Access development tools without system-wide permissions
+## Solution
+Provide a hardened, containerized workspace with MCP servers that expose minimal, auditable interfaces for file and command operations.
 
 ## Target Users
-- Developers working with Svelte applications
-- Teams building Azure Functions
-- AI-assisted development workflows
-- Security-conscious development environments
-
-## Key Differentiators
-- Security-first design with container isolation
-- MCP protocol for standardized AI agent communication
-- Read-only workspace mounting for safety
-- Comprehensive development tool integration
+- Developers integrating AI agents into local workflows
+- Teams building secure, container-based dev setups
+- Power users who want reproducible agent tooling

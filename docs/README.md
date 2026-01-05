@@ -16,7 +16,7 @@ Provides secure file operations within the workspace:
 
 ### [MCP Shell Server](./mcp-shell-server.md)  
 Provides controlled command execution:
-- **Allowed Commands**: npm, node, func, git, ls, cat, echo
+- **Allowed Commands**: npm, node, git, ls, cat, echo
 - **Security**: Command allowlisting, argument validation, timeouts
 - **Use Cases**: Installing dependencies, running tests, building projects
 
@@ -184,11 +184,11 @@ echo '{"jsonrpc":"2.0","id":2,"method":"shell/exec","params":{"command":"npm","a
 
 ### Creating New Files
 ```bash
-# Create component directory
-echo '{"jsonrpc":"2.0","id":1,"method":"fs/mkdir","params":{"path":"src/components"}}' | docker run --rm -i -v "$(pwd):/workspace:ro" mcp-fs-server
+# Create notes directory
+echo '{"jsonrpc":"2.0","id":1,"method":"fs/mkdir","params":{"path":"notes"}}' | docker run --rm -i -v "$(pwd):/workspace:ro" mcp-fs-server
 
-# Write component file
-echo '{"jsonrpc":"2.0","id":2,"method":"fs/write","params":{"path":"src/components/Button.svelte","content":"<button>Click me</button>"}}' | docker run --rm -i -v "$(pwd):/workspace:ro" mcp-fs-server
+# Write sample file
+echo '{"jsonrpc":"2.0","id":2,"method":"fs/write","params":{"path":"notes/README.txt","content":"Project notes go here."}}' | docker run --rm -i -v "$(pwd):/workspace:ro" mcp-fs-server
 ```
 
 ## Development Guidelines

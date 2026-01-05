@@ -7,7 +7,6 @@ class MCPShellServer {
     this.allowedCommands = {
       'npm': ['install', 'test', 'run', 'build', 'start', 'dev', 'lint'],
       'node': ['--version'],
-      'func': ['init', 'new', 'start', '--help'],
       'git': ['status', 'log', '--version'],
       'ls': ['-la', '-l'],
       'cat': [],

@@ -8,15 +8,14 @@ help:
 	@echo ""
 	@echo "Available commands:"
 	@echo "  build       Build all containers"
-	@echo "  up          Start development environment (web, func, azurite)"
+	@echo "  up          Start development environment (dev)"
 	@echo "  down        Stop all services"
 	@echo "  logs        View logs from all services"
 	@echo "  clean       Remove all containers and volumes"
 	@echo "  test-mcp    Test MCP servers (Phase 2)"
 	@echo "  test-fs     Test filesystem MCP server"
 	@echo "  test-shell  Test shell MCP server"
-	@echo "  shell-web   Open shell in web container"
-	@echo "  shell-func  Open shell in func container"
+	@echo "  shell-dev   Open shell in dev container"
 
 # Build all containers
 build:
@@ -24,13 +23,9 @@ build:
 
 # Start development environment
 up:
-	docker-compose up -d web func azurite
+	docker-compose up -d dev
 	@echo ""
 	@echo "Development environment started!"
-	@echo "  Svelte dev server: http://localhost:3000"
-	@echo "  VS Code Server: http://localhost:8080"
-	@echo "  Azure Functions: http://localhost:7071"
-	@echo "  Azurite Blob: http://localhost:10000"
 	@echo ""
 	@echo "Use 'make logs' to view container logs"
 
@@ -62,18 +57,12 @@ test-shell:
 	echo '{"jsonrpc": "2.0", "id": 1, "method": "shell/exec", "params": {"command": "ls", "args": ["-la"]}}' | docker-compose run --rm -i mcp-shell
 
 # Development helpers
-shell-web:
-	docker-compose exec web /bin/bash
-
-shell-func:
-	docker-compose exec func /bin/bash
+shell-dev:
+	docker-compose exec dev /bin/bash
 
 # Build individual containers
-build-web:
-	docker-compose build web
-
-build-func:
-	docker-compose build func
+build-dev:
+	docker-compose build dev
 
 build-mcp-fs:
 	docker-compose build mcp-fs

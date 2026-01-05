@@ -97,7 +97,6 @@ Returns the complete list of allowed commands and their permitted arguments.
     "allowedCommands": {
       "npm": ["install", "test", "run", "build", "start", "dev", "lint"],
       "node": ["--version"],
-      "func": ["init", "new", "start", "--help"],
       "git": ["status", "log", "--version"],
       "ls": ["-la", "-l"],
       "cat": [],
@@ -117,12 +116,6 @@ Returns the complete list of allowed commands and their permitted arguments.
 - `npm start` - Start application
 - `npm dev` - Start development server
 - `npm lint` - Run linting
-
-### Azure Functions CLI
-- `func init` - Initialize new function app
-- `func new` - Create new function
-- `func start` - Start Functions runtime
-- `func --help` - Show help
 
 ### Development Tools
 - `node --version` - Check Node.js version
@@ -186,14 +179,14 @@ echo '{"jsonrpc":"2.0","id":2,"method":"shell/exec","params":{"command":"npm","a
 {"jsonrpc":"2.0","id":2,"result":{"command":"npm test","exitCode":0,"stdout":"✓ All tests passed","stderr":"","success":true}}
 ```
 
-### Starting Development Server
+### Starting a Development Script
 
 ```bash
 # Request
 echo '{"jsonrpc":"2.0","id":3,"method":"shell/exec","params":{"command":"npm","args":["run","dev"]}}' | docker run --rm -i -v "$(pwd):/workspace" mcp-shell-server
 
 # Response  
-{"jsonrpc":"2.0","id":3,"result":{"command":"npm run dev","exitCode":0,"stdout":"Server running on http://localhost:3000","stderr":"","success":true}}
+{"jsonrpc":"2.0","id":3,"result":{"command":"npm run dev","exitCode":0,"stdout":"Server running","stderr":"","success":true}}
 ```
 
 ### Checking Project Status
@@ -280,16 +273,13 @@ CMD ["node", "server.js"]
 
 ## Common Workflows
 
-### Svelte Development
+### Project Workflow
 
 ```javascript
-// Initialize new Svelte project
-{"method": "shell/exec", "params": {"command": "npm", "args": ["create", "svelte@latest", "my-app"]}}
-
 // Install dependencies
 {"method": "shell/exec", "params": {"command": "npm", "args": ["install"]}}
 
-// Start development server
+// Run development script
 {"method": "shell/exec", "params": {"command": "npm", "args": ["run", "dev"]}}
 
 // Run tests
@@ -297,19 +287,6 @@ CMD ["node", "server.js"]
 
 // Build for production
 {"method": "shell/exec", "params": {"command": "npm", "args": ["run", "build"]}}
-```
-
-### Azure Functions Development
-
-```javascript
-// Initialize Functions app
-{"method": "shell/exec", "params": {"command": "func", "args": ["init", "MyFunctionApp", "--javascript"]}}
-
-// Create new function
-{"method": "shell/exec", "params": {"command": "func", "args": ["new", "--name", "HttpTrigger", "--template", "HttpTrigger"]}}
-
-// Start Functions runtime
-{"method": "shell/exec", "params": {"command": "func", "args": ["start"]}}
 ```
 
 ## Development Notes

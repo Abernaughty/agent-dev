@@ -268,14 +268,14 @@ echo '{"jsonrpc":"2.0","id":1,"method":"fs/read","params":{"path":"package.json"
 {"jsonrpc":"2.0","id":1,"result":{"path":"package.json","content":"{\n  \"name\": \"my-app\"\n}"}}
 ```
 
-### Creating a New Component
+### Creating a New File
 
 ```bash
 # Create directory
-echo '{"jsonrpc":"2.0","id":1,"method":"fs/mkdir","params":{"path":"src/components"}}' | docker run --rm -i -v "$(pwd):/workspace:ro" mcp-fs-server
+echo '{"jsonrpc":"2.0","id":1,"method":"fs/mkdir","params":{"path":"notes"}}' | docker run --rm -i -v "$(pwd):/workspace:ro" mcp-fs-server
 
-# Write component file
-echo '{"jsonrpc":"2.0","id":2,"method":"fs/write","params":{"path":"src/components/Button.svelte","content":"<button>Click me</button>"}}' | docker run --rm -i -v "$(pwd):/workspace:ro" mcp-fs-server
+# Write file
+echo '{"jsonrpc":"2.0","id":2,"method":"fs/write","params":{"path":"notes/README.txt","content":"Project notes go here."}}' | docker run --rm -i -v "$(pwd):/workspace:ro" mcp-fs-server
 ```
 
 ## Container Configuration

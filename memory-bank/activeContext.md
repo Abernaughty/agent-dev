@@ -1,44 +1,34 @@
 # Active Context - Agent Development Environment
 
-## Current Focus: Phase 3 - Development Environment 🚀
-Testing VS Code integration and complete development workflow.
+## Current Focus: Phase 3 - Agent Workflow Readiness
+Validate the general-purpose dev container, workspace layout, and MCP server usability for agent-driven workflows.
 
 ## Phase 3 Objectives
-1. **VS Code Server Integration Testing**
-   - Verify VS Code Server accessibility on port 8080
-   - Test workspace mounting and permissions
-   - Validate development tools and extensions
+1. **Dev Container Validation**
+   - Verify tools (git, node, python, jq, ripgrep)
+   - Confirm workspace mount permissions
+   - Ensure container stays stable for long-running sessions
 
-2. **Auto-initialization Testing**
-   - Test Svelte project creation in web container
-   - Test Azure Functions project creation in func container
-   - Verify cross-container compatibility
+2. **Workflow Validation**
+   - Test edit → run → test loops in `/workspace`
+   - Validate shell commands via MCP server
+   - Verify MCP filesystem operations on typical project layouts
 
-3. **Development Workflow Validation**
-   - Test complete cycle: edit → build → test → run
-   - Verify hot reloading with file watching
-   - Test npm commands through containers
-
-4. **Cross-container Communication**
-   - Test Svelte app → Azure Functions communication
-   - Verify Azurite storage integration
-   - Validate dev-network connectivity
+3. **Documentation Alignment**
+   - Ensure docs match the new dev container and MCP allowlists
+   - Remove references to removed frameworks/services
 
 ## Testing Plan
-1. Build and start development containers
-2. Access VS Code Server at http://localhost:8080
-3. Test auto-initialization of both project types
-4. Verify hot reloading and development workflow
-5. Test container communication and networking
+1. Build and start the dev container
+2. Verify MCP servers list/exec expected commands
+3. Create a small sample project in `/workspace` and run scripts
 
 ## Success Criteria
-- VS Code Server accessible and functional
-- Projects auto-initialize correctly
-- Development workflow works end-to-end
-- All containers communicate properly
-- MCP servers remain functional alongside development
+- Dev container is stable and usable for agent workflows
+- MCP servers operate correctly with current allowlists
+- Documentation matches the updated architecture
 
 ## Previous Completions
-- ✅ Phase 1: Core Infrastructure 
+- ✅ Phase 1: Core Infrastructure
 - ✅ Phase 2: MCP Server Implementation + Documentation
-- 🔄 Phase 3: Development Environment (IN PROGRESS)
+- 🔄 Phase 3: Agent Workflow Readiness (IN PROGRESS)

@@ -2,19 +2,17 @@
 
 ## Container Architecture
 ```
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Web Container │    │  Func Container │    │ Azurite Storage │
-│   (Svelte Dev)  │    │ (Azure Funcs)   │    │   (Emulator)    │
-│   Port: 3000    │    │   Port: 7071    │    │  Ports: 10000+  │
-│   Network: dev  │    │  Network: dev   │    │  Network: dev   │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
-         │                       │                       │
-         └───────────────────────┼───────────────────────┘
-                                 │
-              ┌─────────────────────────────────┐
-              │        Development Network       │
-              │        (172.20.0.0/16)         │
-              └─────────────────────────────────┘
+┌──────────────────────────────┐
+│        Dev Container         │
+│   (Agent Development Tools)  │
+│   Network: dev-network       │
+└──────────────────────────────┘
+               │
+               │
+┌─────────────────────────────────┐
+│        Development Network       │
+│        (172.20.0.0/16)           │
+└─────────────────────────────────┘
 
 ┌─────────────────┐    ┌─────────────────┐
 │  MCP-FS Server  │    │ MCP-Shell Server│
@@ -27,15 +25,15 @@
 ## Security Patterns
 - **Defense in Depth**: Multiple security layers (container, network, filesystem)
 - **Principle of Least Privilege**: Minimal permissions, dropped capabilities
-- **Isolation**: Network isolation for MCP servers, read-only workspace
-- **Immutable Infrastructure**: Read-only root filesystems
+- **Isolation**: Network isolation for MCP servers, controlled workspace access
+- **Immutable Infrastructure**: Read-only root filesystems by default
 
 ## Communication Patterns
 - **MCP Protocol**: JSON-RPC over stdio for agent communication
 - **Container Orchestration**: Docker Compose for service management
-- **Volume Mounting**: Read-only workspace, writable tmp/cache directories
+- **Volume Mounting**: Dedicated `/workspace` mount for projects
 
 ## Development Patterns
-- **Auto-initialization**: Containers detect and create missing project files
-- **Hot Reloading**: Development servers with file watching
-- **Multi-stage Build**: Optimized container images
+- **General-Purpose Tooling**: Dev container ships common CLIs
+- **Explicit Bootstrapping**: Projects created intentionally in `/workspace`
+- **Minimal Assumptions**: No framework-specific scaffolding
