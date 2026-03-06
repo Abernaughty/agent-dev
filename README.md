@@ -113,3 +113,10 @@ These files are committed intentionally and are part of the AI-assisted developm
 - ✅ Phase 3: Git commit agent tool
 - 🚧 Phase 4: Additional MCP tools (browser, search)
 - 🚧 Phase 5: Streamlit dashboard for agent monitoring
+
+## Related Projects
+
+- [langchain-price-agent](https://github.com/Abernaughty/langchain-price-agent) — LangChain/LangGraph
+  agent experiments designed to run in environments like this one
+- [code-vector-sync](https://github.com/Abernaughty/code-vector-sync) — MCP server for semantic
+  code search (companion tool)
