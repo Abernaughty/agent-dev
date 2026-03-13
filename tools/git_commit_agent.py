@@ -109,11 +109,12 @@ def run_git(args: List[str], check: bool = True) -> Tuple[bool, str]:
             errors='replace',
             check=check
         )
+        # When check=False, subprocess does not raise on non-zero exit — handle explicitly
+        if result.returncode != 0:
+            return False, result.stderr.strip() if result.stderr else result.stdout.strip()
         return True, result.stdout.strip()
     except subprocess.CalledProcessError as e:
-        if check:
-            return False, e.stderr.strip() if e.stderr else ""
-        return False, e.stdout.strip() if e.stdout else ""
+        return False, e.stderr.strip() if e.stderr else e.stdout.strip()
     except FileNotFoundError:
         print("❌ Error: git command not found. Please install git.")
         sys.exit(1)
@@ -674,8 +675,26 @@ Examples:
         ahead, behind = parse_tracking_info(track_info)
         
         if ahead == 0:
-            print(f"ℹ️  Branch '{args.branch}' has no unpushed commits.")
-            sys.exit(0)
+            # No commits ahead of tracking ref — fall back to comparing against
+            # the base branch in case the branch was pushed but not yet merged,
+            # or has no tracking ref set.
+            base_ahead = 0
+            for base in ["origin/main", "origin/master"]:
+                ok, _ = run_git(["rev-parse", "--verify", base], check=False)
+                if ok:
+                    ok2, count_str = run_git(
+                        ["rev-list", "--count", f"{base}..{args.branch}"],
+                        check=False
+                    )
+                    if ok2:
+                        try:
+                            base_ahead = int(count_str)
+                        except ValueError:
+                            pass
+                    break
+            if base_ahead == 0:
+                print(f"ℹ️  Branch '{args.branch}' has no unpushed commits.")
+                sys.exit(0)
         
         branch_info = get_branch_diff(args.branch, upstream, config)
         if not branch_info:
