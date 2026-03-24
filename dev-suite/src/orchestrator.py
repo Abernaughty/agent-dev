@@ -183,6 +183,7 @@ Do not include any text before or after the JSON.{memory_block}"""
         blueprint = Blueprint(**blueprint_data)
     except (json.JSONDecodeError, Exception) as e:
         trace.append(f"architect: failed to parse blueprint: {e}")
+        logger.error("[ARCH] Blueprint parse failed: %s", e)
         return {
             "status": WorkflowStatus.FAILED,
             "error_message": f"Architect failed to produce valid Blueprint: {e}",
@@ -362,6 +363,13 @@ def route_after_qa(state: AgentState) -> Literal["developer", "architect", "__en
 
     if state.status == WorkflowStatus.PASSED:
         logger.info("[ROUTER] -> END (passed)")
+        return END
+
+    # D2 fix: FAILED is a terminal state — always exit the graph.
+    # This catches blueprint parse failures, missing code/blueprint,
+    # and any other unrecoverable error from any node.
+    if state.status == WorkflowStatus.FAILED:
+        logger.info("[ROUTER] -> END (failed: %s)", state.error_message)
         return END
 
     if state.retry_count >= MAX_RETRIES:
