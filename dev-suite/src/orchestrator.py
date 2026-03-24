@@ -9,7 +9,7 @@ import json
 import logging
 import os
 from enum import Enum
-from typing import Literal
+from typing import Any, Literal, TypedDict
 
 from dotenv import load_dotenv
 from langchain_anthropic import ChatAnthropic
@@ -45,31 +45,44 @@ class WorkflowStatus(str, Enum):
     ESCALATED = "escalated"
 
 
+class GraphState(TypedDict, total=False):
+    """State that flows through the LangGraph state machine.
+
+    D1 fix: Uses TypedDict (not Pydantic BaseModel) for reliable dict-merge
+    semantics in LangGraph. Fields present in a node's return dict replace
+    the existing value; fields absent are left unchanged. This prevents the
+    state-reset bug where Pydantic defaults (0, "", []) silently overwrite
+    accumulated values like retry_count and tokens_used.
+    """
+
+    task_description: str
+    blueprint: Blueprint | None
+    generated_code: str
+    failure_report: FailureReport | None
+    status: WorkflowStatus
+    retry_count: int
+    tokens_used: int
+    error_message: str
+    memory_context: list[str]
+    trace: list[str]
+
+
 class AgentState(BaseModel):
-    """State that flows through the LangGraph state machine."""
+    """Pydantic model used at the boundary — for constructing the initial
+    state and wrapping the final result with validation and attribute access.
 
-    # Task input
+    Not used as the LangGraph graph state (that's GraphState TypedDict).
+    """
+
     task_description: str = ""
-
-    # Architect output
     blueprint: Blueprint | None = None
-
-    # Lead Dev output
     generated_code: str = ""
-
-    # QA output
     failure_report: FailureReport | None = None
-
-    # Workflow control
     status: WorkflowStatus = WorkflowStatus.PLANNING
     retry_count: int = 0
     tokens_used: int = 0
     error_message: str = ""
-
-    # Memory context
     memory_context: list[str] = []
-
-    # Conversation trace (for observability)
     trace: list[str] = []
 
 
@@ -111,7 +124,90 @@ def _get_qa_llm():
     )
 
 
-# -- Memory Helper --
+# -- Helpers --
+
+def _extract_text_content(content: Any) -> str:
+    """Extract text from an LLM response's content field.
+
+    D3 fix: Handles both string content (Anthropic) and list-of-blocks
+    content (Google GenAI / Gemini with thinking mode). When content is
+    a list, concatenates all text blocks.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and "text" in block:
+                parts.append(block["text"])
+            elif hasattr(block, "text"):
+                parts.append(block.text)
+        return "\n".join(parts)
+    return str(content)
+
+
+def _extract_json(raw: str) -> dict:
+    """Extract a JSON object from LLM output text.
+
+    D3 fix: Handles clean JSON, code-fenced JSON, and JSON embedded
+    in preamble text (scans for first { and last }).
+    """
+    text = raw.strip()
+
+    # Try 1: direct parse
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Try 2: code fence extraction
+    if "```" in text:
+        parts = text.split("```")
+        for part in parts[1::2]:
+            inner = part.strip()
+            if inner.startswith("json"):
+                inner = inner[4:].strip()
+            try:
+                return json.loads(inner)
+            except json.JSONDecodeError:
+                continue
+
+    # Try 3: scan for first { and last }
+    first_brace = text.find("{")
+    last_brace = text.rfind("}")
+    if first_brace != -1 and last_brace > first_brace:
+        try:
+            return json.loads(text[first_brace:last_brace + 1])
+        except json.JSONDecodeError:
+            pass
+
+    raise json.JSONDecodeError(
+        f"No valid JSON found in response ({len(text)} chars): {text[:200]}...",
+        text, 0,
+    )
+
+
+def _extract_token_count(response: Any) -> int:
+    """Extract total token count from an LLM response.
+
+    Handles different metadata formats across providers (Anthropic, Google).
+    Returns 0 if token count cannot be determined.
+    """
+    meta = getattr(response, "usage_metadata", None)
+    if not meta:
+        return 0
+    if isinstance(meta, dict):
+        for key in ("total_tokens", "totalTokenCount", "total_token_count"):
+            if key in meta:
+                return int(meta[key])
+        input_t = meta.get("input_tokens", meta.get("prompt_tokens", 0))
+        output_t = meta.get("output_tokens", meta.get("completion_tokens", 0))
+        if input_t or output_t:
+            return int(input_t) + int(output_t)
+    return 0
+
 
 def _fetch_memory_context(task_description: str) -> list[str]:
     """Query Chroma for relevant context across all tiers."""
@@ -125,20 +221,21 @@ def _fetch_memory_context(task_description: str) -> list[str]:
 
 # -- Node Functions --
 
-def architect_node(state: AgentState) -> dict:
+def architect_node(state: GraphState) -> dict:
     """Architect: generates a structured Blueprint from the task description.
 
     Queries memory for context, then uses Gemini to plan the task.
     Never writes code -- only produces a Blueprint JSON.
     """
-    trace = list(state.trace)
+    trace = list(state.get("trace", []))
     trace.append("architect: starting planning")
 
+    retry_count = state.get("retry_count", 0)
+    tokens_used = state.get("tokens_used", 0)
     logger.info("[ARCH] retry_count=%d, tokens_used=%d, status=%s",
-                state.retry_count, state.tokens_used, state.status.value)
+                retry_count, tokens_used, state.get("status", "unknown"))
 
-    # Fetch memory context
-    memory_context = _fetch_memory_context(state.task_description)
+    memory_context = _fetch_memory_context(state.get("task_description", ""))
 
     memory_block = ""
     if memory_context:
@@ -158,12 +255,12 @@ Respond with ONLY a valid JSON object matching this schema:
 
 Do not include any text before or after the JSON.{memory_block}"""
 
-    # Include failure context if this is a re-plan after escalation
-    user_msg = state.task_description
-    if state.failure_report and state.failure_report.is_architectural:
+    user_msg = state.get("task_description", "")
+    failure_report = state.get("failure_report")
+    if failure_report and failure_report.is_architectural:
         user_msg += f"\n\nPREVIOUS ATTEMPT FAILED (architectural issue):\n"
-        user_msg += f"Errors: {', '.join(state.failure_report.errors)}\n"
-        user_msg += f"Recommendation: {state.failure_report.recommendation}"
+        user_msg += f"Errors: {', '.join(failure_report.errors)}\n"
+        user_msg += f"Recommendation: {failure_report.recommendation}"
 
     llm = _get_architect_llm()
     response = llm.invoke([
@@ -171,15 +268,9 @@ Do not include any text before or after the JSON.{memory_block}"""
         HumanMessage(content=user_msg),
     ])
 
-    # Parse the Blueprint from response
     try:
-        raw = response.content.strip()
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-            raw = raw.strip()
-        blueprint_data = json.loads(raw)
+        raw = _extract_text_content(response.content)
+        blueprint_data = _extract_json(raw)
         blueprint = Blueprint(**blueprint_data)
     except (json.JSONDecodeError, Exception) as e:
         trace.append(f"architect: failed to parse blueprint: {e}")
@@ -192,8 +283,7 @@ Do not include any text before or after the JSON.{memory_block}"""
         }
 
     trace.append(f"architect: blueprint created for {len(blueprint.target_files)} files")
-    tokens_used = state.tokens_used + (response.usage_metadata.get("total_tokens", 0) if response.usage_metadata else 0)
-
+    tokens_used = tokens_used + _extract_token_count(response)
     logger.info("[ARCH] done. tokens_used now=%d", tokens_used)
 
     return {
@@ -205,18 +295,18 @@ Do not include any text before or after the JSON.{memory_block}"""
     }
 
 
-def developer_node(state: AgentState) -> dict:
-    """Lead Dev: executes the Blueprint and generates code.
-
-    Receives a structured Blueprint JSON and writes code accordingly.
-    """
-    trace = list(state.trace)
+def developer_node(state: GraphState) -> dict:
+    """Lead Dev: executes the Blueprint and generates code."""
+    trace = list(state.get("trace", []))
     trace.append("developer: starting build")
 
+    retry_count = state.get("retry_count", 0)
+    tokens_used = state.get("tokens_used", 0)
     logger.info("[DEV] retry_count=%d, tokens_used=%d, status=%s",
-                state.retry_count, state.tokens_used, state.status.value)
+                retry_count, tokens_used, state.get("status", "unknown"))
 
-    if not state.blueprint:
+    blueprint = state.get("blueprint")
+    if not blueprint:
         trace.append("developer: no blueprint provided")
         return {
             "status": WorkflowStatus.FAILED,
@@ -234,16 +324,16 @@ at the top of each file section, like:
 Follow the Blueprint exactly. Respect all constraints.
 Write clean, well-documented code."""
 
-    user_msg = f"Blueprint:\n{state.blueprint.model_dump_json(indent=2)}"
+    user_msg = f"Blueprint:\n{blueprint.model_dump_json(indent=2)}"
 
-    # Include failure report context if retrying
-    if state.failure_report and not state.failure_report.is_architectural:
+    failure_report = state.get("failure_report")
+    if failure_report and not failure_report.is_architectural:
         user_msg += f"\n\nPREVIOUS ATTEMPT FAILED:\n"
-        user_msg += f"Tests passed: {state.failure_report.tests_passed}\n"
-        user_msg += f"Tests failed: {state.failure_report.tests_failed}\n"
-        user_msg += f"Errors: {', '.join(state.failure_report.errors)}\n"
-        user_msg += f"Failed files: {', '.join(state.failure_report.failed_files)}\n"
-        user_msg += f"Recommendation: {state.failure_report.recommendation}\n"
+        user_msg += f"Tests passed: {failure_report.tests_passed}\n"
+        user_msg += f"Tests failed: {failure_report.tests_failed}\n"
+        user_msg += f"Errors: {', '.join(failure_report.errors)}\n"
+        user_msg += f"Failed files: {', '.join(failure_report.failed_files)}\n"
+        user_msg += f"Recommendation: {failure_report.recommendation}\n"
         user_msg += "\nFix the issues and regenerate the code."
 
     llm = _get_developer_llm()
@@ -252,32 +342,32 @@ Write clean, well-documented code."""
         HumanMessage(content=user_msg),
     ])
 
-    trace.append(f"developer: code generated ({len(response.content)} chars)")
-    tokens_used = state.tokens_used + (response.usage_metadata.get("total_tokens", 0) if response.usage_metadata else 0)
-
+    content = _extract_text_content(response.content)
+    trace.append(f"developer: code generated ({len(content)} chars)")
+    tokens_used = tokens_used + _extract_token_count(response)
     logger.info("[DEV] done. tokens_used now=%d", tokens_used)
 
     return {
-        "generated_code": response.content,
+        "generated_code": content,
         "status": WorkflowStatus.REVIEWING,
         "tokens_used": tokens_used,
         "trace": trace,
     }
 
 
-def qa_node(state: AgentState) -> dict:
-    """QA: reviews the generated code and produces a structured FailureReport.
-
-    Checks the code against the Blueprint's acceptance criteria.
-    Returns pass/fail/escalate decision.
-    """
-    trace = list(state.trace)
+def qa_node(state: GraphState) -> dict:
+    """QA: reviews the generated code and produces a structured FailureReport."""
+    trace = list(state.get("trace", []))
     trace.append("qa: starting review")
 
+    retry_count = state.get("retry_count", 0)
+    tokens_used = state.get("tokens_used", 0)
     logger.info("[QA] retry_count=%d, tokens_used=%d, status=%s",
-                state.retry_count, state.tokens_used, state.status.value)
+                retry_count, tokens_used, state.get("status", "unknown"))
 
-    if not state.generated_code or not state.blueprint:
+    generated_code = state.get("generated_code", "")
+    blueprint = state.get("blueprint")
+    if not generated_code or not blueprint:
         trace.append("qa: missing code or blueprint")
         return {
             "status": WorkflowStatus.FAILED,
@@ -303,7 +393,7 @@ Respond with ONLY a valid JSON object matching this schema:
 Be strict but fair. Only pass code that meets ALL acceptance criteria.
 Do not include any text before or after the JSON."""
 
-    user_msg = f"Blueprint:\n{state.blueprint.model_dump_json(indent=2)}\n\nGenerated Code:\n{state.generated_code}"
+    user_msg = f"Blueprint:\n{blueprint.model_dump_json(indent=2)}\n\nGenerated Code:\n{generated_code}"
 
     llm = _get_qa_llm()
     response = llm.invoke([
@@ -311,15 +401,9 @@ Do not include any text before or after the JSON."""
         HumanMessage(content=user_msg),
     ])
 
-    # Parse the FailureReport
     try:
-        raw = response.content.strip()
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-            raw = raw.strip()
-        report_data = json.loads(raw)
+        raw = _extract_text_content(response.content)
+        report_data = _extract_json(raw)
         failure_report = FailureReport(**report_data)
     except (json.JSONDecodeError, Exception) as e:
         trace.append(f"qa: failed to parse report: {e}")
@@ -330,7 +414,7 @@ Do not include any text before or after the JSON."""
         }
 
     trace.append(f"qa: verdict={failure_report.status}, passed={failure_report.tests_passed}, failed={failure_report.tests_failed}")
-    tokens_used = state.tokens_used + (response.usage_metadata.get("total_tokens", 0) if response.usage_metadata else 0)
+    tokens_used = tokens_used + _extract_token_count(response)
 
     if failure_report.status == "pass":
         status = WorkflowStatus.PASSED
@@ -339,9 +423,9 @@ Do not include any text before or after the JSON."""
     else:
         status = WorkflowStatus.REVIEWING
 
-    new_retry_count = state.retry_count + (1 if failure_report.status != "pass" else 0)
+    new_retry_count = retry_count + (1 if failure_report.status != "pass" else 0)
     logger.info("[QA] verdict=%s, retry_count %d->%d, tokens_used=%d",
-                failure_report.status, state.retry_count, new_retry_count, tokens_used)
+                failure_report.status, retry_count, new_retry_count, tokens_used)
 
     return {
         "failure_report": failure_report,
@@ -354,32 +438,33 @@ Do not include any text before or after the JSON."""
 
 # -- Routing Functions --
 
-def route_after_qa(state: AgentState) -> Literal["developer", "architect", "__end__"]:
+def route_after_qa(state: GraphState) -> Literal["developer", "architect", "__end__"]:
     """Decide where to go after QA review."""
+    status = state.get("status", WorkflowStatus.FAILED)
+    retry_count = state.get("retry_count", 0)
+    tokens_used = state.get("tokens_used", 0)
+
     logger.info(
         "[ROUTER] status=%s, retry_count=%d, tokens_used=%d, max_retries=%d, token_budget=%d",
-        state.status.value, state.retry_count, state.tokens_used, MAX_RETRIES, TOKEN_BUDGET,
+        status, retry_count, tokens_used, MAX_RETRIES, TOKEN_BUDGET,
     )
 
-    if state.status == WorkflowStatus.PASSED:
+    if status == WorkflowStatus.PASSED:
         logger.info("[ROUTER] -> END (passed)")
         return END
 
-    # D2 fix: FAILED is a terminal state — always exit the graph.
-    # This catches blueprint parse failures, missing code/blueprint,
-    # and any other unrecoverable error from any node.
-    if state.status == WorkflowStatus.FAILED:
-        logger.info("[ROUTER] -> END (failed: %s)", state.error_message)
+    if status == WorkflowStatus.FAILED:
+        logger.info("[ROUTER] -> END (failed: %s)", state.get("error_message", ""))
         return END
 
-    if state.retry_count >= MAX_RETRIES:
+    if retry_count >= MAX_RETRIES:
         logger.info("[ROUTER] -> END (max retries)")
         return END
-    if state.tokens_used >= TOKEN_BUDGET:
+    if tokens_used >= TOKEN_BUDGET:
         logger.info("[ROUTER] -> END (token budget)")
         return END
 
-    if state.status == WorkflowStatus.ESCALATED:
+    if status == WorkflowStatus.ESCALATED:
         logger.info("[ROUTER] -> architect (escalation)")
         return "architect"
     else:
@@ -399,7 +484,7 @@ def build_graph() -> StateGraph:
             -> escalate: architect (re-plan)
             -> budget exhausted: END
     """
-    graph = StateGraph(AgentState)
+    graph = StateGraph(GraphState)
 
     graph.add_node("architect", architect_node)
     graph.add_node("developer", developer_node)
@@ -432,22 +517,27 @@ def run_task(task_description: str, enable_tracing: bool = True) -> AgentState:
     Returns:
         Final AgentState with results, trace, and status.
     """
-    # Initialize tracing (no-ops if Langfuse not configured)
     trace_config = create_trace_config(
         enabled=enable_tracing,
         task_description=task_description,
     )
 
     workflow = create_workflow()
-    initial_state = AgentState(task_description=task_description)
 
-    # Pass Langfuse callbacks to LangGraph — this automatically
-    # creates spans for each LLM call with token usage and latencies
+    initial_state: GraphState = {
+        "task_description": task_description,
+        "blueprint": None,
+        "generated_code": "",
+        "failure_report": None,
+        "status": WorkflowStatus.PLANNING,
+        "retry_count": 0,
+        "tokens_used": 0,
+        "error_message": "",
+        "memory_context": [],
+        "trace": [],
+    }
+
     invoke_config = {
-        # Safety net: hard cap on graph steps to prevent infinite loops.
-        # Normal flow: arch(1) + dev(1) + qa(1) = 3 steps per attempt.
-        # With MAX_RETRIES=3: up to 3 + (3 * 2) = 9 steps for dev/qa retries,
-        # plus possible escalation cycles. 25 gives ample headroom.
         "recursion_limit": 25,
     }
     if trace_config.callbacks:
@@ -468,7 +558,6 @@ def run_task(task_description: str, enable_tracing: bool = True) -> AgentState:
         "retry_count": final_state.retry_count,
     })
 
-    # Flush to ensure all trace data is sent
     trace_config.flush()
 
     return final_state

@@ -9,6 +9,7 @@ from unittest.mock import patch, MagicMock
 
 from src.orchestrator import (
     AgentState,
+    GraphState,
     WorkflowStatus,
     build_graph,
     create_workflow,
@@ -43,28 +44,35 @@ class TestGraphConstruction:
 # -- Routing Logic Tests --
 
 class TestRouting:
+    """route_after_qa expects a GraphState (TypedDict/dict), not AgentState."""
+
     def test_route_pass_ends(self):
-        state = AgentState(status=WorkflowStatus.PASSED)
+        state: GraphState = {"status": WorkflowStatus.PASSED, "retry_count": 0, "tokens_used": 0}
         assert route_after_qa(state) == "__end__"
 
     def test_route_fail_retries_developer(self):
-        state = AgentState(status=WorkflowStatus.REVIEWING, retry_count=0)
+        state: GraphState = {"status": WorkflowStatus.REVIEWING, "retry_count": 0, "tokens_used": 0}
         assert route_after_qa(state) == "developer"
 
     def test_route_escalate_goes_to_architect(self):
-        state = AgentState(status=WorkflowStatus.ESCALATED, retry_count=0)
+        state: GraphState = {"status": WorkflowStatus.ESCALATED, "retry_count": 0, "tokens_used": 0}
         assert route_after_qa(state) == "architect"
 
     def test_route_max_retries_ends(self):
-        state = AgentState(status=WorkflowStatus.REVIEWING, retry_count=MAX_RETRIES)
+        state: GraphState = {"status": WorkflowStatus.REVIEWING, "retry_count": MAX_RETRIES, "tokens_used": 0}
         assert route_after_qa(state) == "__end__"
 
     def test_route_token_budget_ends(self):
-        state = AgentState(status=WorkflowStatus.REVIEWING, retry_count=0, tokens_used=TOKEN_BUDGET)
+        state: GraphState = {"status": WorkflowStatus.REVIEWING, "retry_count": 0, "tokens_used": TOKEN_BUDGET}
         assert route_after_qa(state) == "__end__"
 
     def test_route_escalate_but_max_retries_ends(self):
-        state = AgentState(status=WorkflowStatus.ESCALATED, retry_count=MAX_RETRIES)
+        state: GraphState = {"status": WorkflowStatus.ESCALATED, "retry_count": MAX_RETRIES, "tokens_used": 0}
+        assert route_after_qa(state) == "__end__"
+
+    def test_route_failed_ends(self):
+        """D2: FAILED status should always exit the graph."""
+        state: GraphState = {"status": WorkflowStatus.FAILED, "retry_count": 0, "tokens_used": 0}
         assert route_after_qa(state) == "__end__"
 
 

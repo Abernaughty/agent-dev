@@ -390,7 +390,10 @@ class TestE2EBudgetLimits:
 
 
 class TestE2ENodeFunctions:
-    """Test individual node functions with realistic mock data."""
+    """Test individual node functions with realistic mock data.
+
+    Node functions expect GraphState (TypedDict/dict), not AgentState.
+    """
 
     @patch("src.orchestrator._fetch_memory_context")
     @patch("src.orchestrator._get_architect_llm")
@@ -401,7 +404,7 @@ class TestE2ENodeFunctions:
             SAMPLE_BLUEPRINT.model_dump_json(), total_tokens=500
         )
 
-        state = AgentState(task_description="Create email validator")
+        state = {"task_description": "Create email validator", "trace": [], "tokens_used": 0, "retry_count": 0}
         result = architect_node(state)
 
         assert result["status"] == WorkflowStatus.BUILDING
@@ -417,11 +420,14 @@ class TestE2ENodeFunctions:
             SAMPLE_CODE, total_tokens=1200
         )
 
-        state = AgentState(
-            task_description="Create email validator",
-            blueprint=SAMPLE_BLUEPRINT,
-            status=WorkflowStatus.BUILDING,
-        )
+        state = {
+            "task_description": "Create email validator",
+            "blueprint": SAMPLE_BLUEPRINT,
+            "status": WorkflowStatus.BUILDING,
+            "trace": [],
+            "tokens_used": 0,
+            "retry_count": 0,
+        }
         result = developer_node(state)
 
         assert result["status"] == WorkflowStatus.REVIEWING
@@ -435,12 +441,15 @@ class TestE2ENodeFunctions:
             SAMPLE_QA_PASS.model_dump_json(), total_tokens=400
         )
 
-        state = AgentState(
-            task_description="Create email validator",
-            blueprint=SAMPLE_BLUEPRINT,
-            generated_code=SAMPLE_CODE,
-            status=WorkflowStatus.REVIEWING,
-        )
+        state = {
+            "task_description": "Create email validator",
+            "blueprint": SAMPLE_BLUEPRINT,
+            "generated_code": SAMPLE_CODE,
+            "status": WorkflowStatus.REVIEWING,
+            "trace": [],
+            "tokens_used": 0,
+            "retry_count": 0,
+        }
         result = qa_node(state)
 
         assert result["status"] == WorkflowStatus.PASSED
@@ -454,13 +463,15 @@ class TestE2ENodeFunctions:
             SAMPLE_QA_FAIL.model_dump_json(), total_tokens=400
         )
 
-        state = AgentState(
-            task_description="Create email validator",
-            blueprint=SAMPLE_BLUEPRINT,
-            generated_code=SAMPLE_CODE,
-            status=WorkflowStatus.REVIEWING,
-            retry_count=0,
-        )
+        state = {
+            "task_description": "Create email validator",
+            "blueprint": SAMPLE_BLUEPRINT,
+            "generated_code": SAMPLE_CODE,
+            "status": WorkflowStatus.REVIEWING,
+            "retry_count": 0,
+            "trace": [],
+            "tokens_used": 0,
+        }
         result = qa_node(state)
 
         assert result["status"] == WorkflowStatus.REVIEWING
@@ -474,13 +485,15 @@ class TestE2ENodeFunctions:
             SAMPLE_QA_ESCALATE.model_dump_json(), total_tokens=400
         )
 
-        state = AgentState(
-            task_description="Create email validator",
-            blueprint=SAMPLE_BLUEPRINT,
-            generated_code=SAMPLE_CODE,
-            status=WorkflowStatus.REVIEWING,
-            retry_count=0,
-        )
+        state = {
+            "task_description": "Create email validator",
+            "blueprint": SAMPLE_BLUEPRINT,
+            "generated_code": SAMPLE_CODE,
+            "status": WorkflowStatus.REVIEWING,
+            "retry_count": 0,
+            "trace": [],
+            "tokens_used": 0,
+        }
         result = qa_node(state)
 
         assert result["status"] == WorkflowStatus.ESCALATED
@@ -494,7 +507,7 @@ class TestE2ENodeFunctions:
         fenced_json = f"```json\n{SAMPLE_BLUEPRINT.model_dump_json()}\n```"
         mock_llm.return_value.invoke.return_value = _make_llm_response(fenced_json)
 
-        state = AgentState(task_description="Create email validator")
+        state = {"task_description": "Create email validator", "trace": [], "tokens_used": 0, "retry_count": 0}
         result = architect_node(state)
 
         assert result["status"] == WorkflowStatus.BUILDING
