@@ -8,14 +8,15 @@ Integration approach (Langfuse v4 / OTEL-based):
     - Uses Langfuse's LangChain CallbackHandler for automatic
       LLM call tracing (token usage, latencies, I/O)
     - CallbackHandler auto-creates traces — no manual trace creation needed
+    - Uses get_client().start_as_current_observation() for custom spans
+    - Uses propagate_attributes() for session/user/tag context
     - Each LangGraph node becomes a span within the trace
     - Retry loops are visible as separate spans within the trace
-    - Custom events logged via get_client() span API
 
 Usage:
     from src.tracing import create_trace_config, TracingConfig
 
-    config = create_trace_config(enabled=True)
+    config = create_trace_config(enabled=True, session_id="session-1")
     # Pass config.callbacks to LangGraph invoke
     result = workflow.invoke(state, config={"callbacks": config.callbacks})
 """
@@ -69,12 +70,10 @@ class TracingConfig:
     Attributes:
         enabled: Whether tracing is active. When False, callbacks is empty.
         callbacks: List of LangChain callbacks to pass to graph.invoke().
-        trace_id: Informational trace identifier (may be None in v4).
         session_id: Optional session ID for grouping related traces.
     """
     enabled: bool = False
     callbacks: list = field(default_factory=list)
-    trace_id: str | None = None
     session_id: str | None = None
 
     def flush(self) -> None:
@@ -118,7 +117,8 @@ def create_trace_config(
     Langfuse v4 (OTEL-based):
         - CallbackHandler() is self-contained — auto-creates traces
         - No manual client.trace() call needed
-        - No constructor args needed — credentials read from env vars
+        - Session/user context set via propagate_attributes()
+        - Metadata values must be dict[str, str] with values <= 200 chars
 
     Args:
         enabled: Whether to enable tracing.
@@ -155,7 +155,6 @@ def create_trace_config(
         return TracingConfig(
             enabled=True,
             callbacks=[handler],
-            trace_id=None,  # v4 auto-generates trace IDs
             session_id=session_id,
         )
 
@@ -175,9 +174,9 @@ def add_trace_event(
     Useful for recording non-LLM events like memory queries,
     sandbox executions, retry decisions, or budget checks.
 
-    In Langfuse v4 (OTEL-based), custom events are logged via
-    the client's span API. If no active span exists, the event
-    is logged but may not be attached to the trace.
+    In Langfuse v4 (OTEL-based), custom events are recorded as
+    spans via get_client().start_as_current_observation(). This
+    creates a zero-duration span that appears in the trace timeline.
 
     Args:
         config: The active TracingConfig.
@@ -201,8 +200,14 @@ def add_trace_event(
                 # v4 metadata values must be strings <= 200 chars
                 safe_metadata[k] = str(val)[:200]
 
-        # In v4, use update_current_observation if inside an active span,
-        # otherwise just log it. The event is best-effort.
+        # Create a point-in-time span for this event
+        with client.start_as_current_observation(
+            as_type="span",
+            name=name,
+            metadata=safe_metadata,
+        ) as span:
+            span.set_attribute("level", level)
+
         logger.debug("Trace event '%s': %s", name, safe_metadata)
 
     except Exception as e:
