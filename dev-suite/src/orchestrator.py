@@ -73,9 +73,16 @@ class AgentState(BaseModel):
 # -- LLM Initialization --
 
 def _get_architect_llm():
-    """Gemini for the Architect agent (large context, planning only)."""
+    """Gemini for the Architect agent (large context, planning only).
+
+    Default: gemini-3-flash-preview — frontier-class reasoning with
+    free tier access. Best balance of intelligence and cost for
+    structured Blueprint generation.
+
+    Override via ARCHITECT_MODEL env var.
+    """
     return ChatGoogleGenerativeAI(
-        model=os.getenv("ARCHITECT_MODEL", "gemini-2.5-flash"),
+        model=os.getenv("ARCHITECT_MODEL", "gemini-3-flash-preview"),
         google_api_key=os.getenv("GOOGLE_API_KEY"),
         temperature=0.2,
     )
