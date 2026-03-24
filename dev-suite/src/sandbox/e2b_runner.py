@@ -163,9 +163,8 @@ class E2BRunner:
             env_vars = None
 
         try:
-            sbx = Sandbox(timeout=timeout)
-
-            try:
+            # E2B v1 SDK: use Sandbox.create() or context manager
+            with Sandbox() as sbx:
                 # Inject env vars if provided
                 if env_vars:
                     env_setup = "\n".join(
@@ -174,7 +173,7 @@ class E2BRunner:
                     sbx.run_code(env_setup)
 
                 # Execute the actual code
-                execution = sbx.run_code(code)
+                execution = sbx.run_code(code, timeout=timeout)
 
                 # Collect raw output
                 raw_stdout = ""
@@ -206,9 +205,6 @@ class E2BRunner:
                     timed_out=False,
                 )
 
-            finally:
-                sbx.kill()
-
         except TimeoutError:
             return SandboxResult(
                 exit_code=1,
@@ -220,7 +216,7 @@ class E2BRunner:
             return SandboxResult(
                 exit_code=1,
                 errors=[str(e)],
-                output_summary=f"Sandbox error: {type(e).__name__}",
+                output_summary=f"Sandbox error: {type(e).__name__}: {e}",
             )
 
     def run_tests(
