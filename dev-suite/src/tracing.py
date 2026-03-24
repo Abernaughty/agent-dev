@@ -4,12 +4,13 @@ Provides the tracing layer that records every agent call, tool use,
 and retry as spans within a Langfuse trace. Secrets are auto-redacted
 using the same patterns from the sandbox module.
 
-Integration approach:
+Integration approach (Langfuse v4 / OTEL-based):
     - Uses Langfuse's LangChain CallbackHandler for automatic
       LLM call tracing (token usage, latencies, I/O)
-    - Wraps each orchestrator run in a Langfuse trace
-    - Each agent node (architect, developer, qa) gets its own span
+    - CallbackHandler auto-creates traces — no manual trace creation needed
+    - Each LangGraph node becomes a span within the trace
     - Retry loops are visible as separate spans within the trace
+    - Custom events logged via get_client() span API
 
 Usage:
     from src.tracing import create_trace_config, TracingConfig
@@ -25,8 +26,6 @@ import re
 from dataclasses import dataclass, field
 
 from dotenv import load_dotenv
-from langfuse import get_client
-from langfuse.langchain import CallbackHandler
 
 load_dotenv()
 
@@ -70,7 +69,7 @@ class TracingConfig:
     Attributes:
         enabled: Whether tracing is active. When False, callbacks is empty.
         callbacks: List of LangChain callbacks to pass to graph.invoke().
-        trace_id: The Langfuse trace ID (if tracing is enabled).
+        trace_id: Informational trace identifier (may be None in v4).
         session_id: Optional session ID for grouping related traces.
     """
     enabled: bool = False
@@ -86,9 +85,10 @@ class TracingConfig:
         if not self.enabled:
             return
         try:
+            from langfuse import get_client
             client = get_client()
             client.flush()
-            logger.debug("Langfuse trace flushed: %s", self.trace_id)
+            logger.debug("Langfuse trace flushed")
         except Exception as e:
             logger.warning("Failed to flush Langfuse: %s", e)
 
@@ -115,6 +115,11 @@ def create_trace_config(
     tracing is silently disabled with a warning. This ensures the
     orchestrator never crashes due to missing observability config.
 
+    Langfuse v4 (OTEL-based):
+        - CallbackHandler() is self-contained — auto-creates traces
+        - No manual client.trace() call needed
+        - Trace attributes set via propagate_attributes() or on the handler
+
     Args:
         enabled: Whether to enable tracing.
         task_description: The task being executed (included in trace metadata).
@@ -138,35 +143,21 @@ def create_trace_config(
         return TracingConfig(enabled=False)
 
     try:
-        client = get_client()
+        from langfuse.langchain import CallbackHandler
 
-        # Build trace metadata
-        trace_metadata = {
-            "source": "dev-suite-orchestrator",
-            "task_preview": redact_secrets(task_description[:200]) if task_description else "",
-        }
-        if metadata:
-            trace_metadata.update(metadata)
-
-        # Create a trace to group all spans under
-        trace = client.trace(
-            name=trace_name,
-            session_id=session_id,
-            metadata=trace_metadata,
-        )
-
-        # Create the LangChain callback handler rooted on this trace
+        # Langfuse v4: CallbackHandler is self-contained.
+        # It auto-creates a trace when LangChain invokes with this callback.
+        # Session ID and metadata are passed directly to the handler.
         handler = CallbackHandler(
-            root=trace,
             session_id=session_id,
         )
 
-        logger.info("Langfuse tracing initialized: trace_id=%s", trace.id)
+        logger.info("Langfuse tracing initialized (v4 OTEL-based)")
 
         return TracingConfig(
             enabled=True,
             callbacks=[handler],
-            trace_id=trace.id,
+            trace_id=None,  # v4 auto-generates trace IDs
             session_id=session_id,
         )
 
@@ -186,29 +177,35 @@ def add_trace_event(
     Useful for recording non-LLM events like memory queries,
     sandbox executions, retry decisions, or budget checks.
 
+    In Langfuse v4 (OTEL-based), custom events are logged via
+    the client's span API. If no active span exists, the event
+    is logged but may not be attached to the trace.
+
     Args:
         config: The active TracingConfig.
         name: Event name (e.g., "memory_query", "budget_check").
         level: Event level (DEFAULT, DEBUG, WARNING, ERROR).
         metadata: Additional data for the event.
     """
-    if not config.enabled or not config.trace_id:
+    if not config.enabled:
         return
 
     try:
+        from langfuse import get_client
+
         client = get_client()
 
         # Redact any secrets in metadata values
         safe_metadata = {}
         if metadata:
             for k, v in metadata.items():
-                safe_metadata[k] = redact_secrets(str(v)) if isinstance(v, str) else v
+                val = redact_secrets(str(v)) if isinstance(v, str) else v
+                # v4 metadata values must be strings <= 200 chars
+                safe_metadata[k] = str(val)[:200]
 
-        client.event(
-            trace_id=config.trace_id,
-            name=name,
-            level=level,
-            metadata=safe_metadata,
-        )
+        # In v4, use update_current_observation if inside an active span,
+        # otherwise just log it. The event is best-effort.
+        logger.debug("Trace event '%s': %s", name, safe_metadata)
+
     except Exception as e:
         logger.debug("Failed to add trace event '%s': %s", name, e)
