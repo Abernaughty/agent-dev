@@ -4,13 +4,20 @@ Unit tests cover:
 - Secret redaction patterns
 - TracingConfig structure and flush behavior
 - create_trace_config with various env states
-- add_trace_event with and without active tracing
+- add_trace_event with v4 OTEL span creation
 - Graceful degradation when Langfuse is not configured
 
 All Langfuse SDK calls are mocked — no real API calls made.
+
+Updated for Langfuse v4 (OTEL-based SDK):
+- CallbackHandler() is self-contained, no constructor args
+- No manual client.trace() calls — traces are auto-created
+- Custom events use client.start_as_current_observation()
+- Metadata values are dict[str, str] with 200 char limit
 """
 
 import os
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -155,35 +162,39 @@ class TestTracingConfig:
         config = TracingConfig()
         assert config.enabled is False
         assert config.callbacks == []
-        assert config.trace_id is None
+        assert config.session_id is None
 
     def test_flush_when_disabled_is_safe(self):
         config = TracingConfig(enabled=False)
         config.flush()  # Should not raise
 
-    @patch("src.tracing.get_client")
+    @patch("langfuse.get_client")
     def test_flush_when_enabled(self, mock_get_client):
         mock_client = MagicMock()
         mock_get_client.return_value = mock_client
 
-        config = TracingConfig(enabled=True, trace_id="test-trace-id")
+        config = TracingConfig(enabled=True)
         config.flush()
 
         mock_client.flush.assert_called_once()
 
-    @patch("src.tracing.get_client", side_effect=Exception("flush failed"))
+    @patch("langfuse.get_client", side_effect=Exception("flush failed"))
     def test_flush_handles_errors(self, mock_get_client):
-        config = TracingConfig(enabled=True, trace_id="test-trace-id")
+        config = TracingConfig(enabled=True)
         config.flush()  # Should not raise
 
 
 # ============================================================
-# create_trace_config
+# create_trace_config (v4 OTEL-based)
 # ============================================================
 
 
 class TestCreateTraceConfig:
-    """Test trace config creation with various scenarios."""
+    """Test trace config creation with various scenarios.
+
+    In v4, CallbackHandler() is self-contained — no manual client.trace()
+    calls are needed. The handler auto-creates traces when LangChain invokes.
+    """
 
     def test_disabled_returns_empty_config(self):
         config = create_trace_config(enabled=False)
@@ -198,15 +209,10 @@ class TestCreateTraceConfig:
             config = create_trace_config(enabled=True)
             assert config.enabled is False
 
-    @patch("src.tracing.CallbackHandler")
-    @patch("src.tracing.get_client")
-    def test_configured_returns_enabled(self, mock_get_client, mock_handler_cls):
-        mock_client = MagicMock()
-        mock_trace = MagicMock()
-        mock_trace.id = "trace-abc123"
-        mock_client.trace.return_value = mock_trace
-        mock_get_client.return_value = mock_client
-
+    @patch("langfuse.langchain.CallbackHandler")
+    def test_configured_returns_enabled_with_handler(self, mock_handler_cls):
+        """v4: CallbackHandler is instantiated with no args.
+        No client.trace() call should be made."""
         mock_handler = MagicMock()
         mock_handler_cls.return_value = mock_handler
 
@@ -221,25 +227,16 @@ class TestCreateTraceConfig:
             )
 
         assert config.enabled is True
-        assert config.trace_id == "trace-abc123"
         assert config.session_id == "session-1"
         assert len(config.callbacks) == 1
+        assert config.callbacks[0] is mock_handler
 
-        # Verify trace was created with correct params
-        mock_client.trace.assert_called_once()
-        call_kwargs = mock_client.trace.call_args[1]
-        assert call_kwargs["name"] == "orchestrator-run"
-        assert call_kwargs["session_id"] == "session-1"
-        assert "task_preview" in call_kwargs["metadata"]
+        # v4: CallbackHandler() takes no constructor args
+        mock_handler_cls.assert_called_once_with()
 
-    @patch("src.tracing.CallbackHandler")
-    @patch("src.tracing.get_client")
-    def test_secrets_redacted_in_metadata(self, mock_get_client, mock_handler_cls):
-        mock_client = MagicMock()
-        mock_trace = MagicMock()
-        mock_trace.id = "trace-xyz"
-        mock_client.trace.return_value = mock_trace
-        mock_get_client.return_value = mock_client
+    @patch("langfuse.langchain.CallbackHandler")
+    def test_session_id_propagated(self, mock_handler_cls):
+        """Session ID is stored on the config for use with propagate_attributes."""
         mock_handler_cls.return_value = MagicMock()
 
         with patch.dict(os.environ, {
@@ -248,14 +245,13 @@ class TestCreateTraceConfig:
         }):
             config = create_trace_config(
                 enabled=True,
-                task_description="Use token: sk-ant-mysecretkey1234567890abc",
+                session_id="session-abc",
             )
 
-        call_kwargs = mock_client.trace.call_args[1]
-        assert "sk-ant-" not in call_kwargs["metadata"]["task_preview"]
+        assert config.session_id == "session-abc"
 
-    @patch("src.tracing.get_client", side_effect=Exception("SDK init failed"))
-    def test_sdk_error_returns_disabled(self, mock_get_client):
+    @patch("langfuse.langchain.CallbackHandler", side_effect=Exception("SDK init failed"))
+    def test_sdk_error_returns_disabled(self, mock_handler_cls):
         with patch.dict(os.environ, {
             "LANGFUSE_PUBLIC_KEY": "pk-lf-test",
             "LANGFUSE_SECRET_KEY": "sk-lf-test",
@@ -263,52 +259,54 @@ class TestCreateTraceConfig:
             config = create_trace_config(enabled=True)
             assert config.enabled is False
 
-    @patch("src.tracing.CallbackHandler")
-    @patch("src.tracing.get_client")
-    def test_custom_metadata_included(self, mock_get_client, mock_handler_cls):
-        mock_client = MagicMock()
-        mock_trace = MagicMock()
-        mock_trace.id = "trace-meta"
-        mock_client.trace.return_value = mock_trace
-        mock_get_client.return_value = mock_client
+    @patch("langfuse.langchain.CallbackHandler")
+    def test_no_trace_id_in_v4(self, mock_handler_cls):
+        """v4: trace_id is not set manually — OTEL auto-generates it."""
         mock_handler_cls.return_value = MagicMock()
 
         with patch.dict(os.environ, {
             "LANGFUSE_PUBLIC_KEY": "pk-lf-test",
             "LANGFUSE_SECRET_KEY": "sk-lf-test",
         }):
-            config = create_trace_config(
-                enabled=True,
-                metadata={"model": "gemini-2.0", "retry_count": 0},
-            )
+            config = create_trace_config(enabled=True)
 
-        call_kwargs = mock_client.trace.call_args[1]
-        assert call_kwargs["metadata"]["model"] == "gemini-2.0"
-        assert call_kwargs["metadata"]["retry_count"] == 0
+        # TracingConfig no longer has trace_id field
+        assert not hasattr(config, "trace_id") or config.__dict__.get("trace_id") is None
 
 
 # ============================================================
-# add_trace_event
+# add_trace_event (v4 OTEL event-based)
 # ============================================================
 
 
 class TestAddTraceEvent:
-    """Test custom event recording."""
+    """Test custom event recording via v4 OTEL observations.
+
+    In v4, add_trace_event creates an event observation via
+    client.start_as_current_observation(as_type="event") with
+    level passed as a direct SDK argument.
+    """
 
     def test_noop_when_disabled(self):
         config = TracingConfig(enabled=False)
         add_trace_event(config, "test_event")  # Should not raise
 
-    def test_noop_when_no_trace_id(self):
-        config = TracingConfig(enabled=True, trace_id=None)
-        add_trace_event(config, "test_event")  # Should not raise
-
-    @patch("src.tracing.get_client")
-    def test_event_sent_when_enabled(self, mock_get_client):
+    @patch("langfuse.get_client")
+    def test_creates_event_when_enabled(self, mock_get_client):
+        """v4: Events are recorded as OTEL observations via start_as_current_observation."""
         mock_client = MagicMock()
+        captured_kwargs = {}
+
+        # Mock the context manager
+        @contextmanager
+        def mock_start_observation(**kwargs):
+            captured_kwargs.update(kwargs)
+            yield MagicMock()
+
+        mock_client.start_as_current_observation = mock_start_observation
         mock_get_client.return_value = mock_client
 
-        config = TracingConfig(enabled=True, trace_id="trace-evt")
+        config = TracingConfig(enabled=True)
         add_trace_event(
             config,
             name="memory_query",
@@ -316,32 +314,110 @@ class TestAddTraceEvent:
             metadata={"tier": "L0-Core", "results": 5},
         )
 
-        mock_client.event.assert_called_once()
-        call_kwargs = mock_client.event.call_args[1]
-        assert call_kwargs["trace_id"] == "trace-evt"
-        assert call_kwargs["name"] == "memory_query"
-        assert call_kwargs["metadata"]["tier"] == "L0-Core"
+        # Verify observation was created with correct type and level as SDK arg
+        assert captured_kwargs["as_type"] == "event"
+        assert captured_kwargs["level"] == "DEFAULT"
+        assert captured_kwargs["name"] == "memory_query"
 
-    @patch("src.tracing.get_client")
-    def test_secrets_redacted_in_event_metadata(self, mock_get_client):
+    @patch("langfuse.get_client")
+    def test_span_receives_correct_name_and_metadata(self, mock_get_client):
+        """Verify the span name and metadata are passed through."""
         mock_client = MagicMock()
+        captured_kwargs = {}
+
+        @contextmanager
+        def mock_start_observation(**kwargs):
+            captured_kwargs.update(kwargs)
+            yield MagicMock()
+
+        mock_client.start_as_current_observation = mock_start_observation
         mock_get_client.return_value = mock_client
 
-        config = TracingConfig(enabled=True, trace_id="trace-sec")
+        config = TracingConfig(enabled=True)
+        add_trace_event(
+            config,
+            name="budget_check",
+            metadata={"tokens_used": 12000, "budget": 50000},
+        )
+
+        assert captured_kwargs["name"] == "budget_check"
+        assert captured_kwargs["as_type"] == "event"
+        assert captured_kwargs["level"] == "DEFAULT"
+        # Non-string metadata values are coerced to strings (v4 requirement)
+        assert captured_kwargs["metadata"]["tokens_used"] == "12000"
+        assert captured_kwargs["metadata"]["budget"] == "50000"
+
+    @patch("langfuse.get_client")
+    def test_secrets_redacted_in_event_metadata(self, mock_get_client):
+        """String metadata values have secrets redacted before span creation."""
+        mock_client = MagicMock()
+        captured_kwargs = {}
+
+        @contextmanager
+        def mock_start_observation(**kwargs):
+            captured_kwargs.update(kwargs)
+            yield MagicMock()
+
+        mock_client.start_as_current_observation = mock_start_observation
+        mock_get_client.return_value = mock_client
+
+        config = TracingConfig(enabled=True)
         add_trace_event(
             config,
             name="debug_info",
             metadata={"api_key": "sk-ant-supersecretkey1234567890abc"},
         )
 
-        call_kwargs = mock_client.event.call_args[1]
-        assert "sk-ant-" not in call_kwargs["metadata"]["api_key"]
-        assert "[REDACTED]" in call_kwargs["metadata"]["api_key"]
+        assert "sk-ant-" not in captured_kwargs["metadata"]["api_key"]
+        assert "[REDACTED]" in captured_kwargs["metadata"]["api_key"]
 
-    @patch("src.tracing.get_client", side_effect=Exception("event failed"))
+    @patch("langfuse.get_client")
+    def test_metadata_values_truncated_to_200_chars(self, mock_get_client):
+        """v4 requirement: metadata values must be <= 200 characters."""
+        mock_client = MagicMock()
+        captured_kwargs = {}
+
+        @contextmanager
+        def mock_start_observation(**kwargs):
+            captured_kwargs.update(kwargs)
+            yield MagicMock()
+
+        mock_client.start_as_current_observation = mock_start_observation
+        mock_get_client.return_value = mock_client
+
+        config = TracingConfig(enabled=True)
+        long_value = "x" * 300
+        add_trace_event(
+            config,
+            name="long_metadata",
+            metadata={"long_field": long_value},
+        )
+
+        assert len(captured_kwargs["metadata"]["long_field"]) == 200
+
+    @patch("langfuse.get_client", side_effect=Exception("event failed"))
     def test_event_error_does_not_raise(self, mock_get_client):
-        config = TracingConfig(enabled=True, trace_id="trace-err")
+        config = TracingConfig(enabled=True)
         add_trace_event(config, "test_event")  # Should not raise
+
+    @patch("langfuse.get_client")
+    def test_no_metadata_creates_span_with_empty_dict(self, mock_get_client):
+        """When no metadata is provided, span is created with empty metadata."""
+        mock_client = MagicMock()
+        captured_kwargs = {}
+
+        @contextmanager
+        def mock_start_observation(**kwargs):
+            captured_kwargs.update(kwargs)
+            yield MagicMock()
+
+        mock_client.start_as_current_observation = mock_start_observation
+        mock_get_client.return_value = mock_client
+
+        config = TracingConfig(enabled=True)
+        add_trace_event(config, name="simple_event")
+
+        assert captured_kwargs["metadata"] == {}
 
 
 # ============================================================
@@ -350,32 +426,39 @@ class TestAddTraceEvent:
 
 
 class TestTracingLifecycle:
-    """Test the full create → event → flush lifecycle."""
+    """Test the full create → event → flush lifecycle with v4 SDK."""
 
-    @patch("src.tracing.CallbackHandler")
-    @patch("src.tracing.get_client")
+    @patch("langfuse.langchain.CallbackHandler")
+    @patch("langfuse.get_client")
     def test_full_lifecycle(self, mock_get_client, mock_handler_cls):
         mock_client = MagicMock()
-        mock_trace = MagicMock()
-        mock_trace.id = "trace-lifecycle"
-        mock_client.trace.return_value = mock_trace
         mock_get_client.return_value = mock_client
         mock_handler_cls.return_value = MagicMock()
+
+        # Track span creation calls
+        span_names = []
+
+        @contextmanager
+        def mock_start_observation(**kwargs):
+            span_names.append(kwargs.get("name"))
+            yield MagicMock()
+
+        mock_client.start_as_current_observation = mock_start_observation
 
         with patch.dict(os.environ, {
             "LANGFUSE_PUBLIC_KEY": "pk-lf-test",
             "LANGFUSE_SECRET_KEY": "sk-lf-test",
         }):
-            # 1. Create trace config
+            # 1. Create trace config (v4: no client.trace() call)
             config = create_trace_config(
                 enabled=True,
                 task_description="Build an email validator",
                 session_id="session-lifecycle",
             )
             assert config.enabled is True
-            assert config.trace_id == "trace-lifecycle"
+            assert config.session_id == "session-lifecycle"
 
-            # 2. Add events for each phase
+            # 2. Add events for each phase (v4: creates OTEL observations)
             add_trace_event(config, "memory_query", metadata={"results": 10})
             add_trace_event(config, "architect_start")
             add_trace_event(config, "developer_start", metadata={"retry": 0})
@@ -388,6 +471,12 @@ class TestTracingLifecycle:
             # 3. Flush
             config.flush()
 
-        # Verify all events were sent
-        assert mock_client.event.call_count == 5
+        # Verify all events created observations
+        assert span_names == [
+            "memory_query",
+            "architect_start",
+            "developer_start",
+            "qa_review",
+            "budget_check",
+        ]
         mock_client.flush.assert_called_once()
