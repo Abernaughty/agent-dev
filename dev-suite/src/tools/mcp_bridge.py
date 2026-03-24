@@ -113,20 +113,24 @@ def get_tools(provider: ToolProvider) -> list[Tool]:
         properties = defn.parameters.get("properties", {})
         required = defn.parameters.get("required", [])
 
-        # Determine if this is a single-arg tool (one required string param)
-        # or a multi-arg tool (needs JSON parsing)
+        # Determine if this is a single-arg tool (one required scalar param)
+        # or a multi-arg tool (needs JSON parsing).
+        # Scalar types: string, integer, number — all accept raw input strings.
         single_arg_key = None
+        single_arg_type = None
         if len(required) == 1 and len(properties) == 1:
             key = required[0]
-            if properties[key].get("type") == "string":
+            ptype = properties[key].get("type", "")
+            if ptype in ("string", "integer", "number"):
                 single_arg_key = key
+                single_arg_type = ptype
 
         if single_arg_key:
-            # Single string argument — pass the raw input string directly
+            # Single scalar argument — pass the raw input string with type coercion
             tool = Tool(
                 name=defn.name,
                 description=defn.description,
-                func=_make_single_arg_handler(provider, defn.name, single_arg_key),
+                func=_make_single_arg_handler(provider, defn.name, single_arg_key, single_arg_type),
             )
         else:
             # Multi-argument — expect JSON input and parse it
@@ -141,10 +145,25 @@ def get_tools(provider: ToolProvider) -> list[Tool]:
     return tools
 
 
-def _make_single_arg_handler(provider: ToolProvider, tool_name: str, arg_key: str):
-    """Create a handler for a single-string-argument tool."""
+_SCALAR_COERCIONS = {
+    "string": lambda x: x.strip(),
+    "integer": lambda x: int(x.strip()),
+    "number": lambda x: float(x.strip()),
+}
+
+
+def _make_single_arg_handler(
+    provider: ToolProvider, tool_name: str, arg_key: str, arg_type: str = "string",
+):
+    """Create a handler for a single-scalar-argument tool with type coercion."""
+    coerce = _SCALAR_COERCIONS.get(arg_type, lambda x: x.strip())
+
     def handler(input_str: str) -> str:
-        return provider.call_tool(tool_name, {arg_key: input_str.strip()})
+        try:
+            value = coerce(input_str)
+        except (ValueError, TypeError) as e:
+            return f"Error: Invalid input for '{tool_name}': {e}"
+        return provider.call_tool(tool_name, {arg_key: value})
     return handler
 
 
@@ -159,7 +178,10 @@ def _make_multi_arg_handler(provider: ToolProvider, tool_name: str):
         if not isinstance(arguments, dict):
             return f"Error: Input for '{tool_name}' must be a JSON object."
 
-        return provider.call_tool(tool_name, arguments)
+        try:
+            return provider.call_tool(tool_name, arguments)
+        except (ValueError, Exception) as e:
+            return f"Error: {e}"
     return handler
 
 

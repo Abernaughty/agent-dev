@@ -671,3 +671,48 @@ class TestFilesystemIntegration:
 
             result = provider.call_tool("filesystem_list", {"path": "empty_dir"})
             assert "empty" in result.lower()
+
+
+# ============================================================
+# Codex feedback fixes: scalar coercion + error recovery
+# ============================================================
+
+
+class TestCodexFixes:
+    """Tests for Codex review feedback on PR #26."""
+
+    @pytest.fixture
+    def provider(self, tmp_path):
+        return LocalToolProvider(
+            workspace_root=tmp_path,
+            github_token="tok",
+            github_owner="owner",
+            github_repo="repo",
+        )
+
+    @patch("src.tools.provider.httpx.get")
+    def test_github_read_diff_plain_number_input(self, mock_get, provider):
+        """P2: github_read_diff should accept plain '42' as input, not require JSON."""
+        mock_get.return_value = MagicMock(
+            status_code=200,
+            text="diff --git a/file.py b/file.py",
+        )
+        tools = get_tools(provider)
+        diff_tool = next(t for t in tools if t.name == "github_read_diff")
+        result = diff_tool.invoke("42")
+        assert "diff --git" in result
+
+    def test_multi_arg_missing_keys_returns_error_string(self, provider):
+        """P1: Missing required keys should return error string, not raise."""
+        tools = get_tools(provider)
+        write_tool = next(t for t in tools if t.name == "filesystem_write")
+        result = write_tool.invoke(json.dumps({"path": "file.txt"}))
+        assert "Error" in result
+        assert "content" in result.lower() or "missing" in result.lower()
+
+    def test_single_arg_integer_invalid_input(self, provider):
+        """P2: Non-numeric input for integer tool returns error string."""
+        tools = get_tools(provider)
+        diff_tool = next(t for t in tools if t.name == "github_read_diff")
+        result = diff_tool.invoke("not_a_number")
+        assert "Error" in result
