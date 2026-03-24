@@ -6,6 +6,7 @@ structured Blueprint passing, and human escalation.
 """
 
 import json
+import logging
 import os
 from enum import Enum
 from typing import Literal
@@ -23,6 +24,8 @@ from .memory.chroma_store import ChromaMemoryStore
 from .tracing import add_trace_event, create_trace_config
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 
 # -- Configuration --
@@ -131,6 +134,9 @@ def architect_node(state: AgentState) -> dict:
     trace = list(state.trace)
     trace.append("architect: starting planning")
 
+    logger.info("[ARCH] retry_count=%d, tokens_used=%d, status=%s",
+                state.retry_count, state.tokens_used, state.status.value)
+
     # Fetch memory context
     memory_context = _fetch_memory_context(state.task_description)
 
@@ -187,6 +193,8 @@ Do not include any text before or after the JSON.{memory_block}"""
     trace.append(f"architect: blueprint created for {len(blueprint.target_files)} files")
     tokens_used = state.tokens_used + (response.usage_metadata.get("total_tokens", 0) if response.usage_metadata else 0)
 
+    logger.info("[ARCH] done. tokens_used now=%d", tokens_used)
+
     return {
         "blueprint": blueprint,
         "status": WorkflowStatus.BUILDING,
@@ -203,6 +211,9 @@ def developer_node(state: AgentState) -> dict:
     """
     trace = list(state.trace)
     trace.append("developer: starting build")
+
+    logger.info("[DEV] retry_count=%d, tokens_used=%d, status=%s",
+                state.retry_count, state.tokens_used, state.status.value)
 
     if not state.blueprint:
         trace.append("developer: no blueprint provided")
@@ -243,6 +254,8 @@ Write clean, well-documented code."""
     trace.append(f"developer: code generated ({len(response.content)} chars)")
     tokens_used = state.tokens_used + (response.usage_metadata.get("total_tokens", 0) if response.usage_metadata else 0)
 
+    logger.info("[DEV] done. tokens_used now=%d", tokens_used)
+
     return {
         "generated_code": response.content,
         "status": WorkflowStatus.REVIEWING,
@@ -259,6 +272,9 @@ def qa_node(state: AgentState) -> dict:
     """
     trace = list(state.trace)
     trace.append("qa: starting review")
+
+    logger.info("[QA] retry_count=%d, tokens_used=%d, status=%s",
+                state.retry_count, state.tokens_used, state.status.value)
 
     if not state.generated_code or not state.blueprint:
         trace.append("qa: missing code or blueprint")
@@ -322,11 +338,15 @@ Do not include any text before or after the JSON."""
     else:
         status = WorkflowStatus.REVIEWING
 
+    new_retry_count = state.retry_count + (1 if failure_report.status != "pass" else 0)
+    logger.info("[QA] verdict=%s, retry_count %d->%d, tokens_used=%d",
+                failure_report.status, state.retry_count, new_retry_count, tokens_used)
+
     return {
         "failure_report": failure_report,
         "status": status,
         "tokens_used": tokens_used,
-        "retry_count": state.retry_count + (1 if failure_report.status != "pass" else 0),
+        "retry_count": new_retry_count,
         "trace": trace,
     }
 
@@ -335,17 +355,27 @@ Do not include any text before or after the JSON."""
 
 def route_after_qa(state: AgentState) -> Literal["developer", "architect", "__end__"]:
     """Decide where to go after QA review."""
+    logger.info(
+        "[ROUTER] status=%s, retry_count=%d, tokens_used=%d, max_retries=%d, token_budget=%d",
+        state.status.value, state.retry_count, state.tokens_used, MAX_RETRIES, TOKEN_BUDGET,
+    )
+
     if state.status == WorkflowStatus.PASSED:
+        logger.info("[ROUTER] -> END (passed)")
         return END
 
     if state.retry_count >= MAX_RETRIES:
+        logger.info("[ROUTER] -> END (max retries)")
         return END
     if state.tokens_used >= TOKEN_BUDGET:
+        logger.info("[ROUTER] -> END (token budget)")
         return END
 
     if state.status == WorkflowStatus.ESCALATED:
+        logger.info("[ROUTER] -> architect (escalation)")
         return "architect"
     else:
+        logger.info("[ROUTER] -> developer (retry)")
         return "developer"
 
 
@@ -405,7 +435,13 @@ def run_task(task_description: str, enable_tracing: bool = True) -> AgentState:
 
     # Pass Langfuse callbacks to LangGraph — this automatically
     # creates spans for each LLM call with token usage and latencies
-    invoke_config = {}
+    invoke_config = {
+        # Safety net: hard cap on graph steps to prevent infinite loops.
+        # Normal flow: arch(1) + dev(1) + qa(1) = 3 steps per attempt.
+        # With MAX_RETRIES=3: up to 3 + (3 * 2) = 9 steps for dev/qa retries,
+        # plus possible escalation cycles. 25 gives ample headroom.
+        "recursion_limit": 25,
+    }
     if trace_config.callbacks:
         invoke_config["callbacks"] = trace_config.callbacks
 
