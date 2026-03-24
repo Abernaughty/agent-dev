@@ -98,9 +98,9 @@ def load_mcp_config(config_path: str | Path) -> MCPConfig:
 def get_tools(provider: ToolProvider) -> list[Tool]:
     """Create LangChain Tool objects from a ToolProvider.
 
-    This is the main entry point for the orchestrator.
-    Call this with any ToolProvider implementation and get back
-    a list of Tools ready to bind to LangGraph agents.
+    Dynamically generates Tools from the provider's list_tools() response.
+    Each generated Tool wraps provider.call_tool() with JSON input parsing
+    for multi-argument tools and string passthrough for single-argument tools.
 
     Args:
         provider: Any ToolProvider (LocalToolProvider, MCPToolProvider, etc.)
@@ -108,85 +108,69 @@ def get_tools(provider: ToolProvider) -> list[Tool]:
     Returns:
         List of LangChain Tool objects the agents can use.
     """
-    return [
-        Tool(
-            name="filesystem_read",
-            description=(
-                "Read a file from the project workspace. "
-                "Input: relative file path (e.g., 'src/main.py'). "
-                "Output: file contents as text."
-            ),
-            func=provider.filesystem_read,
-        ),
-        Tool(
-            name="filesystem_write",
-            description=(
-                "Write content to a file in the project workspace. "
-                "Input: JSON string with 'path' and 'content' keys. "
-                "Output: confirmation message."
-            ),
-            func=lambda input_str, p=provider: _parse_write_call(p, input_str),
-        ),
-        Tool(
-            name="filesystem_list",
-            description=(
-                "List files and directories in the project workspace. "
-                "Input: relative directory path (e.g., 'src/' or '.'). "
-                "Output: formatted directory listing."
-            ),
-            func=provider.filesystem_list,
-        ),
-        Tool(
-            name="github_create_pr",
-            description=(
-                "Create a GitHub pull request. "
-                "Input: JSON string with 'title', 'body', 'head_branch', "
-                "and optional 'base_branch' keys. "
-                "Output: PR URL."
-            ),
-            func=lambda input_str, p=provider: _parse_create_pr_call(p, input_str),
-        ),
-        Tool(
-            name="github_read_diff",
-            description=(
-                "Read the diff of a GitHub pull request. "
-                "Input: PR number as a string (e.g., '42'). "
-                "Output: diff text."
-            ),
-            func=lambda input_str, p=provider: p.github_read_diff(int(input_str.strip())),
-        ),
-    ]
+    tools = []
+    for defn in provider.list_tools():
+        properties = defn.parameters.get("properties", {})
+        required = defn.parameters.get("required", [])
+
+        # Determine if this is a single-arg tool (one required string param)
+        # or a multi-arg tool (needs JSON parsing)
+        single_arg_key = None
+        if len(required) == 1 and len(properties) == 1:
+            key = required[0]
+            if properties[key].get("type") == "string":
+                single_arg_key = key
+
+        if single_arg_key:
+            # Single string argument — pass the raw input string directly
+            tool = Tool(
+                name=defn.name,
+                description=defn.description,
+                func=_make_single_arg_handler(provider, defn.name, single_arg_key),
+            )
+        else:
+            # Multi-argument — expect JSON input and parse it
+            tool = Tool(
+                name=defn.name,
+                description=_build_json_description(defn),
+                func=_make_multi_arg_handler(provider, defn.name),
+            )
+
+        tools.append(tool)
+
+    return tools
 
 
-def _parse_write_call(provider: ToolProvider, input_str: str) -> str:
-    """Parse JSON input for filesystem_write and call the provider."""
-    try:
-        data = json.loads(input_str)
-    except json.JSONDecodeError:
-        return "Error: Input must be a JSON string with 'path' and 'content' keys."
-
-    path = data.get("path")
-    content = data.get("content")
-
-    if not path or content is None:
-        return "Error: JSON must include 'path' and 'content' keys."
-
-    return provider.filesystem_write(path, content)
+def _make_single_arg_handler(provider: ToolProvider, tool_name: str, arg_key: str):
+    """Create a handler for a single-string-argument tool."""
+    def handler(input_str: str) -> str:
+        return provider.call_tool(tool_name, {arg_key: input_str.strip()})
+    return handler
 
 
-def _parse_create_pr_call(provider: ToolProvider, input_str: str) -> str:
-    """Parse JSON input for github_create_pr and call the provider."""
-    try:
-        data = json.loads(input_str)
-    except json.JSONDecodeError:
-        return "Error: Input must be a JSON string with 'title', 'body', and 'head_branch' keys."
+def _make_multi_arg_handler(provider: ToolProvider, tool_name: str):
+    """Create a handler that parses JSON input for a multi-argument tool."""
+    def handler(input_str: str) -> str:
+        try:
+            arguments = json.loads(input_str)
+        except json.JSONDecodeError:
+            return f"Error: Input for '{tool_name}' must be a valid JSON string."
 
-    title = data.get("title")
-    body = data.get("body", "")
-    head_branch = data.get("head_branch")
-    base_branch = data.get("base_branch", "main")
+        if not isinstance(arguments, dict):
+            return f"Error: Input for '{tool_name}' must be a JSON object."
 
-    if not title or not head_branch:
-        return "Error: JSON must include 'title' and 'head_branch' keys."
+        return provider.call_tool(tool_name, arguments)
+    return handler
 
-    return provider.github_create_pr(title, body, head_branch, base_branch)
+
+def _build_json_description(defn) -> str:
+    """Append JSON input hint to a multi-arg tool's description."""
+    required = defn.parameters.get("required", [])
+    properties = defn.parameters.get("properties", {})
+    optional = [k for k in properties if k not in required]
+
+    parts = [defn.description, f"Input: JSON string with {', '.join(repr(k) for k in required)} keys."]
+    if optional:
+        parts.append(f"Optional: {', '.join(repr(k) for k in optional)}.")
+
+    return " ".join(parts)
