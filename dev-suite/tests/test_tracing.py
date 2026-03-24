@@ -275,15 +275,16 @@ class TestCreateTraceConfig:
 
 
 # ============================================================
-# add_trace_event (v4 OTEL span-based)
+# add_trace_event (v4 OTEL event-based)
 # ============================================================
 
 
 class TestAddTraceEvent:
-    """Test custom event recording via v4 OTEL spans.
+    """Test custom event recording via v4 OTEL observations.
 
-    In v4, add_trace_event creates a span via
-    client.start_as_current_observation() instead of client.event().
+    In v4, add_trace_event creates an event observation via
+    client.start_as_current_observation(as_type="event") with
+    level passed as a direct SDK argument.
     """
 
     def test_noop_when_disabled(self):
@@ -291,15 +292,16 @@ class TestAddTraceEvent:
         add_trace_event(config, "test_event")  # Should not raise
 
     @patch("langfuse.get_client")
-    def test_creates_span_when_enabled(self, mock_get_client):
-        """v4: Events are recorded as OTEL spans via start_as_current_observation."""
+    def test_creates_event_when_enabled(self, mock_get_client):
+        """v4: Events are recorded as OTEL observations via start_as_current_observation."""
         mock_client = MagicMock()
-        mock_span = MagicMock()
+        captured_kwargs = {}
 
         # Mock the context manager
         @contextmanager
         def mock_start_observation(**kwargs):
-            yield mock_span
+            captured_kwargs.update(kwargs)
+            yield MagicMock()
 
         mock_client.start_as_current_observation = mock_start_observation
         mock_get_client.return_value = mock_client
@@ -312,8 +314,10 @@ class TestAddTraceEvent:
             metadata={"tier": "L0-Core", "results": 5},
         )
 
-        # Verify span was created with correct attributes
-        mock_span.set_attribute.assert_called_once_with("level", "DEFAULT")
+        # Verify observation was created with correct type and level as SDK arg
+        assert captured_kwargs["as_type"] == "event"
+        assert captured_kwargs["level"] == "DEFAULT"
+        assert captured_kwargs["name"] == "memory_query"
 
     @patch("langfuse.get_client")
     def test_span_receives_correct_name_and_metadata(self, mock_get_client):
@@ -337,7 +341,8 @@ class TestAddTraceEvent:
         )
 
         assert captured_kwargs["name"] == "budget_check"
-        assert captured_kwargs["as_type"] == "span"
+        assert captured_kwargs["as_type"] == "event"
+        assert captured_kwargs["level"] == "DEFAULT"
         # Non-string metadata values are coerced to strings (v4 requirement)
         assert captured_kwargs["metadata"]["tokens_used"] == "12000"
         assert captured_kwargs["metadata"]["budget"] == "50000"
@@ -453,7 +458,7 @@ class TestTracingLifecycle:
             assert config.enabled is True
             assert config.session_id == "session-lifecycle"
 
-            # 2. Add events for each phase (v4: creates OTEL spans)
+            # 2. Add events for each phase (v4: creates OTEL observations)
             add_trace_event(config, "memory_query", metadata={"results": 10})
             add_trace_event(config, "architect_start")
             add_trace_event(config, "developer_start", metadata={"retry": 0})
@@ -466,7 +471,7 @@ class TestTracingLifecycle:
             # 3. Flush
             config.flush()
 
-        # Verify all events created spans
+        # Verify all events created observations
         assert span_names == [
             "memory_query",
             "architect_start",

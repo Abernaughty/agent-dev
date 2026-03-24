@@ -175,8 +175,9 @@ def add_trace_event(
     sandbox executions, retry decisions, or budget checks.
 
     In Langfuse v4 (OTEL-based), custom events are recorded as
-    spans via get_client().start_as_current_observation(). This
-    creates a zero-duration span that appears in the trace timeline.
+    observations via get_client().start_as_current_observation().
+    The level parameter is passed directly to the SDK for proper
+    Langfuse-level semantics (filtering/status behavior).
 
     Args:
         config: The active TracingConfig.
@@ -200,13 +201,18 @@ def add_trace_event(
                 # v4 metadata values must be strings <= 200 chars
                 safe_metadata[k] = str(val)[:200]
 
-        # Create a point-in-time span for this event
+        # Create a point-in-time event for this observation.
+        # NOTE: When called outside an active CallbackHandler span context
+        # (e.g., before/after workflow.invoke), this creates a root observation
+        # rather than a child of the orchestrator trace. Full trace context
+        # propagation is tracked in issue #25.
         with client.start_as_current_observation(
-            as_type="span",
+            as_type="event",
             name=name,
             metadata=safe_metadata,
-        ) as span:
-            span.set_attribute("level", level)
+            level=level,
+        ):
+            pass  # event is point-in-time, no body needed
 
         logger.debug("Trace event '%s': %s", name, safe_metadata)
 
