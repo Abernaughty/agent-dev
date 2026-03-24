@@ -125,6 +125,9 @@ class E2BRunner:
     The API key is read from the E2B_API_KEY environment variable.
     Make sure it's set in your .env file or shell environment.
 
+    Correct usage per E2B SDK v2 (from official docs):
+        Sandbox.create() is the factory method - never call Sandbox() directly.
+
     Usage:
         runner = E2BRunner()
         result = runner.run("print('hello')")
@@ -163,8 +166,9 @@ class E2BRunner:
             env_vars = None
 
         try:
-            # E2B v1 SDK: use Sandbox.create() or context manager
-            with Sandbox() as sbx:
+            # E2B v2 SDK: Sandbox.create() is the public factory method.
+            # Using it as a context manager auto-kills the sandbox on exit.
+            with Sandbox.create() as sbx:
                 # Inject env vars if provided
                 if env_vars:
                     env_setup = "\n".join(
@@ -173,7 +177,7 @@ class E2BRunner:
                     sbx.run_code(env_setup)
 
                 # Execute the actual code
-                execution = sbx.run_code(code, timeout=timeout)
+                execution = sbx.run_code(code)
 
                 # Collect raw output
                 raw_stdout = ""
