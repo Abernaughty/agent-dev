@@ -8,7 +8,7 @@ Role-specific profiles:
   - Permissive: Research (open egress, zero secrets)
 """
 
-import json
+import os
 import re
 from enum import Enum
 
@@ -122,14 +122,20 @@ def _extract_errors(output: str) -> list[str]:
 class E2BRunner:
     """Execute code in E2B sandboxes with structured output.
 
+    The API key is read from the E2B_API_KEY environment variable.
+    Make sure it's set in your .env file or shell environment.
+
     Usage:
-        runner = E2BRunner(api_key="your-e2b-key")
+        runner = E2BRunner()
         result = runner.run("print('hello')")
         print(result.output_summary)
     """
 
-    def __init__(self, api_key: str, default_timeout: int = 30):
-        self._api_key = api_key
+    def __init__(self, api_key: str | None = None, default_timeout: int = 30):
+        # E2B SDK reads from E2B_API_KEY env var automatically.
+        # If an explicit key is passed, set it in the environment.
+        if api_key:
+            os.environ["E2B_API_KEY"] = api_key
         self._default_timeout = default_timeout
 
     def run(
@@ -157,7 +163,7 @@ class E2BRunner:
             env_vars = None
 
         try:
-            sbx = Sandbox(api_key=self._api_key, timeout=timeout)
+            sbx = Sandbox(timeout=timeout)
 
             try:
                 # Inject env vars if provided
