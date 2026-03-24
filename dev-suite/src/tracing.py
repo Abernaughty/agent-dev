@@ -118,7 +118,7 @@ def create_trace_config(
     Langfuse v4 (OTEL-based):
         - CallbackHandler() is self-contained — auto-creates traces
         - No manual client.trace() call needed
-        - Trace attributes set via propagate_attributes() or on the handler
+        - No constructor args needed — credentials read from env vars
 
     Args:
         enabled: Whether to enable tracing.
@@ -147,10 +147,8 @@ def create_trace_config(
 
         # Langfuse v4: CallbackHandler is self-contained.
         # It auto-creates a trace when LangChain invokes with this callback.
-        # Session ID and metadata are passed directly to the handler.
-        handler = CallbackHandler(
-            session_id=session_id,
-        )
+        # Credentials are read from LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY env vars.
+        handler = CallbackHandler()
 
         logger.info("Langfuse tracing initialized (v4 OTEL-based)")
 

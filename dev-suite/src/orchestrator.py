@@ -75,7 +75,7 @@ class AgentState(BaseModel):
 def _get_architect_llm():
     """Gemini for the Architect agent (large context, planning only)."""
     return ChatGoogleGenerativeAI(
-        model="gemini-2.0-flash",
+        model=os.getenv("ARCHITECT_MODEL", "gemini-2.5-flash"),
         google_api_key=os.getenv("GOOGLE_API_KEY"),
         temperature=0.2,
     )
@@ -84,7 +84,7 @@ def _get_architect_llm():
 def _get_developer_llm():
     """Claude for the Lead Dev agent (code execution)."""
     return ChatAnthropic(
-        model="claude-sonnet-4-20250514",
+        model=os.getenv("DEVELOPER_MODEL", "claude-sonnet-4-20250514"),
         api_key=os.getenv("ANTHROPIC_API_KEY"),
         temperature=0.1,
         max_tokens=8192,
@@ -94,7 +94,7 @@ def _get_developer_llm():
 def _get_qa_llm():
     """Claude for the QA agent (review and testing)."""
     return ChatAnthropic(
-        model="claude-sonnet-4-20250514",
+        model=os.getenv("QA_MODEL", "claude-sonnet-4-20250514"),
         api_key=os.getenv("ANTHROPIC_API_KEY"),
         temperature=0.0,
         max_tokens=4096,
