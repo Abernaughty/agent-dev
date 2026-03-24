@@ -117,6 +117,30 @@ def _extract_errors(output: str) -> list[str]:
     return errors[:10]  # Hard cap
 
 
+def _extract_execution_error(error_obj) -> str:
+    """Extract error string from E2B execution.error object.
+
+    The error object may be a string, have .name/.value/.traceback attrs,
+    or be some other structure. We handle all cases.
+    """
+    if error_obj is None:
+        return ""
+    if isinstance(error_obj, str):
+        return error_obj
+
+    # E2B ExecutionError typically has .name, .value, .traceback
+    parts = []
+    if hasattr(error_obj, "name"):
+        parts.append(str(error_obj.name))
+    if hasattr(error_obj, "value"):
+        parts.append(str(error_obj.value))
+    if parts:
+        return ": ".join(parts)
+
+    # Fallback
+    return str(error_obj)
+
+
 # ── Runner ──
 
 class E2BRunner:
@@ -191,10 +215,22 @@ class E2BRunner:
 
                 # Layer 1: Structured output wrapper
                 test_info = _parse_test_output(combined)
+
+                # Extract errors from both stdout/stderr AND execution.error
                 errors = _extract_errors(combined)
+                if execution.error:
+                    exec_err = _extract_execution_error(execution.error)
+                    if exec_err and exec_err not in errors:
+                        errors.insert(0, exec_err)
 
                 # Layer 2: Secret scanning
                 safe_summary = _scan_for_secrets(combined)
+
+                # If stdout/stderr was empty but we have an execution error,
+                # include the error in the summary
+                if not safe_summary.strip() and execution.error:
+                    exec_err = _extract_execution_error(execution.error)
+                    safe_summary = _scan_for_secrets(exec_err)
 
                 # Truncate summary to prevent context bloat
                 if len(safe_summary) > 2000:
