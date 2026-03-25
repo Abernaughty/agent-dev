@@ -402,6 +402,9 @@ def _apply_overrides(args: argparse.Namespace) -> None:
 
     Model and budget overrides are set as env vars so they propagate
     to the orchestrator's LLM initialization and config.
+
+    IMPORTANT: Must be called AFTER load_dotenv() in each handler
+    so that CLI flags always take precedence over .env file values.
     """
     if args.model_architect:
         os.environ["ARCHITECT_MODEL"] = args.model_architect
@@ -431,6 +434,15 @@ def handle_dry_run(args: argparse.Namespace) -> int:
         print(f"{C.red('Error:')} Workspace path does not exist: {workspace}")
         return 1
 
+    # Change to workspace and reload .env so --dry-run validates
+    # the same config that --run / --plan would use.
+    os.chdir(workspace)
+    load_dotenv(override=True)
+
+    # Apply CLI flag overrides AFTER dotenv reload so --budget,
+    # --model-* flags always win over .env file values.
+    _apply_overrides(args)
+
     config = validate_config()
     print_dry_run(config, workspace, args.task)
     return 0 if config["valid"] else 1
@@ -451,6 +463,10 @@ def handle_plan(args: argparse.Namespace) -> int:
     # API keys are picked up (the initial load_dotenv() in main()
     # only reads from the original cwd).
     load_dotenv(override=True)
+
+    # Apply CLI flag overrides AFTER dotenv reload so --budget,
+    # --model-* flags always win over .env file values.
+    _apply_overrides(args)
 
     # --plan only needs GOOGLE_API_KEY (Architect uses Gemini).
     # Don't gate on ANTHROPIC_API_KEY or E2B_API_KEY.
@@ -535,6 +551,10 @@ def handle_run(args: argparse.Namespace) -> int:
     # only reads from the original cwd).
     load_dotenv(override=True)
 
+    # Apply CLI flag overrides AFTER dotenv reload so --budget,
+    # --model-* flags always win over .env file values.
+    _apply_overrides(args)
+
     config = validate_config()
     if not config["valid"]:
         print(f"{C.red('Error:')} Missing required API keys: {', '.join(config['missing'])}")
@@ -577,8 +597,8 @@ def main(argv: list[str] | None = None) -> int:
     Returns:
         Exit code (0 = success, 1 = error).
     """
-    # Load .env from cwd as a baseline. When --workspace is used,
-    # handlers reload .env from the workspace directory.
+    # Load .env from cwd as a baseline. Handlers reload from
+    # workspace dir and apply CLI overrides after.
     load_dotenv()
 
     parser = build_parser()
@@ -589,7 +609,6 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "run":
-        _apply_overrides(args)
         _setup_logging(args.verbose)
 
         if args.dry_run:
