@@ -216,7 +216,6 @@ def print_blueprint(blueprint_data: dict, tokens_used: int, elapsed: float) -> N
     instructions = blueprint_data.get("instructions", "")
     if instructions:
         print(f"\n  {C.bold('Instructions')}")
-        # Wrap long instructions
         for line in instructions.split("\n"):
             print(f"    {line}")
 
@@ -251,7 +250,6 @@ def print_run_result(state, elapsed: float) -> None:
 
     _print_header("RUN COMPLETE" if is_pass else "RUN FINISHED")
 
-    # Status
     status_str = {
         WorkflowStatus.PASSED: C.green("✓ PASSED"),
         WorkflowStatus.FAILED: C.red("✗ FAILED"),
@@ -263,29 +261,25 @@ def print_run_result(state, elapsed: float) -> None:
     if state.error_message:
         print(f"  {C.red('Error:')} {state.error_message}")
 
-    # Metrics
     print(f"\n  {C.bold('Metrics')}")
     budget = int(os.getenv("TOKEN_BUDGET", "50000"))
     pct = round((state.tokens_used / budget) * 100) if budget else 0
-    cost_est = state.tokens_used * 0.000012  # rough estimate
+    cost_est = state.tokens_used * 0.000012
 
     _print_kv("Tokens used", f"{state.tokens_used:,} / {budget:,} ({pct}%)")
     _print_kv("Estimated cost", f"${cost_est:.4f}")
     _print_kv("Retries", f"{state.retry_count} / {int(os.getenv('MAX_RETRIES', '3'))}")
     _print_kv("Elapsed", f"{elapsed:.1f}s")
 
-    # Blueprint summary
     if state.blueprint:
         print(f"\n  {C.bold('Blueprint')}")
         _print_kv("Task ID", state.blueprint.task_id)
         _print_kv("Files", ", ".join(state.blueprint.target_files))
 
-    # Trace URL hint
     if _check_env_key("LANGFUSE_PUBLIC_KEY"):
         host = os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com")
         print(f"\n  {C.dim(f'Trace: {host} (check Langfuse dashboard)')}")
 
-    # Trace log
     if state.trace:
         print(f"\n  {C.bold('Trace')}")
         for entry in state.trace:
@@ -306,92 +300,35 @@ def build_parser() -> argparse.ArgumentParser:
   dev-suite run "Refactor auth module" --dry-run
   dev-suite run "Build REST API" --budget 100000 --verbose""",
     )
-
-    parser.add_argument(
-        "--version", action="version", version=f"dev-suite {__version__}"
-    )
-
+    parser.add_argument("--version", action="version", version=f"dev-suite {__version__}")
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
-    # -- run subcommand --
     run_parser = subparsers.add_parser(
-        "run",
-        help="Run a task through the agent workforce",
+        "run", help="Run a task through the agent workforce",
         description="Execute a task through the Architect → Lead Dev → QA pipeline.",
     )
+    run_parser.add_argument("task", type=str, help="Task description for the agents")
 
-    run_parser.add_argument(
-        "task",
-        type=str,
-        help="Task description for the agents",
-    )
-
-    # Mode flags (mutually exclusive)
     mode_group = run_parser.add_mutually_exclusive_group()
-    mode_group.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Validate config and show execution plan (zero API calls)",
-    )
-    mode_group.add_argument(
-        "--plan",
-        action="store_true",
-        help="Run Architect only, show Blueprint (one API call)",
-    )
+    mode_group.add_argument("--dry-run", action="store_true",
+                            help="Validate config and show execution plan (zero API calls)")
+    mode_group.add_argument("--plan", action="store_true",
+                            help="Run Architect only, show Blueprint (one API call)")
 
-    # Model overrides
-    run_parser.add_argument(
-        "--model-architect",
-        type=str,
-        default=None,
-        metavar="MODEL",
-        help="Override Architect model (default: gemini-3-flash-preview)",
-    )
-    run_parser.add_argument(
-        "--model-developer",
-        type=str,
-        default=None,
-        metavar="MODEL",
-        help="Override Lead Dev model (default: claude-sonnet-4-20250514)",
-    )
-    run_parser.add_argument(
-        "--model-qa",
-        type=str,
-        default=None,
-        metavar="MODEL",
-        help="Override QA model (default: claude-sonnet-4-20250514)",
-    )
-
-    # Budget
-    run_parser.add_argument(
-        "--budget",
-        type=int,
-        default=None,
-        metavar="TOKENS",
-        help="Token budget ceiling (default: 50000)",
-    )
-
-    # Workspace
-    run_parser.add_argument(
-        "--workspace",
-        type=str,
-        default=None,
-        metavar="PATH",
-        help="Workspace root directory (default: current directory)",
-    )
-
-    # Verbosity / tracing
-    run_parser.add_argument(
-        "--verbose", "-v",
-        action="store_true",
-        help="Stream agent activity to stdout (DEBUG logging)",
-    )
-    run_parser.add_argument(
-        "--no-trace",
-        action="store_true",
-        help="Disable Langfuse tracing",
-    )
-
+    run_parser.add_argument("--model-architect", type=str, default=None, metavar="MODEL",
+                            help="Override Architect model (default: gemini-3-flash-preview)")
+    run_parser.add_argument("--model-developer", type=str, default=None, metavar="MODEL",
+                            help="Override Lead Dev model (default: claude-sonnet-4-20250514)")
+    run_parser.add_argument("--model-qa", type=str, default=None, metavar="MODEL",
+                            help="Override QA model (default: claude-sonnet-4-20250514)")
+    run_parser.add_argument("--budget", type=int, default=None, metavar="TOKENS",
+                            help="Token budget ceiling (default: 50000)")
+    run_parser.add_argument("--workspace", type=str, default=None, metavar="PATH",
+                            help="Workspace root directory (default: current directory)")
+    run_parser.add_argument("--verbose", "-v", action="store_true",
+                            help="Stream agent activity to stdout (DEBUG logging)")
+    run_parser.add_argument("--no-trace", action="store_true",
+                            help="Disable Langfuse tracing")
     return parser
 
 
@@ -434,13 +371,8 @@ def handle_dry_run(args: argparse.Namespace) -> int:
         print(f"{C.red('Error:')} Workspace path does not exist: {workspace}")
         return 1
 
-    # Change to workspace and reload .env so --dry-run validates
-    # the same config that --run / --plan would use.
     os.chdir(workspace)
     load_dotenv(override=True)
-
-    # Apply CLI flag overrides AFTER dotenv reload so --budget,
-    # --model-* flags always win over .env file values.
     _apply_overrides(args)
 
     config = validate_config()
@@ -450,29 +382,26 @@ def handle_dry_run(args: argparse.Namespace) -> int:
 
 def handle_plan(args: argparse.Namespace) -> int:
     """Handle --plan: run Architect only, show Blueprint."""
-    # Validate workspace before anything else
     workspace = args.workspace or os.getcwd()
     if not Path(workspace).is_dir():
         print(f"{C.red('Error:')} Workspace path does not exist: {workspace}")
         return 1
 
-    # Change to workspace so file/tool operations resolve correctly
     os.chdir(workspace)
-
-    # Reload .env from the workspace directory so workspace-local
-    # API keys are picked up (the initial load_dotenv() in main()
-    # only reads from the original cwd).
     load_dotenv(override=True)
-
-    # Apply CLI flag overrides AFTER dotenv reload so --budget,
-    # --model-* flags always win over .env file values.
     _apply_overrides(args)
 
-    # --plan only needs GOOGLE_API_KEY (Architect uses Gemini).
-    # Don't gate on ANTHROPIC_API_KEY or E2B_API_KEY.
     if not _check_env_key("GOOGLE_API_KEY"):
         print(f"{C.red('Error:')} GOOGLE_API_KEY is required for --plan mode.")
         print(f"{C.dim('Run with --dry-run to see full config status.')}")
+        return 1
+
+    # Validate numeric config before importing orchestrator, which
+    # reads MAX_RETRIES/TOKEN_BUDGET at module level.
+    config = validate_config()
+    if config["errors"]:
+        for err in config["errors"]:
+            print(f"{C.red('Config error:')} {err}")
         return 1
 
     from .orchestrator import (
@@ -488,7 +417,6 @@ def handle_plan(args: argparse.Namespace) -> int:
         task_description=args.task,
     )
 
-    # Build a minimal LangGraph with just the Architect
     from langgraph.graph import END, START, StateGraph
 
     plan_graph = StateGraph(GraphState)
@@ -537,22 +465,13 @@ def handle_plan(args: argparse.Namespace) -> int:
 
 def handle_run(args: argparse.Namespace) -> int:
     """Handle full run: Architect → Lead Dev → QA loop."""
-    # Validate workspace before anything else
     workspace = args.workspace or os.getcwd()
     if not Path(workspace).is_dir():
         print(f"{C.red('Error:')} Workspace path does not exist: {workspace}")
         return 1
 
-    # Change to workspace so file/tool operations resolve correctly
     os.chdir(workspace)
-
-    # Reload .env from the workspace directory so workspace-local
-    # API keys are picked up (the initial load_dotenv() in main()
-    # only reads from the original cwd).
     load_dotenv(override=True)
-
-    # Apply CLI flag overrides AFTER dotenv reload so --budget,
-    # --model-* flags always win over .env file values.
     _apply_overrides(args)
 
     config = validate_config()
@@ -618,7 +537,6 @@ def main(argv: list[str] | None = None) -> int:
         else:
             return handle_run(args)
 
-    # Shouldn't reach here, but just in case
     parser.print_help()
     return 0
 
