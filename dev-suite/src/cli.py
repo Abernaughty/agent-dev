@@ -9,6 +9,12 @@ Modes:
     run             Full agent workflow (Architect → Lead Dev → QA)
     run --dry-run   Validate config, show execution plan (zero API calls)
     run --plan      Run Architect only, show Blueprint (one API call)
+
+Environment precedence (highest to lowest):
+    1. CLI flags (--budget, --model-*)
+    2. Shell-exported env vars (never overwritten by .env)
+    3. Workspace .env file (fills unset vars only)
+    4. Defaults in code
 """
 
 import argparse
@@ -106,7 +112,9 @@ def validate_config() -> dict:
             budget[key.lower()] = int(raw)
         except ValueError:
             budget[key.lower()] = default
-            errors.append(f"{key}={raw!r} is not a valid integer (using default {default})")
+            errors.append(
+                f"{key}={raw!r} is not a valid integer (using default {default})"
+            )
 
     return {
         "valid": len(missing) == 0 and len(errors) == 0,
@@ -116,6 +124,59 @@ def validate_config() -> dict:
         "models": models,
         "budget": budget,
     }
+
+
+# ── Environment Setup ──
+
+def _setup_env(args: argparse.Namespace) -> str:
+    """Set up the environment for a run command.
+
+    Implements the correct loading sequence:
+        1. Resolve and validate workspace path
+        2. chdir to workspace
+        3. load_dotenv() — fills unset vars only (no override)
+        4. Apply CLI flag overrides (always win)
+
+    This is called ONCE from main() after parsing args but before
+    dispatching to any handler. No handler should call load_dotenv()
+    or apply overrides — it's all done here.
+
+    Returns:
+        The resolved workspace path.
+
+    Raises:
+        SystemExit: If workspace is invalid or --budget is non-positive.
+    """
+    workspace = args.workspace or os.getcwd()
+
+    if not Path(workspace).is_dir():
+        print(f"{C.red('Error:')} Workspace path does not exist: {workspace}")
+        sys.exit(1)
+
+    os.chdir(workspace)
+
+    # Load workspace .env. Default behavior (no override): only sets
+    # vars that aren't already in the environment. This preserves
+    # shell-exported secrets and CI variables.
+    load_dotenv()
+
+    # CLI flags always take highest precedence.
+    if args.model_architect:
+        os.environ["ARCHITECT_MODEL"] = args.model_architect
+    if args.model_developer:
+        os.environ["DEVELOPER_MODEL"] = args.model_developer
+    if args.model_qa:
+        os.environ["QA_MODEL"] = args.model_qa
+    if args.budget is not None:
+        if args.budget <= 0:
+            print(
+                f"{C.red('Error:')} --budget must be a positive integer, "
+                f"got {args.budget}"
+            )
+            sys.exit(1)
+        os.environ["TOKEN_BUDGET"] = str(args.budget)
+
+    return workspace
 
 
 # ── Output Formatting ──
@@ -159,15 +220,17 @@ def print_dry_run(config: dict, workspace: str, task: str) -> None:
 
     tracing_ok = all(_check_env_key(k) for k in _OPTIONAL_KEYS)
     print(f"\n  {C.bold('Tracing')}")
-    langfuse_status = C.green("enabled") if tracing_ok else C.yellow("disabled (keys missing)")
-    _print_kv("  Langfuse", langfuse_status, indent=2)
+    status = C.green("enabled") if tracing_ok else C.yellow("disabled (keys missing)")
+    _print_kv("  Langfuse", status, indent=2)
 
-    for err in config.get("errors", []):
+    config_errors = config.get("errors", [])
+    if config_errors:
         print(f"\n  {C.bold('Config Errors')}")
-        print(f"    {C.red('✗')} {err}")
+        for err in config_errors:
+            print(f"    {C.red('✗')} {err}")
 
     if config["valid"]:
-        print(f"\n  {C.green('✓ All required keys present. Ready to run.')}")
+        print(f"\n  {C.green('✓ All checks passed. Ready to run.')}")
     else:
         if config["missing"]:
             print(f"\n  {C.red('✗ Missing required API keys:')}")
@@ -181,19 +244,29 @@ def print_blueprint(blueprint_data: dict, tokens_used: int, elapsed: float) -> N
     _print_header("PLAN — Architect Blueprint")
     print(f"\n  {C.cyan('Task ID:')} {blueprint_data.get('task_id', 'unknown')}")
 
-    for section, items in [("Target Files", "target_files"), ("Constraints", "constraints"),
-                           ("Acceptance Criteria", "acceptance_criteria")]:
-        vals = blueprint_data.get(items, [])
-        if vals:
-            print(f"\n  {C.bold(section)}")
-            for v in vals:
-                print(f"    {C.cyan(v)}" if items == "target_files" else f"    {v}")
+    files = blueprint_data.get("target_files", [])
+    if files:
+        print(f"\n  {C.bold('Target Files')}")
+        for f in files:
+            print(f"    {C.cyan(f)}")
 
     instructions = blueprint_data.get("instructions", "")
     if instructions:
         print(f"\n  {C.bold('Instructions')}")
         for line in instructions.split("\n"):
             print(f"    {line}")
+
+    constraints = blueprint_data.get("constraints", [])
+    if constraints:
+        print(f"\n  {C.bold('Constraints')}")
+        for c in constraints:
+            print(f"    {C.yellow('•')} {c}")
+
+    criteria = blueprint_data.get("acceptance_criteria", [])
+    if criteria:
+        print(f"\n  {C.bold('Acceptance Criteria')}")
+        for c in criteria:
+            print(f"    {C.green('□')} {c}")
 
     print(f"\n  {C.dim(f'Tokens: {tokens_used:,} | Elapsed: {elapsed:.1f}s')}")
     print(f"\n  {C.bold('Raw JSON')}")
@@ -203,6 +276,7 @@ def print_blueprint(blueprint_data: dict, tokens_used: int, elapsed: float) -> N
 def print_run_result(state, elapsed: float) -> None:
     """Print the result of a full run."""
     from .orchestrator import WorkflowStatus
+
     status = state.status
     _print_header("RUN COMPLETE" if status == WorkflowStatus.PASSED else "RUN FINISHED")
 
@@ -253,78 +327,66 @@ def build_parser() -> argparse.ArgumentParser:
   dev-suite run "Refactor auth module" --dry-run
   dev-suite run "Build REST API" --budget 100000 --verbose""",
     )
-    parser.add_argument("--version", action="version", version=f"dev-suite {__version__}")
+    parser.add_argument(
+        "--version", action="version", version=f"dev-suite {__version__}"
+    )
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
     run_parser = subparsers.add_parser(
-        "run", help="Run a task through the agent workforce",
+        "run",
+        help="Run a task through the agent workforce",
         description="Execute a task through the Architect → Lead Dev → QA pipeline.",
     )
     run_parser.add_argument("task", type=str, help="Task description for the agents")
 
     mode_group = run_parser.add_mutually_exclusive_group()
-    mode_group.add_argument("--dry-run", action="store_true",
-                            help="Validate config and show execution plan (zero API calls)")
-    mode_group.add_argument("--plan", action="store_true",
-                            help="Run Architect only, show Blueprint (one API call)")
+    mode_group.add_argument(
+        "--dry-run", action="store_true",
+        help="Validate config and show execution plan (zero API calls)",
+    )
+    mode_group.add_argument(
+        "--plan", action="store_true",
+        help="Run Architect only, show Blueprint (one API call)",
+    )
 
-    run_parser.add_argument("--model-architect", type=str, default=None, metavar="MODEL",
-                            help="Override Architect model (default: gemini-3-flash-preview)")
-    run_parser.add_argument("--model-developer", type=str, default=None, metavar="MODEL",
-                            help="Override Lead Dev model (default: claude-sonnet-4-20250514)")
-    run_parser.add_argument("--model-qa", type=str, default=None, metavar="MODEL",
-                            help="Override QA model (default: claude-sonnet-4-20250514)")
-    run_parser.add_argument("--budget", type=int, default=None, metavar="TOKENS",
-                            help="Token budget ceiling (default: 50000)")
-    run_parser.add_argument("--workspace", type=str, default=None, metavar="PATH",
-                            help="Workspace root directory (default: current directory)")
-    run_parser.add_argument("--verbose", "-v", action="store_true",
-                            help="Stream agent activity to stdout (DEBUG logging)")
-    run_parser.add_argument("--no-trace", action="store_true",
-                            help="Disable Langfuse tracing")
+    run_parser.add_argument(
+        "--model-architect", type=str, default=None, metavar="MODEL",
+        help="Override Architect model (default: gemini-3-flash-preview)",
+    )
+    run_parser.add_argument(
+        "--model-developer", type=str, default=None, metavar="MODEL",
+        help="Override Lead Dev model (default: claude-sonnet-4-20250514)",
+    )
+    run_parser.add_argument(
+        "--model-qa", type=str, default=None, metavar="MODEL",
+        help="Override QA model (default: claude-sonnet-4-20250514)",
+    )
+    run_parser.add_argument(
+        "--budget", type=int, default=None, metavar="TOKENS",
+        help="Token budget ceiling (default: 50000)",
+    )
+    run_parser.add_argument(
+        "--workspace", type=str, default=None, metavar="PATH",
+        help="Workspace root directory (default: current directory)",
+    )
+    run_parser.add_argument(
+        "--verbose", "-v", action="store_true",
+        help="Stream agent activity to stdout (DEBUG logging)",
+    )
+    run_parser.add_argument(
+        "--no-trace", action="store_true",
+        help="Disable Langfuse tracing",
+    )
     return parser
 
 
 # ── Command Handlers ──
-
-def _apply_overrides(args: argparse.Namespace) -> None:
-    """Apply CLI flag overrides to environment variables.
-
-    Must be called AFTER load_dotenv() so CLI flags take precedence.
-    """
-    if args.model_architect:
-        os.environ["ARCHITECT_MODEL"] = args.model_architect
-    if args.model_developer:
-        os.environ["DEVELOPER_MODEL"] = args.model_developer
-    if args.model_qa:
-        os.environ["QA_MODEL"] = args.model_qa
-    if args.budget is not None:
-        if args.budget <= 0:
-            print(f"{C.red('Error:')} --budget must be a positive integer, got {args.budget}")
-            sys.exit(1)
-        os.environ["TOKEN_BUDGET"] = str(args.budget)
+# Handlers assume _setup_env() has already been called.
+# They do NOT call load_dotenv() or apply overrides.
 
 
-def _setup_logging(verbose: bool) -> None:
-    level = logging.DEBUG if verbose else logging.WARNING
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-        datefmt="%H:%M:%S",
-    )
-
-
-def handle_dry_run(args: argparse.Namespace) -> int:
+def handle_dry_run(args: argparse.Namespace, workspace: str) -> int:
     """Handle --dry-run: validate config, show plan, exit."""
-    workspace = args.workspace or os.getcwd()
-    if not Path(workspace).is_dir():
-        print(f"{C.red('Error:')} Workspace path does not exist: {workspace}")
-        return 1
-
-    os.chdir(workspace)
-    load_dotenv()
-    _apply_overrides(args)
-
     config = validate_config()
     print_dry_run(config, workspace, args.task)
     return 0 if config["valid"] else 1
@@ -332,20 +394,13 @@ def handle_dry_run(args: argparse.Namespace) -> int:
 
 def handle_plan(args: argparse.Namespace) -> int:
     """Handle --plan: run Architect only, show Blueprint."""
-    workspace = args.workspace or os.getcwd()
-    if not Path(workspace).is_dir():
-        print(f"{C.red('Error:')} Workspace path does not exist: {workspace}")
-        return 1
-
-    os.chdir(workspace)
-    load_dotenv()
-    _apply_overrides(args)
-
     if not _check_env_key("GOOGLE_API_KEY"):
         print(f"{C.red('Error:')} GOOGLE_API_KEY is required for --plan mode.")
         print(f"{C.dim('Run with --dry-run to see full config status.')}")
         return 1
 
+    # Validate numeric config before importing orchestrator, which
+    # reads MAX_RETRIES/TOKEN_BUDGET at module level.
     config = validate_config()
     if config["errors"]:
         for err in config["errors"]:
@@ -360,6 +415,7 @@ def handle_plan(args: argparse.Namespace) -> int:
     )
 
     from langgraph.graph import END, START, StateGraph
+
     plan_graph = StateGraph(GraphState)
     plan_graph.add_node("architect", architect_node)
     plan_graph.add_edge(START, "architect")
@@ -390,8 +446,10 @@ def handle_plan(args: argparse.Namespace) -> int:
     elapsed = time.time() - start
     blueprint = result.get("blueprint")
     if not blueprint:
-        print(f"{C.red('Error:')} Architect did not produce a Blueprint: "
-              f"{result.get('error_message', 'Unknown error')}")
+        print(
+            f"{C.red('Error:')} Architect did not produce a Blueprint: "
+            f"{result.get('error_message', 'Unknown error')}"
+        )
         return 1
 
     print_blueprint(blueprint.model_dump(), result.get("tokens_used", 0), elapsed)
@@ -400,19 +458,13 @@ def handle_plan(args: argparse.Namespace) -> int:
 
 def handle_run(args: argparse.Namespace) -> int:
     """Handle full run: Architect → Lead Dev → QA loop."""
-    workspace = args.workspace or os.getcwd()
-    if not Path(workspace).is_dir():
-        print(f"{C.red('Error:')} Workspace path does not exist: {workspace}")
-        return 1
-
-    os.chdir(workspace)
-    load_dotenv()
-    _apply_overrides(args)
-
     config = validate_config()
     if not config["valid"]:
         if config["missing"]:
-            print(f"{C.red('Error:')} Missing required API keys: {', '.join(config['missing'])}")
+            print(
+                f"{C.red('Error:')} Missing required API keys: "
+                f"{', '.join(config['missing'])}"
+            )
         for err in config.get("errors", []):
             print(f"{C.red('Config error:')} {err}")
         print(f"{C.dim('Run with --dry-run to see full config status.')}")
@@ -443,9 +495,17 @@ def handle_run(args: argparse.Namespace) -> int:
 # ── Main Entry Point ──
 
 def main(argv: list[str] | None = None) -> int:
-    """Main CLI entry point."""
-    load_dotenv()
+    """Main CLI entry point.
 
+    Args:
+        argv: Command-line arguments (defaults to sys.argv[1:]).
+              Accepts a list for testability.
+
+    Returns:
+        Exit code (0 = success, 1 = error).
+    """
+    # Parse args FIRST — we need --workspace before loading any .env.
+    # No load_dotenv() here. That happens in _setup_env() after chdir.
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -454,9 +514,19 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "run":
-        _setup_logging(args.verbose)
+        # Set up logging before env setup (doesn't depend on .env)
+        level = logging.DEBUG if args.verbose else logging.WARNING
+        logging.basicConfig(
+            level=level,
+            format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+            datefmt="%H:%M:%S",
+        )
+
+        # Single env setup: chdir → load_dotenv → apply overrides
+        workspace = _setup_env(args)
+
         if args.dry_run:
-            return handle_dry_run(args)
+            return handle_dry_run(args, workspace)
         elif args.plan:
             return handle_plan(args)
         else:
