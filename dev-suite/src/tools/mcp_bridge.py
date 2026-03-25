@@ -13,11 +13,16 @@ Async bridge (issue #27):
     both sync (func) and async (coroutine) invocation. get_tools() sets
     both paths so the orchestrator works whether called via invoke()
     (sync -> func) or ainvoke() (async -> coroutine).
+
+Provider factory (issue #13):
+    create_provider() reads TOOL_PROVIDER env var to instantiate the
+    correct provider. Supports graceful fallback via TOOL_PROVIDER_FALLBACK.
 """
 
 import asyncio
 import json
 import logging
+import os
 from pathlib import Path
 
 from langchain_core.tools import Tool
@@ -112,6 +117,73 @@ def load_mcp_config(config_path: str | Path) -> MCPConfig:
     return config
 
 
+# -- Provider factory (issue #13) --
+
+
+def create_provider(
+    config: MCPConfig,
+    workspace_root: str | Path,
+) -> ToolProvider:
+    """Create the appropriate ToolProvider based on TOOL_PROVIDER env var.
+
+    When TOOL_PROVIDER=mcp, runs preflight_check() to validate that
+    all required commands (npx, docker) and env vars are available
+    BEFORE returning the provider. This ensures TOOL_PROVIDER_FALLBACK
+    actually triggers for the common failure modes (missing commands,
+    unresolvable env vars) rather than deferring failures to the first
+    list_tools()/call_tool() call.
+
+    Args:
+        config: Parsed MCP config.
+        workspace_root: Project workspace directory.
+
+    Returns:
+        A ToolProvider instance (LocalToolProvider or MCPToolProvider).
+
+    Environment variables:
+        TOOL_PROVIDER: "local" (default) or "mcp"
+        TOOL_PROVIDER_FALLBACK: "local" (default) or "error"
+            Controls behavior when MCP provider fails to initialize.
+    """
+    provider_type = os.getenv("TOOL_PROVIDER", "local").lower()
+    fallback = os.getenv("TOOL_PROVIDER_FALLBACK", "local").lower()
+
+    if provider_type == "mcp":
+        try:
+            from .mcp_provider import MCPToolProvider
+
+            provider = MCPToolProvider(
+                config=config,
+                workspace_root=workspace_root,
+            )
+            # Validate commands and env vars exist before returning.
+            # Without this, failures would only surface on first
+            # list_tools()/call_tool(), bypassing the fallback logic.
+            provider.preflight_check()
+            return provider
+        except Exception as e:
+            if fallback == "error":
+                raise MCPConfigError(
+                    f"Failed to create MCPToolProvider: {e}"
+                ) from e
+            logger.warning(
+                "MCPToolProvider preflight failed: %s. "
+                "Falling back to LocalToolProvider.",
+                e,
+            )
+            provider_type = "local"
+
+    if provider_type == "local":
+        from .provider import LocalToolProvider
+
+        return LocalToolProvider(workspace_root=workspace_root)
+
+    raise MCPConfigError(
+        f"Unknown TOOL_PROVIDER value: '{provider_type}'. "
+        f"Expected 'local' or 'mcp'."
+    )
+
+
 # -- Async-to-sync bridge utilities --
 
 
@@ -142,11 +214,11 @@ def _run_async(coro):
         return asyncio.run(coro)
 
 
-# -- Tool factory --
+# -- Tool factories --
 
 
 def get_tools(provider: ToolProvider) -> list[Tool]:
-    """Create LangChain Tool objects from an async ToolProvider.
+    """Create LangChain Tool objects from an async ToolProvider (sync).
 
     Dynamically generates Tools from the provider's list_tools()
     response. Each generated Tool has both a sync func (bridges to
@@ -165,7 +237,33 @@ def get_tools(provider: ToolProvider) -> list[Tool]:
     """
     # list_tools() is async, so we need to bridge here
     definitions = _run_async(provider.list_tools())
+    return _build_langchain_tools(provider, definitions)
 
+
+async def aget_tools(provider: ToolProvider) -> list[Tool]:
+    """Create LangChain Tool objects from an async ToolProvider (async).
+
+    ARCH-3: Async variant of get_tools(). Avoids the _run_async bridge
+    when called from async context (e.g., the orchestrator's main loop).
+
+    Args:
+        provider: Any async ToolProvider
+
+    Returns:
+        List of LangChain Tool objects the agents can use.
+    """
+    definitions = await provider.list_tools()
+    return _build_langchain_tools(provider, definitions)
+
+
+def _build_langchain_tools(
+    provider: ToolProvider,
+    definitions: list,
+) -> list[Tool]:
+    """Build LangChain Tools from ToolDefinition list.
+
+    Shared implementation for both get_tools() and aget_tools().
+    """
     tools = []
     for defn in definitions:
         properties = defn.parameters.get("properties", {})

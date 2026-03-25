@@ -1,20 +1,28 @@
 {
-  "$schema": "MCP server version pinning - review monthly, never auto-update",
-  "last_reviewed": "2026-03-24",
+  "$schema": "MCP server configuration — version pinning + subprocess spawning",
+  "last_reviewed": "2026-03-25",
   "servers": {
     "filesystem": {
-      "package": "@anthropic/mcp-filesystem",
-      "version": "0.6.2",
+      "package": "@modelcontextprotocol/server-filesystem",
+      "version": "2026.1.14",
       "integrity": "TODO: add sha256 hash after first install",
       "purpose": "Read/write access to project code",
-      "notes": "Scoped to workspace directory only"
+      "notes": "Scoped to workspace directory only. Allowed dirs passed as CLI args.",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem@2026.1.14", "{workspace}"],
+      "env": {}
     },
     "github": {
-      "package": "@anthropic/mcp-github",
-      "version": "0.6.2",
+      "package": "github/github-mcp-server",
+      "version": "v0.31.0",
       "integrity": "TODO: add sha256 hash after first install",
       "purpose": "Manage PRs, issues, diffs",
-      "notes": "Requires GITHUB_TOKEN in environment"
+      "notes": "Official GitHub MCP server (Go binary). Docker image preferred. Old npm package deprecated.",
+      "command": "docker",
+      "args": ["run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "ghcr.io/github/github-mcp-server:v0.31.0"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
+      }
     }
   }
 }
