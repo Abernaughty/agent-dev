@@ -16,6 +16,9 @@ uv.lock
 # Chroma persistent storage
 chroma_data/
 
+# Run logs (written by CLI, consumed by dashboard)
+runs/
+
 # IDE
 .vscode/
 .idea/
