@@ -194,6 +194,30 @@ class MCPToolProvider(ToolProvider):
         self._tool_to_server: dict[str, str] = {}
         self._connected = False
 
+    # -- Preflight validation (DX-2, used by create_provider fallback) --
+
+    def preflight_check(self) -> None:
+        """Validate config without spawning subprocesses.
+
+        Checks that all configured commands are resolvable and that
+        required env vars are set. Called by create_provider() so
+        failures are caught at factory time, enabling graceful fallback
+        to LocalToolProvider.
+
+        Raises:
+            MCPConfigError: If any command is missing or env var unresolvable.
+        """
+        for server_name, server_config in self._config.servers.items():
+            command = server_config.get("command")
+            if not command:
+                continue  # Version audit entry only
+
+            # DX-1: Check command exists
+            _resolve_command(command)
+
+            # SEC-2: Check env var expansion works
+            _build_server_env(server_config)
+
     # -- Async context manager (ARCH-1) --
 
     async def __aenter__(self) -> "MCPToolProvider":
@@ -211,6 +235,9 @@ class MCPToolProvider(ToolProvider):
         Performs preflight checks (DX-2), resolves commands (DX-1),
         builds minimal envs (SEC-1), expands env vars (SEC-2),
         and detects tool name collisions (ARCH-2).
+
+        On failure, cleans up any already-opened subprocesses via
+        the AsyncExitStack before re-raising.
         """
         if self._connected:
             return
@@ -218,6 +245,25 @@ class MCPToolProvider(ToolProvider):
         self._exit_stack = AsyncExitStack()
         await self._exit_stack.__aenter__()
 
+        try:
+            await self._connect_all_servers()
+        except BaseException:
+            # Clean up any already-opened subprocesses on failure
+            await self._exit_stack.aclose()
+            self._exit_stack = None
+            self._connections.clear()
+            self._tool_to_server.clear()
+            raise
+
+        self._connected = True
+        logger.info(
+            "MCPToolProvider connected: %d servers, %d tools",
+            len(self._connections),
+            len(self._tool_to_server),
+        )
+
+    async def _connect_all_servers(self) -> None:
+        """Connect to all configured servers. Raises on fatal errors."""
         failed_servers: list[tuple[str, str]] = []
 
         for server_name, server_config in self._config.servers.items():
@@ -252,13 +298,6 @@ class MCPToolProvider(ToolProvider):
 
         # Detect tool name collisions (ARCH-2)
         self._check_tool_collisions()
-
-        self._connected = True
-        logger.info(
-            "MCPToolProvider connected: %d servers, %d tools",
-            len(self._connections),
-            len(self._tool_to_server),
-        )
 
     async def _connect_server(
         self, name: str, config: dict
