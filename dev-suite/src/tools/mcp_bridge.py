@@ -126,6 +126,13 @@ def create_provider(
 ) -> ToolProvider:
     """Create the appropriate ToolProvider based on TOOL_PROVIDER env var.
 
+    When TOOL_PROVIDER=mcp, runs preflight_check() to validate that
+    all required commands (npx, docker) and env vars are available
+    BEFORE returning the provider. This ensures TOOL_PROVIDER_FALLBACK
+    actually triggers for the common failure modes (missing commands,
+    unresolvable env vars) rather than deferring failures to the first
+    list_tools()/call_tool() call.
+
     Args:
         config: Parsed MCP config.
         workspace_root: Project workspace directory.
@@ -145,17 +152,22 @@ def create_provider(
         try:
             from .mcp_provider import MCPToolProvider
 
-            return MCPToolProvider(
+            provider = MCPToolProvider(
                 config=config,
                 workspace_root=workspace_root,
             )
+            # Validate commands and env vars exist before returning.
+            # Without this, failures would only surface on first
+            # list_tools()/call_tool(), bypassing the fallback logic.
+            provider.preflight_check()
+            return provider
         except Exception as e:
             if fallback == "error":
                 raise MCPConfigError(
                     f"Failed to create MCPToolProvider: {e}"
                 ) from e
             logger.warning(
-                "MCPToolProvider initialization failed: %s. "
+                "MCPToolProvider preflight failed: %s. "
                 "Falling back to LocalToolProvider.",
                 e,
             )
