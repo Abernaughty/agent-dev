@@ -15,6 +15,7 @@ Architecture decisions (from issue #13 brainstorm):
     DX-2:   Preflight checks with actionable error messages
 """
 
+import json as json_module
 import logging
 import os
 import platform
@@ -440,7 +441,9 @@ class MCPToolProvider(ToolProvider):
         """Route a tool call to the correct MCP server session.
 
         Looks up which server provides the named tool, then dispatches
-        via the MCP SDK's call_tool().
+        via the MCP SDK's call_tool(). Handles both traditional content
+        blocks (text, images) and structured output (structuredContent)
+        introduced in newer MCP spec versions.
 
         Args:
             name: Tool name as returned by list_tools().
@@ -474,4 +477,16 @@ class MCPToolProvider(ToolProvider):
                 # Non-text content (images, etc.) — stringify
                 parts.append(str(content_block))
 
-        return "\n".join(parts) if parts else ""
+        if parts:
+            return "\n".join(parts)
+
+        # Fall back to structuredContent if no text content blocks.
+        # Newer MCP servers may return structured JSON data via this
+        # field instead of (or alongside) traditional content blocks.
+        structured = getattr(result, "structuredContent", None)
+        if structured is not None:
+            if isinstance(structured, dict):
+                return json_module.dumps(structured)
+            return str(structured)
+
+        return ""
