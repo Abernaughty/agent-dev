@@ -14,12 +14,12 @@
     },
     "github": {
       "package": "github/github-mcp-server",
-      "version": "latest",
+      "version": "v0.31.0",
       "integrity": "TODO: add sha256 hash after first install",
       "purpose": "Manage PRs, issues, diffs",
       "notes": "Official GitHub MCP server (Go binary). Docker image preferred. Old npm package deprecated.",
       "command": "docker",
-      "args": ["run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "ghcr.io/github/github-mcp-server"],
+      "args": ["run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "ghcr.io/github/github-mcp-server:v0.31.0"],
       "env": {
         "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
       }
