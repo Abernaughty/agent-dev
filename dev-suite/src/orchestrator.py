@@ -30,8 +30,20 @@ logger = logging.getLogger(__name__)
 
 # -- Configuration --
 
-MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
-TOKEN_BUDGET = int(os.getenv("TOKEN_BUDGET", "50000"))
+def _safe_int(env_key: str, default: int) -> int:
+    """Parse an integer from an env var, falling back to default on error."""
+    raw = os.getenv(env_key, str(default))
+    try:
+        return int(raw)
+    except (ValueError, TypeError):
+        logger.warning(
+            "%s=%r is not a valid integer, using default %d",
+            env_key, raw, default,
+        )
+        return default
+
+MAX_RETRIES = _safe_int("MAX_RETRIES", 3)
+TOKEN_BUDGET = _safe_int("TOKEN_BUDGET", 50000)
 
 
 # -- Workflow State --
@@ -239,7 +251,10 @@ def architect_node(state: GraphState) -> dict:
 
     memory_block = ""
     if memory_context:
-        memory_block = "\n\nProject context from memory:\n" + "\n".join(f"- {c}" for c in memory_context)
+        memory_block = (
+            "\n\nProject context from memory:\n"
+            + "\n".join(f"- {c}" for c in memory_context)
+        )
 
     system_prompt = f"""You are the Architect agent. Your job is to create a structured Blueprint
 for a coding task. You NEVER write code yourself.
@@ -258,7 +273,7 @@ Do not include any text before or after the JSON.{memory_block}"""
     user_msg = state.get("task_description", "")
     failure_report = state.get("failure_report")
     if failure_report and failure_report.is_architectural:
-        user_msg += f"\n\nPREVIOUS ATTEMPT FAILED (architectural issue):\n"
+        user_msg += "\n\nPREVIOUS ATTEMPT FAILED (architectural issue):\n"
         user_msg += f"Errors: {', '.join(failure_report.errors)}\n"
         user_msg += f"Recommendation: {failure_report.recommendation}"
 
@@ -328,7 +343,7 @@ Write clean, well-documented code."""
 
     failure_report = state.get("failure_report")
     if failure_report and not failure_report.is_architectural:
-        user_msg += f"\n\nPREVIOUS ATTEMPT FAILED:\n"
+        user_msg += "\n\nPREVIOUS ATTEMPT FAILED:\n"
         user_msg += f"Tests passed: {failure_report.tests_passed}\n"
         user_msg += f"Tests failed: {failure_report.tests_failed}\n"
         user_msg += f"Errors: {', '.join(failure_report.errors)}\n"
@@ -375,25 +390,30 @@ def qa_node(state: GraphState) -> dict:
             "trace": trace,
         }
 
-    system_prompt = """You are the QA agent. You review code against a Blueprint's acceptance criteria.
+    system_prompt = (
+        "You are the QA agent. You review code against a Blueprint's "
+        "acceptance criteria.\n\n"
+        "Respond with ONLY a valid JSON object matching this schema:\n"
+        "{\n"
+        '  "task_id": "string (from the Blueprint)",\n'
+        '  "status": "pass" or "fail" or "escalate",\n'
+        '  "tests_passed": number,\n'
+        '  "tests_failed": number,\n'
+        '  "errors": ["list of specific error descriptions"],\n'
+        '  "failed_files": ["list of files with issues"],\n'
+        '  "is_architectural": true/false '
+        "(set true if the failure is a design/planning issue),\n"
+        '  "recommendation": "what to fix or why it should escalate"\n'
+        "}\n\n"
+        '"escalate" means the Blueprint itself is wrong, not just the '
+        "implementation.\n"
+        "Be strict but fair. Only pass code that meets ALL acceptance "
+        "criteria.\n"
+        "Do not include any text before or after the JSON."
+    )
 
-Respond with ONLY a valid JSON object matching this schema:
-{
-  "task_id": "string (from the Blueprint)",
-  "status": "pass" or "fail" or "escalate",
-  "tests_passed": number,
-  "tests_failed": number,
-  "errors": ["list of specific error descriptions"],
-  "failed_files": ["list of files with issues"],
-  "is_architectural": true/false (set true if the failure is a design/planning issue),
-  "recommendation": "what to fix or why it should escalate"
-}
-
-\"escalate\" means the Blueprint itself is wrong, not just the implementation.
-Be strict but fair. Only pass code that meets ALL acceptance criteria.
-Do not include any text before or after the JSON."""
-
-    user_msg = f"Blueprint:\n{blueprint.model_dump_json(indent=2)}\n\nGenerated Code:\n{generated_code}"
+    bp_json = blueprint.model_dump_json(indent=2)
+    user_msg = f"Blueprint:\n{bp_json}\n\nGenerated Code:\n{generated_code}"
 
     llm = _get_qa_llm()
     response = llm.invoke([
@@ -413,7 +433,11 @@ Do not include any text before or after the JSON."""
             "trace": trace,
         }
 
-    trace.append(f"qa: verdict={failure_report.status}, passed={failure_report.tests_passed}, failed={failure_report.tests_failed}")
+    trace.append(
+        f"qa: verdict={failure_report.status}, "
+        f"passed={failure_report.tests_passed}, "
+        f"failed={failure_report.tests_failed}"
+    )
     tokens_used = tokens_used + _extract_token_count(response)
 
     if failure_report.status == "pass":
@@ -445,7 +469,8 @@ def route_after_qa(state: GraphState) -> Literal["developer", "architect", "__en
     tokens_used = state.get("tokens_used", 0)
 
     logger.info(
-        "[ROUTER] status=%s, retry_count=%d, tokens_used=%d, max_retries=%d, token_budget=%d",
+        "[ROUTER] status=%s, retry_count=%d, tokens_used=%d, "
+        "max_retries=%d, token_budget=%d",
         status, retry_count, tokens_used, MAX_RETRIES, TOKEN_BUDGET,
     )
 
