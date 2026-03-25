@@ -27,8 +27,6 @@ __version__ = "0.2.0"
 
 
 # ── ANSI Colors ──
-# Minimal color support for terminal output. Disabled when NO_COLOR is set
-# or stdout is not a TTY.
 
 def _colors_enabled() -> bool:
     if os.getenv("NO_COLOR"):
@@ -71,14 +69,12 @@ C = _Colors(_colors_enabled())
 
 # ── Config Validation ──
 
-# Required env vars and their descriptions
 _REQUIRED_KEYS = {
     "GOOGLE_API_KEY": "Gemini (Architect agent)",
     "ANTHROPIC_API_KEY": "Claude (Lead Dev + QA agents)",
     "E2B_API_KEY": "E2B sandbox execution",
 }
 
-# Optional env vars that enhance functionality
 _OPTIONAL_KEYS = {
     "LANGFUSE_PUBLIC_KEY": "Langfuse observability (tracing)",
     "LANGFUSE_SECRET_KEY": "Langfuse observability (tracing)",
@@ -92,16 +88,7 @@ def _check_env_key(key: str) -> bool:
 
 
 def validate_config() -> dict:
-    """Validate environment configuration.
-
-    Returns a dict with:
-        valid: bool - whether all required keys are present and config is clean
-        missing: list[str] - missing required key names
-        optional_missing: list[str] - missing optional key names
-        errors: list[str] - config errors (e.g. invalid numeric values)
-        models: dict - resolved model names
-        budget: dict - token budget and retry config
-    """
+    """Validate environment configuration."""
     missing = [k for k in _REQUIRED_KEYS if not _check_env_key(k)]
     optional_missing = [k for k in _OPTIONAL_KEYS if not _check_env_key(k)]
 
@@ -134,14 +121,12 @@ def validate_config() -> dict:
 # ── Output Formatting ──
 
 def _print_header(text: str) -> None:
-    """Print a section header."""
     print(f"\n{C.dim('─' * 50)}")
     print(f"  {C.bold(text)}")
     print(C.dim("─" * 50))
 
 
 def _print_kv(key: str, value: str, indent: int = 2) -> None:
-    """Print a key-value pair."""
     pad = " " * indent
     print(f"{pad}{C.dim(key + ':')} {value}")
 
@@ -149,7 +134,6 @@ def _print_kv(key: str, value: str, indent: int = 2) -> None:
 def print_dry_run(config: dict, workspace: str, task: str) -> None:
     """Print dry-run output: config validation and execution plan."""
     _print_header("DRY RUN — Execution Plan")
-
     print(f"\n  {C.cyan('Task:')} {task[:120]}{'...' if len(task) > 120 else ''}")
     print(f"  {C.cyan('Workspace:')} {workspace}")
 
@@ -167,7 +151,6 @@ def print_dry_run(config: dict, workspace: str, task: str) -> None:
             print(f"    {C.green('✓')} {desc} ({key})")
         else:
             print(f"    {C.red('✗')} {desc} ({key}) — {C.red('MISSING')}")
-
     for key, desc in _OPTIONAL_KEYS.items():
         if _check_env_key(key):
             print(f"    {C.green('✓')} {desc} ({key})")
@@ -179,11 +162,9 @@ def print_dry_run(config: dict, workspace: str, task: str) -> None:
     langfuse_status = C.green("enabled") if tracing_ok else C.yellow("disabled (keys missing)")
     _print_kv("  Langfuse", langfuse_status, indent=2)
 
-    config_errors = config.get("errors", [])
-    if config_errors:
+    for err in config.get("errors", []):
         print(f"\n  {C.bold('Config Errors')}")
-        for err in config_errors:
-            print(f"    {C.red('✗')} {err}")
+        print(f"    {C.red('✗')} {err}")
 
     if config["valid"]:
         print(f"\n  {C.green('✓ All required keys present. Ready to run.')}")
@@ -198,14 +179,15 @@ def print_dry_run(config: dict, workspace: str, task: str) -> None:
 def print_blueprint(blueprint_data: dict, tokens_used: int, elapsed: float) -> None:
     """Print a Blueprint from --plan mode."""
     _print_header("PLAN — Architect Blueprint")
-
     print(f"\n  {C.cyan('Task ID:')} {blueprint_data.get('task_id', 'unknown')}")
 
-    files = blueprint_data.get("target_files", [])
-    if files:
-        print(f"\n  {C.bold('Target Files')}")
-        for f in files:
-            print(f"    {C.cyan(f)}")
+    for section, items in [("Target Files", "target_files"), ("Constraints", "constraints"),
+                           ("Acceptance Criteria", "acceptance_criteria")]:
+        vals = blueprint_data.get(items, [])
+        if vals:
+            print(f"\n  {C.bold(section)}")
+            for v in vals:
+                print(f"    {C.cyan(v)}" if items == "target_files" else f"    {v}")
 
     instructions = blueprint_data.get("instructions", "")
     if instructions:
@@ -213,20 +195,7 @@ def print_blueprint(blueprint_data: dict, tokens_used: int, elapsed: float) -> N
         for line in instructions.split("\n"):
             print(f"    {line}")
 
-    constraints = blueprint_data.get("constraints", [])
-    if constraints:
-        print(f"\n  {C.bold('Constraints')}")
-        for c in constraints:
-            print(f"    {C.yellow('•')} {c}")
-
-    criteria = blueprint_data.get("acceptance_criteria", [])
-    if criteria:
-        print(f"\n  {C.bold('Acceptance Criteria')}")
-        for c in criteria:
-            print(f"    {C.green('□')} {c}")
-
     print(f"\n  {C.dim(f'Tokens: {tokens_used:,} | Elapsed: {elapsed:.1f}s')}")
-
     print(f"\n  {C.bold('Raw JSON')}")
     print(C.dim(json.dumps(blueprint_data, indent=2)))
 
@@ -234,18 +203,14 @@ def print_blueprint(blueprint_data: dict, tokens_used: int, elapsed: float) -> N
 def print_run_result(state, elapsed: float) -> None:
     """Print the result of a full run."""
     from .orchestrator import WorkflowStatus
-
     status = state.status
-    is_pass = status == WorkflowStatus.PASSED
-
-    _print_header("RUN COMPLETE" if is_pass else "RUN FINISHED")
+    _print_header("RUN COMPLETE" if status == WorkflowStatus.PASSED else "RUN FINISHED")
 
     status_str = {
         WorkflowStatus.PASSED: C.green("✓ PASSED"),
         WorkflowStatus.FAILED: C.red("✗ FAILED"),
         WorkflowStatus.ESCALATED: C.yellow("⚠ ESCALATED"),
     }.get(status, C.dim(str(status.value)))
-
     print(f"\n  {C.bold('Status:')} {status_str}")
 
     if state.error_message:
@@ -254,10 +219,8 @@ def print_run_result(state, elapsed: float) -> None:
     print(f"\n  {C.bold('Metrics')}")
     budget = int(os.getenv("TOKEN_BUDGET", "50000"))
     pct = round((state.tokens_used / budget) * 100) if budget else 0
-    cost_est = state.tokens_used * 0.000012
-
     _print_kv("Tokens used", f"{state.tokens_used:,} / {budget:,} ({pct}%)")
-    _print_kv("Estimated cost", f"${cost_est:.4f}")
+    _print_kv("Estimated cost", f"${state.tokens_used * 0.000012:.4f}")
     _print_kv("Retries", f"{state.retry_count} / {int(os.getenv('MAX_RETRIES', '3'))}")
     _print_kv("Elapsed", f"{elapsed:.1f}s")
 
@@ -327,11 +290,7 @@ def build_parser() -> argparse.ArgumentParser:
 def _apply_overrides(args: argparse.Namespace) -> None:
     """Apply CLI flag overrides to environment variables.
 
-    Model and budget overrides are set as env vars so they propagate
-    to the orchestrator's LLM initialization and config.
-
-    IMPORTANT: Must be called AFTER load_dotenv() in each handler
-    so that CLI flags always take precedence over .env file values.
+    Must be called AFTER load_dotenv() so CLI flags take precedence.
     """
     if args.model_architect:
         os.environ["ARCHITECT_MODEL"] = args.model_architect
@@ -347,7 +306,6 @@ def _apply_overrides(args: argparse.Namespace) -> None:
 
 
 def _setup_logging(verbose: bool) -> None:
-    """Configure logging level based on verbosity flag."""
     level = logging.DEBUG if verbose else logging.WARNING
     logging.basicConfig(
         level=level,
@@ -359,13 +317,12 @@ def _setup_logging(verbose: bool) -> None:
 def handle_dry_run(args: argparse.Namespace) -> int:
     """Handle --dry-run: validate config, show plan, exit."""
     workspace = args.workspace or os.getcwd()
-
     if not Path(workspace).is_dir():
         print(f"{C.red('Error:')} Workspace path does not exist: {workspace}")
         return 1
 
     os.chdir(workspace)
-    load_dotenv(override=True)
+    load_dotenv()
     _apply_overrides(args)
 
     config = validate_config()
@@ -381,7 +338,7 @@ def handle_plan(args: argparse.Namespace) -> int:
         return 1
 
     os.chdir(workspace)
-    load_dotenv(override=True)
+    load_dotenv()
     _apply_overrides(args)
 
     if not _check_env_key("GOOGLE_API_KEY"):
@@ -389,29 +346,20 @@ def handle_plan(args: argparse.Namespace) -> int:
         print(f"{C.dim('Run with --dry-run to see full config status.')}")
         return 1
 
-    # Validate numeric config before importing orchestrator, which
-    # reads MAX_RETRIES/TOKEN_BUDGET at module level.
     config = validate_config()
     if config["errors"]:
         for err in config["errors"]:
             print(f"{C.red('Config error:')} {err}")
         return 1
 
-    from .orchestrator import (
-        GraphState,
-        WorkflowStatus,
-        architect_node,
-    )
+    from .orchestrator import GraphState, WorkflowStatus, architect_node
     from .tracing import create_trace_config
 
-    enable_tracing = not args.no_trace
     trace_config = create_trace_config(
-        enabled=enable_tracing,
-        task_description=args.task,
+        enabled=not args.no_trace, task_description=args.task,
     )
 
     from langgraph.graph import END, START, StateGraph
-
     plan_graph = StateGraph(GraphState)
     plan_graph.add_node("architect", architect_node)
     plan_graph.add_edge(START, "architect")
@@ -419,16 +367,11 @@ def handle_plan(args: argparse.Namespace) -> int:
     workflow = plan_graph.compile()
 
     initial_state: GraphState = {
-        "task_description": args.task,
-        "blueprint": None,
-        "generated_code": "",
-        "failure_report": None,
-        "status": WorkflowStatus.PLANNING,
-        "retry_count": 0,
-        "tokens_used": 0,
-        "error_message": "",
-        "memory_context": [],
-        "trace": [],
+        "task_description": args.task, "blueprint": None,
+        "generated_code": "", "failure_report": None,
+        "status": WorkflowStatus.PLANNING, "retry_count": 0,
+        "tokens_used": 0, "error_message": "",
+        "memory_context": [], "trace": [],
     }
 
     invoke_config: dict = {"recursion_limit": 10}
@@ -445,11 +388,10 @@ def handle_plan(args: argparse.Namespace) -> int:
         trace_config.flush()
 
     elapsed = time.time() - start
-
     blueprint = result.get("blueprint")
     if not blueprint:
-        error = result.get("error_message", "Unknown error")
-        print(f"{C.red('Error:')} Architect did not produce a Blueprint: {error}")
+        print(f"{C.red('Error:')} Architect did not produce a Blueprint: "
+              f"{result.get('error_message', 'Unknown error')}")
         return 1
 
     print_blueprint(blueprint.model_dump(), result.get("tokens_used", 0), elapsed)
@@ -464,7 +406,7 @@ def handle_run(args: argparse.Namespace) -> int:
         return 1
 
     os.chdir(workspace)
-    load_dotenv(override=True)
+    load_dotenv()
     _apply_overrides(args)
 
     config = validate_config()
@@ -478,13 +420,11 @@ def handle_run(args: argparse.Namespace) -> int:
 
     from .orchestrator import run_task
 
-    enable_tracing = not args.no_trace
     start = time.time()
-
     try:
         result = run_task(
             task_description=args.task,
-            enable_tracing=enable_tracing,
+            enable_tracing=not args.no_trace,
         )
     except Exception as e:
         print(f"{C.red('Error:')} Workflow failed: {e}")
@@ -503,17 +443,7 @@ def handle_run(args: argparse.Namespace) -> int:
 # ── Main Entry Point ──
 
 def main(argv: list[str] | None = None) -> int:
-    """Main CLI entry point.
-
-    Args:
-        argv: Command-line arguments (defaults to sys.argv[1:]).
-              Accepts a list for testability.
-
-    Returns:
-        Exit code (0 = success, 1 = error).
-    """
-    # Load .env from cwd as a baseline. Handlers reload from
-    # workspace dir and apply CLI overrides after.
+    """Main CLI entry point."""
     load_dotenv()
 
     parser = build_parser()
@@ -525,7 +455,6 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "run":
         _setup_logging(args.verbose)
-
         if args.dry_run:
             return handle_dry_run(args)
         elif args.plan:
@@ -538,8 +467,5 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def cli_entry() -> None:
-    """Console script entry point (called by pyproject.toml [project.scripts]).
-
-    Wraps main() and converts the return code to sys.exit().
-    """
+    """Console script entry point (pyproject.toml [project.scripts])."""
     sys.exit(main())
