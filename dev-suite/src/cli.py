@@ -134,7 +134,7 @@ def _setup_env(args: argparse.Namespace) -> str:
     Implements the correct loading sequence:
         1. Resolve and validate workspace path
         2. chdir to workspace
-        3. load_dotenv() — fills unset vars only (no override)
+        3. load_dotenv(dotenv_path=) — explicit workspace path, fills gaps only
         4. Apply CLI flag overrides (always win)
 
     This is called ONCE from main() after parsing args but before
@@ -155,10 +155,12 @@ def _setup_env(args: argparse.Namespace) -> str:
 
     os.chdir(workspace)
 
-    # Load workspace .env. Default behavior (no override): only sets
-    # vars that aren't already in the environment. This preserves
-    # shell-exported secrets and CI variables.
-    load_dotenv()
+    # Load workspace .env explicitly by path. We must not rely on
+    # find_dotenv() defaults (usecwd=False) which resolves from the
+    # caller's file location, not the workspace. Only fills unset
+    # vars — shell-exported secrets and CI variables are preserved.
+    dotenv_path = Path(workspace) / ".env"
+    load_dotenv(dotenv_path=dotenv_path)
 
     # CLI flags always take highest precedence.
     if args.model_architect:
@@ -399,8 +401,6 @@ def handle_plan(args: argparse.Namespace) -> int:
         print(f"{C.dim('Run with --dry-run to see full config status.')}")
         return 1
 
-    # Validate numeric config before importing orchestrator, which
-    # reads MAX_RETRIES/TOKEN_BUDGET at module level.
     config = validate_config()
     if config["errors"]:
         for err in config["errors"]:
