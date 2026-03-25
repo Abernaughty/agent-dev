@@ -1,7 +1,7 @@
 [project]
 name = "dev-suite"
-version = "0.1.0"
-description = "Stateful AI Workforce orchestrator - Phase 1"
+version = "0.2.0"
+description = "Stateful AI Workforce orchestrator — Phase 2"
 requires-python = ">=3.11"
 dependencies = [
     "langgraph>=0.3",
@@ -12,6 +12,7 @@ dependencies = [
     "e2b>=1.0",
     "e2b-code-interpreter>=1.0",
     "langfuse>=3.0",
+    "mcp>=1.7",
     "python-dotenv>=1.0",
     "pydantic>=2.0",
 ]
