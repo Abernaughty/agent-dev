@@ -95,9 +95,10 @@ def validate_config() -> dict:
     """Validate environment configuration.
 
     Returns a dict with:
-        valid: bool - whether all required keys are present
+        valid: bool - whether all required keys are present and config is clean
         missing: list[str] - missing required key names
         optional_missing: list[str] - missing optional key names
+        errors: list[str] - config errors (e.g. invalid numeric values)
         models: dict - resolved model names
         budget: dict - token budget and retry config
     """
@@ -110,15 +111,21 @@ def validate_config() -> dict:
         "qa": os.getenv("QA_MODEL", "claude-sonnet-4-20250514"),
     }
 
-    budget = {
-        "token_budget": int(os.getenv("TOKEN_BUDGET", "50000")),
-        "max_retries": int(os.getenv("MAX_RETRIES", "3")),
-    }
+    budget: dict = {}
+    errors: list[str] = []
+    for key, default in [("TOKEN_BUDGET", 50000), ("MAX_RETRIES", 3)]:
+        raw = os.getenv(key, str(default))
+        try:
+            budget[key.lower()] = int(raw)
+        except ValueError:
+            budget[key.lower()] = default
+            errors.append(f"{key}={raw!r} is not a valid integer (using default {default})")
 
     return {
-        "valid": len(missing) == 0,
+        "valid": len(missing) == 0 and len(errors) == 0,
         "missing": missing,
         "optional_missing": optional_missing,
+        "errors": errors,
         "models": models,
         "budget": budget,
     }
@@ -177,6 +184,12 @@ def print_dry_run(config: dict, workspace: str, task: str) -> None:
     _print_kv("  Langfuse", langfuse_status, indent=2)
 
     # Verdict
+    config_errors = config.get("errors", [])
+    if config_errors:
+        print(f"\n  {C.bold('Config Errors')}")
+        for err in config_errors:
+            print(f"    {C.red('✗')} {err}")
+
     if config["valid"]:
         print(f"\n  {C.green('✓ All required keys present. Ready to run.')}")
     else:
@@ -434,6 +447,11 @@ def handle_plan(args: argparse.Namespace) -> int:
     # Change to workspace so file/tool operations resolve correctly
     os.chdir(workspace)
 
+    # Reload .env from the workspace directory so workspace-local
+    # API keys are picked up (the initial load_dotenv() in main()
+    # only reads from the original cwd).
+    load_dotenv(override=True)
+
     # --plan only needs GOOGLE_API_KEY (Architect uses Gemini).
     # Don't gate on ANTHROPIC_API_KEY or E2B_API_KEY.
     if not _check_env_key("GOOGLE_API_KEY"):
@@ -512,6 +530,11 @@ def handle_run(args: argparse.Namespace) -> int:
     # Change to workspace so file/tool operations resolve correctly
     os.chdir(workspace)
 
+    # Reload .env from the workspace directory so workspace-local
+    # API keys are picked up (the initial load_dotenv() in main()
+    # only reads from the original cwd).
+    load_dotenv(override=True)
+
     config = validate_config()
     if not config["valid"]:
         print(f"{C.red('Error:')} Missing required API keys: {', '.join(config['missing'])}")
@@ -554,7 +577,8 @@ def main(argv: list[str] | None = None) -> int:
     Returns:
         Exit code (0 = success, 1 = error).
     """
-    # Load .env before anything else
+    # Load .env from cwd as a baseline. When --workspace is used,
+    # handlers reload .env from the workspace directory.
     load_dotenv()
 
     parser = build_parser()

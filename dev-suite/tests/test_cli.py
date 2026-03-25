@@ -240,6 +240,26 @@ class TestConfigValidation:
         assert config["budget"]["token_budget"] == 100000
         assert config["budget"]["max_retries"] == 5
 
+    def test_validate_config_invalid_token_budget(self, valid_env, monkeypatch):
+        """Invalid TOKEN_BUDGET falls back to default and reports error."""
+        monkeypatch.setenv("TOKEN_BUDGET", "50k")
+        config = validate_config()
+        assert config["budget"]["token_budget"] == 50000
+        assert config["valid"] is False
+        assert any("TOKEN_BUDGET" in e for e in config["errors"])
+
+    def test_validate_config_invalid_max_retries(self, valid_env, monkeypatch):
+        """Invalid MAX_RETRIES falls back to default and reports error."""
+        monkeypatch.setenv("MAX_RETRIES", "three")
+        config = validate_config()
+        assert config["budget"]["max_retries"] == 3
+        assert any("MAX_RETRIES" in e for e in config["errors"])
+
+    def test_validate_config_valid_numeric_no_errors(self, valid_env):
+        """Valid numeric config produces no errors."""
+        config = validate_config()
+        assert config["errors"] == []
+
     def test_optional_keys_tracked(self, valid_env):
         config = validate_config()
         assert "LANGFUSE_PUBLIC_KEY" in config["optional_missing"]
