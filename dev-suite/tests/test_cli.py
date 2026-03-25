@@ -12,6 +12,7 @@ import pytest
 from src.cli import (
     __version__,
     _check_env_key,
+    _setup_env,
     build_parser,
     handle_dry_run,
     handle_plan,
@@ -275,52 +276,50 @@ class TestConfigValidation:
 
 class TestDryRun:
 
-    def test_dry_run_valid_config(self, valid_env, capsys):
+    def test_dry_run_valid_config(self, valid_env, capsys, tmp_path):
         """Dry run with valid config returns 0."""
         parser = build_parser()
         args = parser.parse_args(["run", "test task", "--dry-run"])
-        result = handle_dry_run(args)
+        result = handle_dry_run(args, str(tmp_path))
         assert result == 0
         captured = capsys.readouterr()
         assert "DRY RUN" in captured.out
         assert "test task" in captured.out
 
-    def test_dry_run_missing_keys(self, capsys):
+    def test_dry_run_missing_keys(self, capsys, tmp_path):
         """Dry run with missing keys returns 1."""
         parser = build_parser()
         args = parser.parse_args(["run", "test task", "--dry-run"])
-        result = handle_dry_run(args)
+        result = handle_dry_run(args, str(tmp_path))
         assert result == 1
         captured = capsys.readouterr()
         assert "MISSING" in captured.out
 
     def test_dry_run_invalid_workspace(self, valid_env, capsys):
-        """Dry run with nonexistent workspace returns 1."""
+        """_setup_env with nonexistent workspace exits."""
         parser = build_parser()
         args = parser.parse_args(
             ["run", "test task", "--dry-run", "--workspace", "/nonexistent/path"]
         )
-        result = handle_dry_run(args)
-        assert result == 1
-        captured = capsys.readouterr()
-        assert "does not exist" in captured.out
+        with pytest.raises(SystemExit):
+            _setup_env(args)
 
-    def test_dry_run_shows_models(self, valid_env, capsys):
+    def test_dry_run_shows_models(self, valid_env, capsys, tmp_path):
         """Dry run displays resolved model names."""
         parser = build_parser()
         args = parser.parse_args(["run", "test task", "--dry-run"])
-        handle_dry_run(args)
+        handle_dry_run(args, str(tmp_path))
         captured = capsys.readouterr()
         assert "gemini-3-flash-preview" in captured.out
         assert "claude-sonnet-4-20250514" in captured.out
 
 
-# ── Model Overrides ──
+# ── Environment Setup ──
 
 
 class TestModelOverrides:
 
-    def test_overrides_set_env_vars(self, valid_env):
+    def test_overrides_set_env_vars(self, valid_env, tmp_path):
         """Model override flags set the corresponding env vars."""
         parser = build_parser()
         args = parser.parse_args([
@@ -331,26 +330,23 @@ class TestModelOverrides:
             "--budget", "99999",
         ])
 
-        from src.cli import _apply_overrides
-        _apply_overrides(args)
+        _setup_env(args)
 
         assert os.environ["ARCHITECT_MODEL"] == "custom-arch"
         assert os.environ["DEVELOPER_MODEL"] == "custom-dev"
         assert os.environ["QA_MODEL"] == "custom-qa"
         assert os.environ["TOKEN_BUDGET"] == "99999"
 
-    def test_no_overrides_no_env_change(self, valid_env):
+    def test_no_overrides_no_env_change(self, valid_env, tmp_path):
         """When no override flags are set, env vars are not modified."""
         parser = build_parser()
         args = parser.parse_args(["run", "test"])
-
-        from src.cli import _apply_overrides
 
         # Ensure they're not set
         for key in ["ARCHITECT_MODEL", "DEVELOPER_MODEL", "QA_MODEL"]:
             os.environ.pop(key, None)
 
-        _apply_overrides(args)
+        _setup_env(args)
 
         assert "ARCHITECT_MODEL" not in os.environ
         assert "DEVELOPER_MODEL" not in os.environ
