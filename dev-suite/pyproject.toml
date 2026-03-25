@@ -17,6 +17,9 @@ dependencies = [
     "pydantic>=2.0",
 ]
 
+[project.scripts]
+dev-suite = "src.cli:cli_entry"
+
 [dependency-groups]
 dev = [
     "pytest>=8.0",
