@@ -24,7 +24,7 @@ Async rationale (issue #27):
 
 import os
 from abc import ABC, abstractmethod
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import httpx
 from pydantic import BaseModel, Field
@@ -139,9 +139,21 @@ class LocalToolProvider(ToolProvider):
         github_repo: str | None = None,
     ):
         self.workspace_root = Path(workspace_root).resolve()
-        self.github_token = github_token or os.getenv("GITHUB_TOKEN", "")
-        self.github_owner = github_owner or os.getenv("GITHUB_OWNER", "")
-        self.github_repo = github_repo or os.getenv("GITHUB_REPO", "")
+
+        # Use explicit value if provided (even empty string),
+        # otherwise fall back to environment variable.
+        self.github_token = (
+            github_token if github_token is not None
+            else os.getenv("GITHUB_TOKEN", "")
+        )
+        self.github_owner = (
+            github_owner if github_owner is not None
+            else os.getenv("GITHUB_OWNER", "")
+        )
+        self.github_repo = (
+            github_repo if github_repo is not None
+            else os.getenv("GITHUB_REPO", "")
+        )
 
         if not self.workspace_root.is_dir():
             raise ValueError(
@@ -338,7 +350,9 @@ class LocalToolProvider(ToolProvider):
         for entry in entries:
             prefix = "[DIR] " if entry.is_dir() else "[FILE]"
             rel = entry.relative_to(self.workspace_root)
-            lines.append(f"{prefix} {rel}")
+            # Normalize to forward slashes for consistent cross-platform output
+            rel_posix = PurePosixPath(rel)
+            lines.append(f"{prefix} {rel_posix}")
 
         if not lines:
             return f"Directory '{path}' is empty"
