@@ -153,17 +153,14 @@ def print_dry_run(config: dict, workspace: str, task: str) -> None:
     print(f"\n  {C.cyan('Task:')} {task[:120]}{'...' if len(task) > 120 else ''}")
     print(f"  {C.cyan('Workspace:')} {workspace}")
 
-    # Models
     print(f"\n  {C.bold('Models')}")
     for role, model in config["models"].items():
         _print_kv(f"  {role.capitalize()}", model, indent=2)
 
-    # Budget
     print(f"\n  {C.bold('Budget')}")
     _print_kv("  Token ceiling", f"{config['budget']['token_budget']:,}", indent=2)
     _print_kv("  Max retries", str(config["budget"]["max_retries"]), indent=2)
 
-    # API Keys
     print(f"\n  {C.bold('API Keys')}")
     for key, desc in _REQUIRED_KEYS.items():
         if _check_env_key(key):
@@ -177,13 +174,11 @@ def print_dry_run(config: dict, workspace: str, task: str) -> None:
         else:
             print(f"    {C.yellow('○')} {desc} ({key}) — optional")
 
-    # Tracing
     tracing_ok = all(_check_env_key(k) for k in _OPTIONAL_KEYS)
     print(f"\n  {C.bold('Tracing')}")
     langfuse_status = C.green("enabled") if tracing_ok else C.yellow("disabled (keys missing)")
     _print_kv("  Langfuse", langfuse_status, indent=2)
 
-    # Verdict
     config_errors = config.get("errors", [])
     if config_errors:
         print(f"\n  {C.bold('Config Errors')}")
@@ -193,9 +188,10 @@ def print_dry_run(config: dict, workspace: str, task: str) -> None:
     if config["valid"]:
         print(f"\n  {C.green('✓ All required keys present. Ready to run.')}")
     else:
-        print(f"\n  {C.red('✗ Missing required API keys:')}")
-        for key in config["missing"]:
-            print(f"    → Set {C.bold(key)} in your .env file")
+        if config["missing"]:
+            print(f"\n  {C.red('✗ Missing required API keys:')}")
+            for key in config["missing"]:
+                print(f"    → Set {C.bold(key)} in your .env file")
         print(f"\n  {C.dim('Copy .env.example to .env and fill in your keys.')}")
 
 
@@ -205,38 +201,32 @@ def print_blueprint(blueprint_data: dict, tokens_used: int, elapsed: float) -> N
 
     print(f"\n  {C.cyan('Task ID:')} {blueprint_data.get('task_id', 'unknown')}")
 
-    # Target files
     files = blueprint_data.get("target_files", [])
     if files:
         print(f"\n  {C.bold('Target Files')}")
         for f in files:
             print(f"    {C.cyan(f)}")
 
-    # Instructions
     instructions = blueprint_data.get("instructions", "")
     if instructions:
         print(f"\n  {C.bold('Instructions')}")
         for line in instructions.split("\n"):
             print(f"    {line}")
 
-    # Constraints
     constraints = blueprint_data.get("constraints", [])
     if constraints:
         print(f"\n  {C.bold('Constraints')}")
         for c in constraints:
             print(f"    {C.yellow('•')} {c}")
 
-    # Acceptance criteria
     criteria = blueprint_data.get("acceptance_criteria", [])
     if criteria:
         print(f"\n  {C.bold('Acceptance Criteria')}")
         for c in criteria:
             print(f"    {C.green('□')} {c}")
 
-    # Stats
     print(f"\n  {C.dim(f'Tokens: {tokens_used:,} | Elapsed: {elapsed:.1f}s')}")
 
-    # Raw JSON
     print(f"\n  {C.bold('Raw JSON')}")
     print(C.dim(json.dumps(blueprint_data, indent=2)))
 
@@ -350,6 +340,9 @@ def _apply_overrides(args: argparse.Namespace) -> None:
     if args.model_qa:
         os.environ["QA_MODEL"] = args.model_qa
     if args.budget is not None:
+        if args.budget <= 0:
+            print(f"{C.red('Error:')} --budget must be a positive integer, got {args.budget}")
+            sys.exit(1)
         os.environ["TOKEN_BUDGET"] = str(args.budget)
 
 
@@ -476,7 +469,10 @@ def handle_run(args: argparse.Namespace) -> int:
 
     config = validate_config()
     if not config["valid"]:
-        print(f"{C.red('Error:')} Missing required API keys: {', '.join(config['missing'])}")
+        if config["missing"]:
+            print(f"{C.red('Error:')} Missing required API keys: {', '.join(config['missing'])}")
+        for err in config.get("errors", []):
+            print(f"{C.red('Config error:')} {err}")
         print(f"{C.dim('Run with --dry-run to see full config status.')}")
         return 1
 
