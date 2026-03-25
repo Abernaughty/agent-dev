@@ -155,14 +155,9 @@ def _setup_env(args: argparse.Namespace) -> str:
 
     os.chdir(workspace)
 
-    # Load workspace .env explicitly by path. We must not rely on
-    # find_dotenv() defaults (usecwd=False) which resolves from the
-    # caller's file location, not the workspace. Only fills unset
-    # vars — shell-exported secrets and CI variables are preserved.
     dotenv_path = Path(workspace) / ".env"
     load_dotenv(dotenv_path=dotenv_path)
 
-    # CLI flags always take highest precedence.
     if args.model_architect:
         os.environ["ARCHITECT_MODEL"] = args.model_architect
     if args.model_developer:
@@ -315,6 +310,64 @@ def print_run_result(state, elapsed: float) -> None:
             print(f"    {C.dim('→')} {entry}")
 
 
+# ── Run Log Output (issue #31) ──
+
+
+def _write_run_log(state, elapsed: float, task: str, workspace: str) -> None:
+    """Write structured run result to runs/ directory for dashboard consumption.
+
+    Produces two files:
+        - runs/run_YYYYMMDD_HHMMSS.json — timestamped archive
+        - runs/latest.json — always the most recent run (overwritten)
+
+    The JSON schema is the contract between the CLI runner and the
+    SvelteKit dashboard's /api/runs endpoint. Changes here must be
+    reflected in dashboard/src/lib/types/index.ts.
+
+    Args:
+        state: Final AgentState from run_task().
+        elapsed: Wall-clock seconds for the run.
+        task: Original task description string.
+        workspace: Workspace root directory path.
+    """
+    runs_dir = Path(workspace) / "runs"
+    runs_dir.mkdir(exist_ok=True)
+
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    iso_timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    log_data = {
+        "task": task,
+        "status": state.status.value,
+        "tokens_used": state.tokens_used,
+        "retry_count": state.retry_count,
+        "elapsed_seconds": round(elapsed, 1),
+        "estimated_cost": round(state.tokens_used * 0.000012, 6),
+        "error_message": state.error_message or None,
+        "blueprint": state.blueprint.model_dump() if state.blueprint else None,
+        "trace": list(state.trace) if state.trace else [],
+        "timestamp": iso_timestamp,
+        "models": {
+            "architect": os.getenv("ARCHITECT_MODEL", "gemini-3-flash-preview"),
+            "developer": os.getenv("DEVELOPER_MODEL", "claude-sonnet-4-20250514"),
+            "qa": os.getenv("QA_MODEL", "claude-sonnet-4-20250514"),
+        },
+    }
+
+    json_content = json.dumps(log_data, indent=2)
+
+    # Write timestamped file (archive)
+    run_file = runs_dir / f"run_{timestamp}.json"
+    run_file.write_text(json_content, encoding="utf-8")
+
+    # Write latest.json (dashboard quick-access)
+    latest_file = runs_dir / "latest.json"
+    latest_file.write_text(json_content, encoding="utf-8")
+
+    logger = logging.getLogger(__name__)
+    logger.info("Run log written: %s", run_file.name)
+
+
 # ── Argument Parsing ──
 
 def build_parser() -> argparse.ArgumentParser:
@@ -456,8 +509,18 @@ def handle_plan(args: argparse.Namespace) -> int:
     return 0
 
 
-def handle_run(args: argparse.Namespace) -> int:
-    """Handle full run: Architect → Lead Dev → QA loop."""
+def handle_run(args: argparse.Namespace, workspace: str | None = None) -> int:
+    """Handle full run: Architect → Lead Dev → QA loop.
+
+    After printing results, writes a structured JSON run log to
+    runs/ for consumption by the SvelteKit dashboard (issue #31).
+
+    Args:
+        args: Parsed CLI arguments.
+        workspace: Workspace root directory. Defaults to cwd if not provided.
+    """
+    if workspace is None:
+        workspace = os.getcwd()
     config = validate_config()
     if not config["valid"]:
         if config["missing"]:
@@ -488,6 +551,13 @@ def handle_run(args: argparse.Namespace) -> int:
     elapsed = time.time() - start
     print_run_result(result, elapsed)
 
+    # Write structured JSON for dashboard consumption (issue #31)
+    try:
+        _write_run_log(result, elapsed, args.task, workspace)
+    except Exception as e:
+        # Run log is best-effort — never fail the CLI over a log write
+        logging.getLogger(__name__).warning("Failed to write run log: %s", e)
+
     from .orchestrator import WorkflowStatus
     return 0 if result.status == WorkflowStatus.PASSED else 1
 
@@ -504,8 +574,6 @@ def main(argv: list[str] | None = None) -> int:
     Returns:
         Exit code (0 = success, 1 = error).
     """
-    # Parse args FIRST — we need --workspace before loading any .env.
-    # No load_dotenv() here. That happens in _setup_env() after chdir.
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -514,7 +582,6 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "run":
-        # Set up logging before env setup (doesn't depend on .env)
         level = logging.DEBUG if args.verbose else logging.WARNING
         logging.basicConfig(
             level=level,
@@ -522,7 +589,6 @@ def main(argv: list[str] | None = None) -> int:
             datefmt="%H:%M:%S",
         )
 
-        # Single env setup: chdir → load_dotenv → apply overrides
         workspace = _setup_env(args)
 
         if args.dry_run:
@@ -530,7 +596,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.plan:
             return handle_plan(args)
         else:
-            return handle_run(args)
+            return handle_run(args, workspace)
 
     parser.print_help()
     return 0
