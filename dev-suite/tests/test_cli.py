@@ -342,14 +342,36 @@ class TestModelOverrides:
 
 class TestPlanMode:
 
-    def test_plan_missing_keys_exits(self, capsys):
-        """--plan with missing API keys returns 1."""
+    def test_plan_missing_google_key_exits(self, capsys):
+        """--plan with missing GOOGLE_API_KEY returns 1."""
         parser = build_parser()
         args = parser.parse_args(["run", "test task", "--plan"])
         result = handle_plan(args)
         assert result == 1
         captured = capsys.readouterr()
-        assert "Missing required API keys" in captured.out
+        assert "GOOGLE_API_KEY" in captured.out
+
+    @patch("src.tracing.create_trace_config")
+    @patch("src.orchestrator.architect_node")
+    def test_plan_only_needs_google_key(self, mock_arch, mock_trace, monkeypatch, capsys):
+        """--plan succeeds with only GOOGLE_API_KEY (no Anthropic/E2B needed)."""
+        from src.agents.architect import Blueprint
+
+        monkeypatch.setenv("GOOGLE_API_KEY", "test-google-key")
+        # Deliberately NOT setting ANTHROPIC_API_KEY or E2B_API_KEY
+        mock_trace.return_value = MagicMock(callbacks=[], enabled=False, flush=MagicMock())
+        mock_arch.return_value = {
+            "blueprint": Blueprint(
+                task_id="t1", target_files=["f.py"],
+                instructions="x", constraints=[], acceptance_criteria=[],
+            ),
+            "status": "building", "tokens_used": 100,
+            "trace": [], "memory_context": [],
+        }
+        parser = build_parser()
+        args = parser.parse_args(["run", "test task", "--plan", "--no-trace"])
+        result = handle_plan(args)
+        assert result == 0
 
     @patch("src.tracing.create_trace_config")
     @patch("src.orchestrator.architect_node")

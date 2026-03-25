@@ -425,15 +425,20 @@ def handle_dry_run(args: argparse.Namespace) -> int:
 
 def handle_plan(args: argparse.Namespace) -> int:
     """Handle --plan: run Architect only, show Blueprint."""
-    config = validate_config()
-    if not config["valid"]:
-        print(f"{C.red('Error:')} Missing required API keys: {', '.join(config['missing'])}")
-        print(f"{C.dim('Run with --dry-run to see full config status.')}")
+    # Validate workspace before anything else
+    workspace = args.workspace or os.getcwd()
+    if not Path(workspace).is_dir():
+        print(f"{C.red('Error:')} Workspace path does not exist: {workspace}")
         return 1
 
-    # Only need GOOGLE_API_KEY for the Architect
+    # Change to workspace so file/tool operations resolve correctly
+    os.chdir(workspace)
+
+    # --plan only needs GOOGLE_API_KEY (Architect uses Gemini).
+    # Don't gate on ANTHROPIC_API_KEY or E2B_API_KEY.
     if not _check_env_key("GOOGLE_API_KEY"):
         print(f"{C.red('Error:')} GOOGLE_API_KEY is required for --plan mode.")
+        print(f"{C.dim('Run with --dry-run to see full config status.')}")
         return 1
 
     from .orchestrator import (
@@ -498,6 +503,15 @@ def handle_plan(args: argparse.Namespace) -> int:
 
 def handle_run(args: argparse.Namespace) -> int:
     """Handle full run: Architect → Lead Dev → QA loop."""
+    # Validate workspace before anything else
+    workspace = args.workspace or os.getcwd()
+    if not Path(workspace).is_dir():
+        print(f"{C.red('Error:')} Workspace path does not exist: {workspace}")
+        return 1
+
+    # Change to workspace so file/tool operations resolve correctly
+    os.chdir(workspace)
+
     config = validate_config()
     if not config["valid"]:
         print(f"{C.red('Error:')} Missing required API keys: {', '.join(config['missing'])}")
