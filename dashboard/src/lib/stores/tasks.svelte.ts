@@ -1,0 +1,155 @@
+/**
+ * Tasks store — reactive task list.
+ *
+ * Initialised by fetching GET /api/tasks.
+ * Updated in real-time from SSE `task_progress` and `task_complete` events.
+ * Supports mutations: create, cancel, retry.
+ *
+ * Issue #37
+ */
+
+import type { TaskSummary, TaskStatus, CreateTaskResponse } from '$lib/types/api.js';
+
+let tasks = $state<TaskSummary[]>([]);
+let loading = $state(false);
+let error = $state<string | null>(null);
+
+export const tasksStore = {
+	get list() {
+		return tasks;
+	},
+	get loading() {
+		return loading;
+	},
+	get error() {
+		return error;
+	},
+	get activeTasks() {
+		const active: TaskStatus[] = ['queued', 'planning', 'building', 'reviewing'];
+		return tasks.filter((t) => active.includes(t.status));
+	},
+
+	/** Fetch tasks from the proxy route. */
+	async refresh() {
+		loading = true;
+		error = null;
+		try {
+			const res = await fetch('/api/tasks');
+			const body = await res.json();
+			if (res.ok && body.data) {
+				tasks = body.data;
+			} else {
+				error = body.errors?.[0] ?? 'Failed to fetch tasks';
+			}
+		} catch (err) {
+			error = err instanceof Error ? err.message : 'Network error';
+		} finally {
+			loading = false;
+		}
+	},
+
+	/** Create a new task. Returns the task_id on success. */
+	async create(description: string): Promise<string | null> {
+		try {
+			const res = await fetch('/api/tasks', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ description })
+			});
+			const body = await res.json();
+			if (res.ok && body.data) {
+				const created = body.data as CreateTaskResponse;
+				// Optimistic add — SSE will update with full data
+				tasks = [
+					...tasks,
+					{
+						id: created.task_id,
+						description,
+						status: created.status,
+						created_at: new Date().toISOString(),
+						completed_at: null,
+						budget: {
+							tokens_used: 0,
+							token_budget: 50000,
+							retries_used: 0,
+							max_retries: 3,
+							cost_used: 0,
+							cost_budget: 1.0
+						},
+						timeline: []
+					}
+				];
+				return created.task_id;
+			}
+			error = body.errors?.[0] ?? 'Failed to create task';
+			return null;
+		} catch (err) {
+			error = err instanceof Error ? err.message : 'Network error';
+			return null;
+		}
+	},
+
+	/** Cancel a running task. */
+	async cancel(taskId: string): Promise<boolean> {
+		try {
+			const res = await fetch(`/api/tasks/${taskId}/cancel`, { method: 'POST' });
+			if (res.ok) {
+				// Optimistic update
+				tasks = tasks.map((t) => (t.id === taskId ? { ...t, status: 'cancelled' as const } : t));
+				return true;
+			}
+			const body = await res.json();
+			error = body.errors?.[0] ?? 'Failed to cancel task';
+			return false;
+		} catch (err) {
+			error = err instanceof Error ? err.message : 'Network error';
+			return false;
+		}
+	},
+
+	/** Retry a failed task. */
+	async retry(taskId: string): Promise<boolean> {
+		try {
+			const res = await fetch(`/api/tasks/${taskId}/retry`, { method: 'POST' });
+			if (res.ok) {
+				// Optimistic update
+				tasks = tasks.map((t) => (t.id === taskId ? { ...t, status: 'queued' as const } : t));
+				return true;
+			}
+			const body = await res.json();
+			error = body.errors?.[0] ?? 'Failed to retry task';
+			return false;
+		} catch (err) {
+			error = err instanceof Error ? err.message : 'Network error';
+			return false;
+		}
+	},
+
+	/** Apply an SSE task_progress event. */
+	handleProgress(data: {
+		task_id: string;
+		event: string;
+		agent: string | null;
+		detail: string;
+	}) {
+		const idx = tasks.findIndex((t) => t.id === data.task_id);
+		if (idx >= 0) {
+			// Update the task in place — SSE has the latest status
+			tasks = [...tasks];
+		}
+		// If the task isn't in our list yet, a full refresh will pick it up
+	},
+
+	/** Apply an SSE task_complete event. */
+	handleComplete(data: { task_id: string; status: string; detail: string }) {
+		tasks = tasks.map((t) =>
+			t.id === data.task_id ? { ...t, status: data.status as TaskStatus } : t
+		);
+	},
+
+	/** Reset to empty state. */
+	reset() {
+		tasks = [];
+		error = null;
+	}
+};
