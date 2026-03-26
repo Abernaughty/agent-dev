@@ -1,6 +1,7 @@
 """FastAPI application exposing orchestrator state to the dashboard.
 
 Issue #34: FastAPI Bootstrap — API Layer for Orchestrator
+Issue #35: SSE Event System — Real-Time Task Streaming
 
 Run with:
     uv run --group api uvicorn src.api.main:app --reload --port 8000
@@ -11,15 +12,18 @@ Or via the CLI convenience command (once wired):
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from sse_starlette import EventSourceResponse
 
 from .auth import require_auth
+from .events import EventType, SSEEvent, event_bus
 from .models import (
     ApiResponse,
     CreateTaskRequest,
@@ -35,6 +39,10 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
+# Heartbeat interval in seconds — keeps SSE connections alive
+# through proxies and load balancers that drop idle connections.
+SSE_HEARTBEAT_SECONDS = 15
+
 
 # ── Lifespan ──
 
@@ -49,7 +57,13 @@ async def lifespan(app: FastAPI):
         os.getenv("API_SEED_MOCK_DATA", "true"),
     )
     yield
-    logger.info("Dev Suite API shutting down")
+    # Shutdown: clean up SSE subscribers
+    logger.info(
+        "Dev Suite API shutting down | sse_subscribers=%d | events_published=%d",
+        event_bus.subscriber_count,
+        event_bus.event_counter,
+    )
+    await event_bus.clear()
 
 
 # ── App Configuration ──
@@ -63,7 +77,7 @@ _allowed_origins = os.getenv(
 app = FastAPI(
     title="Dev Suite API",
     description="Exposes orchestrator state to the SvelteKit dashboard",
-    version="0.1.0",
+    version="0.2.0",
     docs_url="/docs",
     redoc_url=None,
     lifespan=lifespan,
@@ -105,7 +119,85 @@ async def health():
     return HealthResponse(
         uptime_seconds=state_manager.get_uptime(),
         active_tasks=state_manager.get_active_task_count(),
+        sse_subscribers=event_bus.subscriber_count,
     )
+
+
+# ── SSE Stream ──
+
+@app.get("/stream")
+async def stream(
+    request: Request,
+    _auth: str | None = Depends(require_auth),
+):
+    """Server-Sent Events endpoint for real-time dashboard updates.
+
+    Streams structured JSON events as they occur:
+    - agent_status: agent state changes (idle → coding → testing)
+    - task_progress: task timeline events (blueprint created, tests running)
+    - task_complete: task finished (success or exhausted retries)
+    - memory_added: new memory entry pending approval
+    - log_line: terminal-style log output
+
+    Sends a heartbeat comment every 15s to keep connections alive.
+    Supports multiple concurrent clients with automatic cleanup on disconnect.
+
+    Auth: Bearer token (same as REST endpoints).
+    """
+    return EventSourceResponse(
+        _sse_generator(request),
+        media_type="text/event-stream",
+    )
+
+
+async def _sse_generator(request: Request):
+    """Async generator that yields SSE events from the EventBus.
+
+    Each connected client gets its own asyncio.Queue via subscribe().
+    On disconnect, the queue is removed via unsubscribe() in the
+    finally block — guaranteeing no memory leaks.
+    """
+    queue = await event_bus.subscribe()
+    event_id = event_bus.event_counter
+
+    logger.info(
+        "SSE client connected (subscribers: %d)",
+        event_bus.subscriber_count,
+    )
+
+    try:
+        while True:
+            # Check if client disconnected
+            if await request.is_disconnected():
+                logger.debug("SSE client disconnected (detected via request)")
+                break
+
+            try:
+                # Wait for next event with heartbeat timeout
+                event: SSEEvent = await asyncio.wait_for(
+                    queue.get(),
+                    timeout=SSE_HEARTBEAT_SECONDS,
+                )
+                event_id += 1
+
+                yield {
+                    "event": event.type.value,
+                    "data": event.model_dump_json(),
+                    "id": str(event_id),
+                }
+
+            except asyncio.TimeoutError:
+                # No events within heartbeat window — send keepalive
+                yield {"comment": "keepalive"}
+
+    except asyncio.CancelledError:
+        logger.debug("SSE generator cancelled (client disconnect)")
+    finally:
+        await event_bus.unsubscribe(queue)
+        logger.info(
+            "SSE client cleaned up (subscribers: %d)",
+            event_bus.subscriber_count,
+        )
 
 
 # ── Agents ──
@@ -139,14 +231,14 @@ async def create_task(
     _auth: str | None = Depends(require_auth),
 ):
     """Queue a new task for the orchestrator."""
-    task_id = state_manager.create_task(body.description)
+    task_id = await state_manager.create_task(body.description)
     return _ok(CreateTaskResponse(task_id=task_id))
 
 
 @app.post("/tasks/{task_id}/cancel", response_model=ApiResponse)
 async def cancel_task(task_id: str, _auth: str | None = Depends(require_auth)):
     """Cancel a running task."""
-    if not state_manager.cancel_task(task_id):
+    if not await state_manager.cancel_task(task_id):
         task = state_manager.get_task(task_id)
         if not task:
             _error(f"Task '{task_id}' not found", 404)
@@ -158,7 +250,7 @@ async def cancel_task(task_id: str, _auth: str | None = Depends(require_auth)):
 @app.post("/tasks/{task_id}/retry", response_model=ApiResponse)
 async def retry_task(task_id: str, _auth: str | None = Depends(require_auth)):
     """Retry a failed task."""
-    if not state_manager.retry_task(task_id):
+    if not await state_manager.retry_task(task_id):
         task = state_manager.get_task(task_id)
         if not task:
             _error(f"Task '{task_id}' not found", 404)
@@ -187,9 +279,9 @@ async def update_memory(
 ):
     """Approve or reject a memory entry."""
     if body.action == "approve":
-        entry = state_manager.approve_memory(entry_id)
+        entry = await state_manager.approve_memory(entry_id)
     elif body.action == "reject":
-        entry = state_manager.reject_memory(entry_id)
+        entry = await state_manager.reject_memory(entry_id)
     else:
         _error(f"Invalid action: {body.action}")
         return  # unreachable, satisfies type checker
