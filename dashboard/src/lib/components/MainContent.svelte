@@ -2,7 +2,7 @@
 	MainContent — routes to the correct content view based on
 	the active sidebar panel and selected item.
 
-	Issue #38: Data Integration — PR3
+	Issue #38: Data Integration — PR3 + PR4
 -->
 <script lang="ts">
 	import { agentsStore } from '$lib/stores/agents.svelte.js';
@@ -14,6 +14,7 @@
 	import MemoryDetailView from './views/MemoryDetailView.svelte';
 	import PRDetailView from './views/PRDetailView.svelte';
 	import BlueprintView from './views/BlueprintView.svelte';
+	import ChatView from './views/ChatView.svelte';
 
 	type PanelId = 'agents' | 'memory' | 'prs' | 'chat';
 
@@ -93,10 +94,7 @@
 	{/if}
 
 {:else if activePanel === 'chat'}
-	<div class="flex h-full flex-col items-center justify-center gap-3 p-6" style="font-family: var(--font-mono);">
-		<div class="text-[13px]" style="color: var(--color-text-muted);">Task Chat</div>
-		<div class="text-[11px]" style="color: var(--color-text-dim);">Chat input and SSE log streaming coming in PR4.</div>
-	</div>
+	<ChatView />
 
 {:else}
 	<TimelineView />

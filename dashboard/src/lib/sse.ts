@@ -4,17 +4,11 @@
  * Features:
  * - Auto-reconnect with exponential backoff (1s → 2s → 4s → max 30s)
  * - Typed event dispatch to appropriate stores
+ * - Window CustomEvent dispatch for task_progress, task_complete, log_line
+ *   (consumed by ChatView and BottomPanel)
  * - Connection status exposed via the connection store
  *
- * Usage (in a Svelte component or layout):
- *   import { sseClient } from '$lib/sse.js';
- *
- *   $effect(() => {
- *     sseClient.connect();
- *     return () => sseClient.disconnect();
- *   });
- *
- * Issue #37
+ * Issue #37 + #38 PR4
  */
 
 import { connection } from '$lib/stores/connection.svelte.js';
@@ -53,12 +47,24 @@ function dispatch(eventType: SSEEventType, payload: Record<string, unknown>) {
 			tasksStore.handleProgress(
 				payload as { task_id: string; event: string; agent: string | null; detail: string }
 			);
+			// Also dispatch as window event for ChatView
+			if (typeof window !== 'undefined') {
+				window.dispatchEvent(
+					new CustomEvent('sse:task_progress', { detail: payload })
+				);
+			}
 			break;
 
 		case 'task_complete':
 			tasksStore.handleComplete(
 				payload as { task_id: string; status: string; detail: string }
 			);
+			// Also dispatch as window event for ChatView
+			if (typeof window !== 'undefined') {
+				window.dispatchEvent(
+					new CustomEvent('sse:task_complete', { detail: payload })
+				);
+			}
 			break;
 
 		case 'memory_added':
@@ -68,8 +74,7 @@ function dispatch(eventType: SSEEventType, payload: Record<string, unknown>) {
 			break;
 
 		case 'log_line':
-			// Log lines are consumed by the BottomPanel directly.
-			// For now, dispatch a custom DOM event that components can listen to.
+			// Log lines consumed by BottomPanel via window event
 			if (typeof window !== 'undefined') {
 				window.dispatchEvent(
 					new CustomEvent('sse:log_line', { detail: payload })
