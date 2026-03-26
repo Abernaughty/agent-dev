@@ -23,6 +23,7 @@ import logging
 import os
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -136,10 +137,6 @@ def _setup_env(args: argparse.Namespace) -> str:
         2. chdir to workspace
         3. load_dotenv(dotenv_path=) — explicit workspace path, fills gaps only
         4. Apply CLI flag overrides (always win)
-
-    This is called ONCE from main() after parsing args but before
-    dispatching to any handler. No handler should call load_dotenv()
-    or apply overrides — it's all done here.
 
     Returns:
         The resolved workspace path.
@@ -317,7 +314,7 @@ def _write_run_log(state, elapsed: float, task: str, workspace: str) -> None:
     """Write structured run result to runs/ directory for dashboard consumption.
 
     Produces two files:
-        - runs/run_YYYYMMDD_HHMMSS.json — timestamped archive
+        - runs/run_YYYYMMDD_HHMMSSffffff.json — timestamped archive (microsecond precision)
         - runs/latest.json — always the most recent run (overwritten)
 
     The JSON schema is the contract between the CLI runner and the
@@ -333,8 +330,9 @@ def _write_run_log(state, elapsed: float, task: str, workspace: str) -> None:
     runs_dir = Path(workspace) / "runs"
     runs_dir.mkdir(exist_ok=True)
 
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
-    iso_timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    now = datetime.now(timezone.utc)
+    timestamp = now.strftime("%Y%m%d_%H%M%S") + f"{now.microsecond:06d}"
+    iso_timestamp = now.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
     log_data = {
         "task": task,
@@ -436,8 +434,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 # ── Command Handlers ──
-# Handlers assume _setup_env() has already been called.
-# They do NOT call load_dotenv() or apply overrides.
 
 
 def handle_dry_run(args: argparse.Namespace, workspace: str) -> int:
@@ -510,15 +506,7 @@ def handle_plan(args: argparse.Namespace) -> int:
 
 
 def handle_run(args: argparse.Namespace, workspace: str | None = None) -> int:
-    """Handle full run: Architect → Lead Dev → QA loop.
-
-    After printing results, writes a structured JSON run log to
-    runs/ for consumption by the SvelteKit dashboard (issue #31).
-
-    Args:
-        args: Parsed CLI arguments.
-        workspace: Workspace root directory. Defaults to cwd if not provided.
-    """
+    """Handle full run: Architect → Lead Dev → QA loop."""
     if workspace is None:
         workspace = os.getcwd()
     config = validate_config()
@@ -551,11 +539,9 @@ def handle_run(args: argparse.Namespace, workspace: str | None = None) -> int:
     elapsed = time.time() - start
     print_run_result(result, elapsed)
 
-    # Write structured JSON for dashboard consumption (issue #31)
     try:
         _write_run_log(result, elapsed, args.task, workspace)
     except Exception as e:
-        # Run log is best-effort — never fail the CLI over a log write
         logging.getLogger(__name__).warning("Failed to write run log: %s", e)
 
     from .orchestrator import WorkflowStatus
@@ -565,15 +551,7 @@ def handle_run(args: argparse.Namespace, workspace: str | None = None) -> int:
 # ── Main Entry Point ──
 
 def main(argv: list[str] | None = None) -> int:
-    """Main CLI entry point.
-
-    Args:
-        argv: Command-line arguments (defaults to sys.argv[1:]).
-              Accepts a list for testability.
-
-    Returns:
-        Exit code (0 = success, 1 = error).
-    """
+    """Main CLI entry point."""
     parser = build_parser()
     args = parser.parse_args(argv)
 
