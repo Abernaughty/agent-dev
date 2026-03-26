@@ -1,133 +1,84 @@
-# Agent Development Environment
+# Agent Dev — Stateful AI Workforce
 
-A secure, containerized development environment for AI agents and general-purpose development workflows, backed by MCP (Model Context Protocol) servers for safe file and command access.
-
-## What's Inside
-
-| Component | Description |
-|---|---|
-| [MCP Servers](#mcp-servers) | Containerized filesystem and shell servers for safe AI agent access |
-| [Git Commit Agent](./tools/README.md) | AI-powered tool that generates conventional commit messages using Claude |
-| [Dev Container](#dev-container) | General-purpose development environment with common tooling |
+A LangGraph-orchestrated AI development team with a SvelteKit dashboard for real-time monitoring. Three specialized agents (Architect, Lead Dev, QA) collaborate through structured JSON blueprints, execute code in E2B sandboxes, and persist knowledge via Chroma tiered memory.
 
 ## Project Structure
 
 ```
 agent-dev/
-├── docker-compose.yml          # Main orchestration file
-├── containers/                 # Container definitions
-│   ├── dev/                   # General development container
-│   ├── mcp-fs/               # MCP Filesystem server
-│   └── mcp-shell/            # MCP Shell server
-├── tools/                     # Standalone AI-powered developer tools
-│   ├── git_commit_agent.py    # Automated commit message generator
-│   ├── requirements.txt
-│   └── README.md
-├── workspace/                 # Project code (mounted read-write into containers)
-├── config/                    # Configuration files
-├── docs/                      # MCP server documentation
-└── memory-bank/               # AI context files (see below)
+├── dev-suite/                  # Python orchestrator (LangGraph)
+│   ├── src/
+│   │   ├── agents/             # Architect, Lead Dev, QA agent definitions
+│   │   ├── api/                # FastAPI backend (REST + SSE)
+│   │   ├── memory/             # Chroma vector store with tiered metadata
+│   │   ├── sandbox/            # E2B sandbox runner
+│   │   ├── tools/              # MCP bridge and tool providers
+│   │   ├── orchestrator.py     # LangGraph state machine
+│   │   ├── cli.py              # CLI interface
+│   │   └── tracing.py          # Langfuse observability
+│   ├── tests/                  # Comprehensive test suite
+│   ├── pyproject.toml          # uv/PEP 735 dependencies
+│   └── mcp-config.json         # MCP server version pins
+├── dashboard/                  # SvelteKit frontend
+│   ├── src/
+│   │   ├── lib/                # Stores, SSE client, context
+│   │   └── routes/             # Layout + page components
+│   ├── package.json            # pnpm dependencies
+│   └── svelte.config.js
+├── .github/                    # Issue templates, labels, project config
+├── CLAUDE.md                   # Claude Code context
+└── CONTRIBUTING.md             # Contribution guidelines
 ```
 
-## MCP Servers
+## Architecture
 
-Two MCP (Model Context Protocol) servers provide AI agents with controlled access to the development environment over JSON-RPC via stdio.
+**Orchestrator**: LangGraph state machine with explicit transitions. Three agents collaborate in a plan → build → test loop with structured JSON blueprints, max 3 retries per task, and human escalation on budget exhaustion.
 
-### MCP Filesystem Server
-- **Purpose**: Safe file operations scoped to `/workspace`
-- **Operations**: `list`, `read`, `write`, `search`, `exists`, `mkdir`
-- **Security**: Path validation, directory traversal prevention
+**Agent Team**:
+| Role | Model | Responsibility |
+|---|---|---|
+| Architect | Gemini 2.5 Flash | Creates structured blueprints. Never writes code. |
+| Lead Dev | Claude Sonnet 4 | Executes blueprints. Writes and refactors code. |
+| QA Agent | Claude Sonnet 4 | Runs tests, audits security, writes failure reports. |
 
-### MCP Shell Server
-- **Purpose**: Allowlisted command execution
-- **Allowed commands**: `npm`, `node`, `git`, `ls`, `cat`, `echo`
-- **Security**: Command allowlisting, argument validation, 30s timeout
+**Memory**: Chroma with tiered metadata (L0-Core human-only, L0-Discovered agent-writable with 48h expiry, L1 module context, L2 ephemeral).
 
-### Security Model
-- **Read-only root filesystems** for all containers
-- **Dropped capabilities** (`cap_drop: ["ALL"]`)
-- **No new privileges** (`no-new-privileges: true`)
-- **Network isolation** (`network_mode: "none"` for MCP servers)
-- **Memory and CPU limits**
-- **Non-executable /tmp** mounts
+**Execution**: E2B sandboxed micro-VMs with structured JSON output wrappers. Role-specific sandbox profiles (locked-down for Dev/QA, permissive for research).
 
-See [docs/README.md](./docs/README.md) for full MCP server documentation and integration examples.
-
-## Git Commit Agent
-
-An AI-powered tool that scans your git repo, finds branches with unpushed changes, and generates conventional commit messages using Claude.
-
-```bash
-cd tools
-pip install -r requirements.txt
-export ANTHROPIC_API_KEY=sk-ant-...
-python git_commit_agent.py
-```
-
-See [tools/README.md](./tools/README.md) for full usage, config, and options.
-
-## Dev Container
-
-A general-purpose development container with common tooling pre-installed (git, node, python, jq, ripgrep).
+**Dashboard**: SvelteKit (Svelte 5 + TailwindCSS v4) with SSE real-time streaming. VS Code-inspired layout with activity bar, sidebar panels, and bottom terminal.
 
 ## Quick Start
 
-```bash
-# Build and start the dev environment
-docker-compose build
-docker-compose up -d dev
+### Orchestrator (Python)
 
-# Test MCP servers
-make test-mcp     # Test both
-make test-fs      # Filesystem server only
-make test-shell   # Shell server only
+```bash
+cd dev-suite
+uv sync                          # Install dependencies
+cp .env.example .env             # Configure API keys
+uv run python -m src             # Run orchestrator
+uv run pytest tests/ -v          # Run tests
 ```
 
-### Common Commands
+### Dashboard API
 
 ```bash
-# View logs
-docker-compose logs -f dev
-
-# Stop all services
-docker-compose down
-
-# Run MCP servers interactively
-docker-compose run --rm -i mcp-fs
-docker-compose run --rm -i mcp-shell
-```
-
-## AI Context Files
-
-This repo includes files used by Claude/Cline for persistent AI context:
-
-- **`CLAUDE.md`** — Instructions and context for Claude when working in this repo
-- **`memory-bank/`** — Structured context files (active context, system patterns, tech stack, progress) used by Cline's memory bank feature
-
-These files are committed intentionally and are part of the AI-assisted development workflow.
-
-## Dev Suite API
-
-FastAPI backend exposing orchestrator state to the SvelteKit dashboard. Provides REST endpoints for agents, tasks, memory, and PRs with Bearer token auth.
-
-```bash
-# Install API dependencies
 cd dev-suite
 uv sync --group api
-
-# Run the API (development mode — no auth required)
 uv run --group api uvicorn src.api.main:app --reload --port 8000
-
-# With auth enabled
-API_SECRET=your-secret-here uv run --group api uvicorn src.api.main:app --reload --port 8000
-
-# Run API tests
-uv run --group dev pytest tests/test_api.py -v
 ```
 
-API docs available at `http://localhost:8000/docs` when running.
+API docs at `http://localhost:8000/docs`.
 
-### Endpoints
+### Dashboard Frontend
+
+```bash
+cd dashboard
+pnpm install
+cp .env.example .env             # Set BACKEND_URL
+pnpm dev                         # http://localhost:5173
+```
+
+## API Endpoints
 
 | Method | Path | Description |
 |---|---|---|
@@ -141,20 +92,33 @@ API docs available at `http://localhost:8000/docs` when running.
 | `GET` | `/memory` | Memory entries (filterable) |
 | `PATCH` | `/memory/{id}` | Approve/reject memory |
 | `GET` | `/prs` | Pull request list |
+| `GET` | `/events` | SSE stream |
+
+## Environment Variables
+
+Set in `dev-suite/.env`:
+- `ANTHROPIC_API_KEY` — Claude API access
+- `GOOGLE_API_KEY` — Gemini API access
+- `E2B_API_KEY` — Sandbox execution
+- `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` — Observability (optional)
+- `API_SECRET` — Dashboard API auth token
+
+Set in `dashboard/.env`:
+- `PUBLIC_USE_MOCK_DATA` — `true` for mock mode, `false` for live API
+- `BACKEND_URL` — API base URL (e.g. `http://localhost:8000`)
+- `API_SECRET` — Must match the API's secret
 
 ## Roadmap
 
-- ✅ Phase 1: Core container infrastructure
-- ✅ Phase 2: MCP server implementation (filesystem + shell)
-- ✅ Phase 3: Git commit agent tool
-- ✅ LangGraph orchestrator (Architect → Lead Dev → QA)
-- ✅ FastAPI dashboard backend
-- 🚧 SSE real-time streaming
-- 🚧 SvelteKit dashboard integration
-
-## Related Projects
-
-- [langchain-price-agent](https://github.com/Abernaughty/langchain-price-agent) — LangChain/LangGraph
-  agent experiments designed to run in environments like this one
-- [code-vector-sync](https://github.com/Abernaughty/code-vector-sync) — MCP server for semantic
-  code search (companion tool)
+- ✅ LangGraph orchestrator with 3-agent team
+- ✅ E2B sandbox execution
+- ✅ Chroma tiered memory
+- ✅ MCP tool bridge (Filesystem + GitHub)
+- ✅ FastAPI dashboard backend (REST + SSE)
+- ✅ SvelteKit dashboard with full data integration
+- 🚧 Live SSE wiring (dashboard ↔ running orchestrator)
+- 🚧 Memory approval UI
+- 🚧 Blueprint editor
+- 📋 CI/CD Pipeline MCP
+- 📋 Langfuse integration
+- 📋 Cost alerting thresholds
