@@ -63,10 +63,12 @@ chore: register integration pytest marker
 
 ## PR Review Workflow (Codex)
 
+WARNING: Codex Reviews are currently on hold due to subscription limits. Perform your own in-depth PR reviews and merge after pushing any necessary fixes.
+
 PRs are auto-reviewed by Codex (ChatGPT Codex Connector).
 
 ### Trigger rules
-- **Creating a PR** auto-triggers the first Codex review — do NOT comment `@codex review` on new PRs.
+- **Creating a PR** auto-triggers the first Codex review — do NOT comment `@codex review` on new PRs. 
 - **After pushing fix commits**, comment `@codex review` to trigger a re-review.
 
 ### Responding to Codex findings
