@@ -1,0 +1,76 @@
+# L0-Core: Project Rules & Reference Stack
+#
+# This file is the source of truth for L0-Core memory entries.
+# Agents can READ these entries but never WRITE to them.
+# All entries are loaded at startup with source_type: "static-config"
+# and mutable: false.
+#
+# To update: edit this file and re-run the seed script.
+# Format: YAML parsed by src/memory/seed.py
+
+project:
+  name: "agent-dev"
+  description: "Stateful AI Workforce orchestrator — LangGraph-based multi-agent system"
+
+# ── Reference Stack ──
+# Technologies codified as L0-Core. Agents query this when generating
+# Blueprints to ensure outputs align with the project stack.
+
+stack:
+  languages:
+    - "Python 3.13"
+    - "TypeScript"
+    - "JavaScript"
+  frontend:
+    - "SvelteKit with Svelte 5 (runes syntax, not legacy reactive)"
+    - "TailwindCSS v4"
+    - "ESLint"
+  databases:
+    - "Redis"
+    - "CosmosDB"
+  data_tooling:
+    - "Firecrawl for web scraping and crawling"
+  infrastructure:
+    - "Azure (Container Apps/AKS, Static Web Apps, Functions, App Service)"
+    - "Vercel"
+    - "Cloudflare"
+    - "Docker / Docker Compose"
+    - "Terraform"
+  ci_cd:
+    - "GitHub Actions"
+    - "Azure DevOps Pipelines"
+    - "Vercel (repo-connected)"
+  source_control:
+    - "GitHub"
+  package_managers:
+    - "pnpm for JavaScript/TypeScript projects"
+    - "uv for Python packaging (PEP 735 dependency-groups, not optional-dependencies)"
+  dev_environment:
+    - "VS Code with Dev Containers"
+
+# ── Project Rules ──
+# Hard constraints that agents must follow. Violations should trigger
+# QA failures or Architect escalation.
+
+rules:
+  execution:
+    - "All agent-generated code must run in E2B sandboxes, never on the host machine"
+    - "E2B SDK v2 requires Sandbox.create() factory method, not Sandbox() constructor"
+  communication:
+    - "Agents communicate via structured JSON Blueprints, not natural language"
+    - "Max 3 retries per task, each retry includes the QA failure report"
+    - "Token/cost budget per task acts as a hard ceiling"
+  memory:
+    - "L0-Core memory is human-only write access. Agents cannot modify project rules"
+    - "Agent-discovered constraints (L0-Discovered) expire after 48 hours if not approved"
+    - "A dedicated summarizer extracts key facts — agents do not self-select what to save"
+  security:
+    - "All secrets are injected via environment variables, never hardcoded or logged"
+    - "MCP server versions are pinned in mcp-config.json and reviewed monthly"
+    - "Dev/QA sandboxes whitelist only required domains"
+    - "Research sandboxes have open egress but zero secrets injected"
+  tooling:
+    - "Python tests run with: uv run --group dev --group api python -m pytest tests/ -v --tb=short -q"
+    - "GitHub MCP push_files silently fails at ~60KB total — use sequential create_or_update_file for large pushes"
+    - "SvelteKit PUBLIC_* env vars use import from $env/static/public, not import.meta.env"
+    - "Google Fonts @import must precede @import tailwindcss in app.css"
