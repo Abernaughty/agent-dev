@@ -106,13 +106,51 @@ This repo includes files used by Claude/Cline for persistent AI context:
 
 These files are committed intentionally and are part of the AI-assisted development workflow.
 
+## Dev Suite API
+
+FastAPI backend exposing orchestrator state to the SvelteKit dashboard. Provides REST endpoints for agents, tasks, memory, and PRs with Bearer token auth.
+
+```bash
+# Install API dependencies
+cd dev-suite
+uv sync --group api
+
+# Run the API (development mode — no auth required)
+uv run --group api uvicorn src.api.main:app --reload --port 8000
+
+# With auth enabled
+API_SECRET=your-secret-here uv run --group api uvicorn src.api.main:app --reload --port 8000
+
+# Run API tests
+uv run --group dev pytest tests/test_api.py -v
+```
+
+API docs available at `http://localhost:8000/docs` when running.
+
+### Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/health` | Health check (no auth) |
+| `GET` | `/agents` | Agent status list |
+| `GET` | `/tasks` | Task list with timelines |
+| `GET` | `/tasks/{id}` | Task detail with blueprint |
+| `POST` | `/tasks` | Create new task |
+| `POST` | `/tasks/{id}/cancel` | Cancel running task |
+| `POST` | `/tasks/{id}/retry` | Retry failed task |
+| `GET` | `/memory` | Memory entries (filterable) |
+| `PATCH` | `/memory/{id}` | Approve/reject memory |
+| `GET` | `/prs` | Pull request list |
+
 ## Roadmap
 
 - ✅ Phase 1: Core container infrastructure
 - ✅ Phase 2: MCP server implementation (filesystem + shell)
 - ✅ Phase 3: Git commit agent tool
-- 🚧 Phase 4: Additional MCP tools (browser, search)
-- 🚧 Phase 5: Streamlit dashboard for agent monitoring
+- ✅ LangGraph orchestrator (Architect → Lead Dev → QA)
+- ✅ FastAPI dashboard backend
+- 🚧 SSE real-time streaming
+- 🚧 SvelteKit dashboard integration
 
 ## Related Projects
 
