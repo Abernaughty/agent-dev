@@ -23,11 +23,7 @@ class ApiMeta(BaseModel):
 
 
 class ApiResponse(BaseModel):
-    """Standard API response envelope.
-
-    All endpoints return this shape so the dashboard can handle
-    responses uniformly.
-    """
+    """Standard API response envelope."""
 
     data: dict | list | None = None
     meta: ApiMeta = Field(default_factory=ApiMeta)
@@ -54,7 +50,7 @@ class AgentInfo(BaseModel):
     model: str
     status: AgentStatus = AgentStatus.IDLE
     current_task_id: str | None = None
-    color: str = "#64748b"  # Display color for the dashboard
+    color: str = "#64748b"
 
 
 # ── Task Models ──
@@ -77,7 +73,7 @@ class TimelineEvent(BaseModel):
     time: str
     agent: str
     action: str
-    type: str  # plan, code, exec, fail, retry, success
+    type: str
     sandbox: str = "locked"
 
 
@@ -167,29 +163,51 @@ class PRStatus(str, Enum):
     REVIEW = "review"
     MERGED = "merged"
     CLOSED = "closed"
+    DRAFT = "draft"
 
 
 class PRFileChange(BaseModel):
-    """A single file changed in a PR."""
-
     name: str
     additions: int = 0
     deletions: int = 0
-    status: str = "modified"  # added, modified, deleted
+    status: str = "modified"
+    patch: str = ""
 
 
 class PRTestResults(BaseModel):
-    """Test results for a PR."""
-
     passed: int = 0
     failed: int = 0
     total: int = 0
 
 
-class PRSummary(BaseModel):
-    """Pull request as returned by the API."""
+class PRReview(BaseModel):
+    id: int
+    author: str
+    state: str = ""
+    body: str = ""
+    submitted_at: str = ""
+    is_bot: bool = False
 
+
+class PRComment(BaseModel):
+    id: int
+    author: str
+    body: str = ""
+    path: str | None = None
+    line: int | None = None
+    created_at: str = ""
+    is_bot: bool = False
+
+
+class PRCheckStatus(BaseModel):
+    name: str
+    status: str = ""
+    conclusion: str | None = None
+
+
+class PRSummary(BaseModel):
     id: str
+    number: int = 0
     title: str
     author: str
     status: PRStatus
@@ -201,20 +219,42 @@ class PRSummary(BaseModel):
     file_count: int = 0
     files: list[PRFileChange] = []
     tests: PRTestResults = Field(default_factory=PRTestResults)
+    draft: bool = False
+    mergeable: bool | None = None
+    head_sha: str = ""
+    reviews: list[PRReview] = []
+    check_status: list[PRCheckStatus] = []
+
+
+class CreatePRRequest(BaseModel):
+    head: str = Field(..., min_length=1, description="Source branch")
+    base: str = Field(default="main", description="Target branch")
+    title: str = Field(..., min_length=1, max_length=256)
+    body: str = ""
+
+
+class PostReviewRequest(BaseModel):
+    event: str = Field(..., pattern="^(APPROVE|REQUEST_CHANGES|COMMENT)$")
+    body: str = ""
+    comments: list[dict] = Field(default_factory=list)
+
+
+class PostCommentRequest(BaseModel):
+    body: str = Field(..., min_length=1)
+
+
+class MergePRRequest(BaseModel):
+    method: str = Field(default="squash", pattern="^(merge|squash|rebase)$")
 
 
 # ── Task Creation ──
 
 
 class CreateTaskRequest(BaseModel):
-    """Request body for creating a new task."""
-
     description: str = Field(..., min_length=1, max_length=2000)
 
 
 class CreateTaskResponse(BaseModel):
-    """Response after queuing a new task."""
-
     task_id: str
     status: TaskStatus = TaskStatus.QUEUED
 
@@ -223,8 +263,6 @@ class CreateTaskResponse(BaseModel):
 
 
 class HealthResponse(BaseModel):
-    """Health check response."""
-
     status: str = "ok"
     version: str = "0.2.0"
     uptime_seconds: float = 0.0
