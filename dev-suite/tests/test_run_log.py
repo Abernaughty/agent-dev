@@ -136,9 +136,11 @@ class TestWriteRunLog:
         assert data["tokens_used"] == 48000
 
     def test_multiple_runs_unique_files(self, workspace, passed_state):
-        """Each run produces a uniquely named file."""
+        """Each run produces a uniquely named file.
+
+        Uses microsecond-precision timestamps so no sleep is needed.
+        """
         _write_run_log(passed_state, 1.0, "Task 1", workspace)
-        time.sleep(0.01)  # Ensure different timestamp
         _write_run_log(passed_state, 2.0, "Task 2", workspace)
 
         runs_dir = Path(workspace) / "runs"
