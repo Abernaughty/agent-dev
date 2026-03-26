@@ -1,6 +1,7 @@
 """Tests for the FastAPI API layer.
 
 Issue #34: FastAPI Bootstrap — API Layer for Orchestrator
+Issue #35: Updated for async StateManager mutations and version 0.2.0
 
 Uses httpx TestClient (async) to test all endpoints against
 the seeded mock data. Tests cover:
@@ -62,9 +63,10 @@ class TestHealth:
         assert r.status_code == 200
         data = r.json()
         assert data["status"] == "ok"
-        assert data["version"] == "0.1.0"
+        assert data["version"] == "0.2.0"
         assert data["agents"] == 3
         assert isinstance(data["uptime_seconds"], float)
+        assert "sse_subscribers" in data
 
     def test_health_no_auth_required(self, auth_client):
         """Health endpoint works even without auth header."""
@@ -100,7 +102,7 @@ class TestAgents:
         assert "data" in data
         assert "meta" in data
         assert "errors" in data
-        assert data["meta"]["version"] == "0.1.0"
+        assert data["meta"]["version"] == "0.2.0"
         assert data["errors"] == []
 
 
