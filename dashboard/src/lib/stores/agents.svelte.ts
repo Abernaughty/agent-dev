@@ -54,5 +54,12 @@ export const agentsStore = {
 	reset() {
 		agents = [];
 		error = null;
+	},
+
+	/** Load mock data directly (used when PUBLIC_USE_MOCK_DATA=true). */
+	loadMock(data: Agent[]) {
+		agents = data;
+		loading = false;
+		error = null;
 	}
 };

@@ -59,7 +59,6 @@ export const tasksStore = {
 			const body = await res.json();
 			if (res.ok && body.data) {
 				const created = body.data as CreateTaskResponse;
-				// Optimistic add — SSE will update with full data
 				tasks = [
 					...tasks,
 					{
@@ -94,7 +93,6 @@ export const tasksStore = {
 		try {
 			const res = await fetch(`/api/tasks/${taskId}/cancel`, { method: 'POST' });
 			if (res.ok) {
-				// Optimistic update
 				tasks = tasks.map((t) => (t.id === taskId ? { ...t, status: 'cancelled' as const } : t));
 				return true;
 			}
@@ -112,7 +110,6 @@ export const tasksStore = {
 		try {
 			const res = await fetch(`/api/tasks/${taskId}/retry`, { method: 'POST' });
 			if (res.ok) {
-				// Optimistic update
 				tasks = tasks.map((t) => (t.id === taskId ? { ...t, status: 'queued' as const } : t));
 				return true;
 			}
@@ -134,10 +131,8 @@ export const tasksStore = {
 	}) {
 		const idx = tasks.findIndex((t) => t.id === data.task_id);
 		if (idx >= 0) {
-			// Update the task in place — SSE has the latest status
 			tasks = [...tasks];
 		}
-		// If the task isn't in our list yet, a full refresh will pick it up
 	},
 
 	/** Apply an SSE task_complete event. */
@@ -150,6 +145,13 @@ export const tasksStore = {
 	/** Reset to empty state. */
 	reset() {
 		tasks = [];
+		error = null;
+	},
+
+	/** Load mock data directly (used when PUBLIC_USE_MOCK_DATA=true). */
+	loadMock(data: TaskSummary[]) {
+		tasks = data;
+		loading = false;
 		error = null;
 	}
 };
