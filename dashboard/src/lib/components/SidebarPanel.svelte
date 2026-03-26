@@ -1,11 +1,27 @@
+<!--
+	SidebarPanel — store-driven sidebar with selection tracking.
+
+	Reads from agentsStore, tasksStore, memoryStore, prsStore to
+	populate entries dynamically. Selection state is managed via
+	selectedId prop and onSelect callback.
+
+	Issue #38: Data Integration — PR3
+-->
 <script lang="ts">
+	import { agentsStore } from '$lib/stores/agents.svelte.js';
+	import { tasksStore } from '$lib/stores/tasks.svelte.js';
+	import { memoryStore } from '$lib/stores/memory.svelte.js';
+	import { prsStore } from '$lib/stores/prs.svelte.js';
+
 	type PanelId = 'agents' | 'memory' | 'prs' | 'chat';
 
 	interface Props {
 		activePanel: PanelId | null;
+		selectedId: string;
+		onSelect: (id: string) => void;
 	}
 
-	let { activePanel }: Props = $props();
+	let { activePanel, selectedId, onSelect }: Props = $props();
 
 	const titles: Record<PanelId, string> = {
 		agents: 'Agent Dashboard',
@@ -14,24 +30,16 @@
 		chat: 'Task Chat'
 	};
 
-	const stubs: Record<PanelId, { label: string; sublabel: string }[]> = {
-		agents: [
-			{ label: 'Task Timeline', sublabel: 'All agents' },
-			{ label: 'Architect', sublabel: 'Gemini Flash' },
-			{ label: 'Lead Dev', sublabel: 'Claude Sonnet' },
-			{ label: 'QA Agent', sublabel: 'Claude Sonnet' }
-		],
-		memory: [
-			{ label: 'Overview', sublabel: '0 pending' },
-			{ label: 'L0-Core entries', sublabel: 'Human-managed' },
-			{ label: 'L0-Discovered', sublabel: 'Agent-written' }
-		],
-		prs: [
-			{ label: 'Overview', sublabel: '0 open' },
-			{ label: 'Recent PRs', sublabel: 'GitHub REST' }
-		],
-		chat: [{ label: 'Full Conversation', sublabel: 'Current task' }]
+	const statusColors: Record<string, string> = {
+		idle: 'var(--color-text-dim)',
+		planning: 'var(--color-accent-cyan)',
+		coding: 'var(--color-accent-purple)',
+		reviewing: 'var(--color-accent-yellow)',
+		waiting: 'var(--color-accent-yellow)',
+		error: 'var(--color-accent-red)'
 	};
+
+	const aliveStatuses = ['planning', 'coding', 'reviewing'];
 </script>
 
 {#if activePanel}
@@ -39,45 +47,88 @@
 		class="flex w-[260px] shrink-0 flex-col overflow-hidden border-r"
 		style="background: var(--color-bg-sidebar); border-color: var(--color-border);"
 	>
-		<!-- Header -->
 		<div class="border-b px-3 py-2" style="border-color: var(--color-border);">
-			<span
-				class="text-[10px] uppercase tracking-widest"
-				style="color: var(--color-text-muted); font-family: var(--font-mono);"
-			>
-				{titles[activePanel]}
-			</span>
+			<span class="text-[10px] uppercase tracking-widest" style="color: var(--color-text-muted); font-family: var(--font-mono);">{titles[activePanel]}</span>
 		</div>
 
-		<!-- Entries -->
-		<div class="flex-1 overflow-y-auto py-1">
-			{#each stubs[activePanel] as entry, i (i)}
-				<button
-					class="flex w-full items-center gap-2 border-l-2 px-2.5 py-1.5 text-left transition-colors hover:bg-[var(--color-bg-hover)]"
-					style="
-						border-color: {i === 0 ? 'var(--color-accent-cyan)' : 'transparent'};
-						background: {i === 0 ? 'var(--color-bg-surface)' : 'transparent'};
-					"
-				>
+		<div class="flex-1 overflow-y-auto py-1" style="font-family: var(--font-mono);">
+
+			{#if activePanel === 'agents'}
+				<button onclick={() => onSelect('__timeline')} class="flex w-full items-center gap-2 border-l-2 px-2.5 py-1.5 text-left transition-colors hover:bg-[var(--color-bg-hover)]" style="border-color: {selectedId === '__timeline' ? 'var(--color-accent-cyan)' : 'transparent'}; background: {selectedId === '__timeline' ? 'var(--color-bg-surface)' : 'transparent'};">
 					<div class="min-w-0 flex-1">
-						<div
-							class="truncate text-[11px]"
-							style="
-								color: {i === 0 ? 'var(--color-text-bright)' : 'var(--color-text-muted)'};
-								font-family: var(--font-mono);
-							"
-						>
-							{entry.label}
-						</div>
-						<div
-							class="mt-0.5 truncate text-[9px]"
-							style="color: var(--color-text-dim); font-family: var(--font-mono);"
-						>
-							{entry.sublabel}
-						</div>
+						<div class="truncate text-[11px]" style="color: {selectedId === '__timeline' ? 'var(--color-text-bright)' : 'var(--color-text-muted)'};">Task Timeline</div>
+						<div class="mt-0.5 truncate text-[9px]" style="color: var(--color-text-dim);">All agents</div>
 					</div>
 				</button>
-			{/each}
+				<div class="mx-2 my-1" style="height: 1px; background: var(--color-border);"></div>
+				<div class="px-2.5 py-1"><span class="text-[9px] uppercase" style="color: var(--color-text-faint); letter-spacing: 0.8px;">Blueprints</span></div>
+				{#each tasksStore.list as task (task.id)}
+					<button onclick={() => onSelect(`task-${task.id}`)} class="flex w-full items-center gap-2 border-l-2 px-2.5 py-1.5 text-left transition-colors hover:bg-[var(--color-bg-hover)]" style="border-color: {selectedId === `task-${task.id}` ? 'var(--color-accent-cyan)' : 'transparent'}; background: {selectedId === `task-${task.id}` ? 'var(--color-bg-surface)' : 'transparent'};">
+						<div class="min-w-0 flex-1">
+							<div class="truncate text-[11px]" style="color: {selectedId === `task-${task.id}` ? 'var(--color-text-bright)' : 'var(--color-text-muted)'};">{task.description.length > 35 ? task.description.slice(0, 35) + '...' : task.description}</div>
+							<div class="mt-0.5 truncate text-[9px]" style="color: var(--color-text-dim);">{task.id} | {task.status}</div>
+						</div>
+						<span class="shrink-0 rounded-sm px-1.5 py-px text-[8px] uppercase" style="color: {task.status === 'passed' ? 'var(--color-accent-green)' : task.status === 'failed' ? 'var(--color-accent-red)' : 'var(--color-accent-yellow)'}; background: {task.status === 'passed' ? 'var(--color-accent-green)' : task.status === 'failed' ? 'var(--color-accent-red)' : 'var(--color-accent-yellow)'}12;">{task.status}</span>
+					</button>
+				{/each}
+				<div class="mx-2 my-1" style="height: 1px; background: var(--color-border);"></div>
+				<div class="px-2.5 py-1"><span class="text-[9px] uppercase" style="color: var(--color-text-faint); letter-spacing: 0.8px;">Agents</span></div>
+				{#each agentsStore.list as agent (agent.id)}
+					<button onclick={() => onSelect(`agent-${agent.id}`)} class="flex w-full items-center gap-2 border-l-2 px-2.5 py-1.5 text-left transition-colors hover:bg-[var(--color-bg-hover)]" style="border-color: {selectedId === `agent-${agent.id}` ? agent.color : 'transparent'}; background: {selectedId === `agent-${agent.id}` ? 'var(--color-bg-surface)' : 'transparent'};">
+						<div class="min-w-0 flex-1">
+							<div class="truncate text-[11px]" style="color: {selectedId === `agent-${agent.id}` ? 'var(--color-text-bright)' : 'var(--color-text-muted)'};">{agent.name}</div>
+							<div class="mt-0.5 truncate text-[9px]" style="color: var(--color-text-dim);">{agent.model}</div>
+						</div>
+						<span class="inline-block h-[7px] w-[7px] shrink-0 rounded-full" style="background: {statusColors[agent.status] || 'var(--color-text-dim)'}; animation: {aliveStatuses.includes(agent.status) ? 'pulse 1.5s ease-in-out infinite' : 'none'};"></span>
+					</button>
+				{/each}
+
+			{:else if activePanel === 'memory'}
+				<button onclick={() => onSelect('__memory-home')} class="flex w-full items-center gap-2 border-l-2 px-2.5 py-1.5 text-left transition-colors hover:bg-[var(--color-bg-hover)]" style="border-color: {selectedId === '__memory-home' ? 'var(--color-accent-cyan)' : 'transparent'}; background: {selectedId === '__memory-home' ? 'var(--color-bg-surface)' : 'transparent'};">
+					<div class="min-w-0 flex-1">
+						<div class="truncate text-[11px]" style="color: {selectedId === '__memory-home' ? 'var(--color-text-bright)' : 'var(--color-text-muted)'};">Overview</div>
+						<div class="mt-0.5 truncate text-[9px]" style="color: var(--color-text-dim);">{memoryStore.pendingCount} pending</div>
+					</div>
+				</button>
+				<div class="mx-2 my-1" style="height: 1px; background: var(--color-border);"></div>
+				{#each memoryStore.list as entry (entry.id)}
+					{@const tierColor = entry.tier.includes('l0') ? 'var(--color-accent-amber)' : 'var(--color-accent-purple)'}
+					<button onclick={() => onSelect(entry.id)} class="flex w-full items-center gap-2 border-l-2 px-2.5 py-1.5 text-left transition-colors hover:bg-[var(--color-bg-hover)]" style="border-color: {selectedId === entry.id ? tierColor : 'transparent'}; background: {selectedId === entry.id ? 'var(--color-bg-surface)' : 'transparent'}; opacity: {entry.status !== 'pending' ? 0.4 : 1};">
+						<div class="min-w-0 flex-1">
+							<div class="truncate text-[11px]" style="color: {selectedId === entry.id ? 'var(--color-text-bright)' : 'var(--color-text-muted)'};">{entry.content.length > 40 ? entry.content.slice(0, 40) + '...' : entry.content}</div>
+							<div class="mt-0.5 truncate text-[9px]" style="color: var(--color-text-dim);">{entry.tier} | {entry.source_agent}</div>
+						</div>
+						{#if entry.status === 'pending'}
+							<span class="inline-block h-1.5 w-1.5 shrink-0 rounded-full" style="background: var(--color-accent-amber);"></span>
+						{/if}
+					</button>
+				{/each}
+
+			{:else if activePanel === 'prs'}
+				<button onclick={() => onSelect('__pr-home')} class="flex w-full items-center gap-2 border-l-2 px-2.5 py-1.5 text-left transition-colors hover:bg-[var(--color-bg-hover)]" style="border-color: {selectedId === '__pr-home' ? 'var(--color-accent-cyan)' : 'transparent'}; background: {selectedId === '__pr-home' ? 'var(--color-bg-surface)' : 'transparent'};">
+					<div class="min-w-0 flex-1">
+						<div class="truncate text-[11px]" style="color: {selectedId === '__pr-home' ? 'var(--color-text-bright)' : 'var(--color-text-muted)'};">Overview</div>
+						<div class="mt-0.5 truncate text-[9px]" style="color: var(--color-text-dim);">{prsStore.openCount} open</div>
+					</div>
+				</button>
+				<div class="mx-2 my-1" style="height: 1px; background: var(--color-border);"></div>
+				{#each prsStore.list as pr (pr.id)}
+					<button onclick={() => onSelect(`pr-${pr.id}`)} class="flex w-full items-center gap-2 border-l-2 px-2.5 py-1.5 text-left transition-colors hover:bg-[var(--color-bg-hover)]" style="border-color: {selectedId === `pr-${pr.id}` ? (pr.status === 'merged' ? 'var(--color-accent-green)' : 'var(--color-accent-yellow)') : 'transparent'}; background: {selectedId === `pr-${pr.id}` ? 'var(--color-bg-surface)' : 'transparent'};">
+						<div class="min-w-0 flex-1">
+							<div class="truncate text-[11px]" style="color: {selectedId === `pr-${pr.id}` ? 'var(--color-text-bright)' : 'var(--color-text-muted)'};">{pr.id} {pr.title}</div>
+							<div class="mt-0.5 truncate text-[9px]" style="color: var(--color-text-dim);">{pr.status} | +{pr.additions} -{pr.deletions}</div>
+						</div>
+					</button>
+				{/each}
+
+			{:else if activePanel === 'chat'}
+				<button onclick={() => onSelect('__chat')} class="flex w-full items-center gap-2 border-l-2 px-2.5 py-1.5 text-left transition-colors hover:bg-[var(--color-bg-hover)]" style="border-color: var(--color-accent-cyan); background: var(--color-bg-surface);">
+					<div class="min-w-0 flex-1">
+						<div class="truncate text-[11px]" style="color: var(--color-text-bright);">Full Conversation</div>
+						<div class="mt-0.5 truncate text-[9px]" style="color: var(--color-text-dim);">Current task</div>
+					</div>
+				</button>
+			{/if}
 		</div>
 	</div>
 {/if}
