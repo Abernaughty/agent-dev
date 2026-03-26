@@ -10,6 +10,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { tasksStore } from '$lib/stores/tasks.svelte.js';
+	import { PUBLIC_USE_MOCK_DATA } from '$env/static/public';
 
 	interface Props {
 		height: number;
@@ -42,7 +43,7 @@
 		error: 'var(--color-accent-red)'
 	};
 
-	const isMockMode = import.meta.env.PUBLIC_USE_MOCK_DATA === 'true';
+	const isMockMode = PUBLIC_USE_MOCK_DATA === 'true';
 
 	onMount(() => {
 		if (isMockMode) {
