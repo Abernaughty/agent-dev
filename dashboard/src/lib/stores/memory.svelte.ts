@@ -58,7 +58,6 @@ export const memoryStore = {
 		const prev = entries.find((e) => e.id === entryId);
 		if (!prev) return false;
 
-		// Optimistic
 		entries = entries.map((e) =>
 			e.id === entryId
 				? { ...e, status: 'approved' as MemoryStatus, verified: true, expires_at: null, hours_remaining: null }
@@ -78,13 +77,11 @@ export const memoryStore = {
 				}
 				return true;
 			}
-			// Rollback
 			entries = entries.map((e) => (e.id === entryId ? prev : e));
 			const body = await res.json();
 			error = body.errors?.[0] ?? 'Failed to approve';
 			return false;
 		} catch (err) {
-			// Rollback
 			entries = entries.map((e) => (e.id === entryId ? prev : e));
 			error = err instanceof Error ? err.message : 'Network error';
 			return false;
@@ -96,7 +93,6 @@ export const memoryStore = {
 		const prev = entries.find((e) => e.id === entryId);
 		if (!prev) return false;
 
-		// Optimistic
 		entries = entries.map((e) =>
 			e.id === entryId ? { ...e, status: 'rejected' as MemoryStatus } : e
 		);
@@ -108,13 +104,11 @@ export const memoryStore = {
 				body: JSON.stringify({ action: 'reject' })
 			});
 			if (res.ok) return true;
-			// Rollback
 			entries = entries.map((e) => (e.id === entryId ? prev : e));
 			const body = await res.json();
 			error = body.errors?.[0] ?? 'Failed to reject';
 			return false;
 		} catch (err) {
-			// Rollback
 			entries = entries.map((e) => (e.id === entryId ? prev : e));
 			error = err instanceof Error ? err.message : 'Network error';
 			return false;
@@ -125,17 +119,22 @@ export const memoryStore = {
 	handleSSE(data: { id: string; tier: string; agent: string; content: string; status: string }) {
 		const idx = entries.findIndex((e) => e.id === data.id);
 		if (idx >= 0) {
-			// Update existing entry
 			entries = entries.map((e) =>
 				e.id === data.id ? { ...e, status: data.status as MemoryStatus } : e
 			);
 		}
-		// New entries require a full refresh to get all fields
 	},
 
 	/** Reset to empty state. */
 	reset() {
 		entries = [];
+		error = null;
+	},
+
+	/** Load mock data directly (used when PUBLIC_USE_MOCK_DATA=true). */
+	loadMock(data: MemoryEntry[]) {
+		entries = data;
+		loading = false;
 		error = null;
 	}
 };
