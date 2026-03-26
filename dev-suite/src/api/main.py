@@ -1,7 +1,7 @@
 """FastAPI application exposing orchestrator state to the dashboard.
 
-Issue #34: FastAPI Bootstrap — API Layer for Orchestrator
-Issue #35: SSE Event System — Real-Time Task Streaming
+Issue #34: FastAPI Bootstrap -- API Layer for Orchestrator
+Issue #35: SSE Event System -- Real-Time Task Streaming
 
 Run with:
     uv run --group api uvicorn src.api.main:app --reload --port 8000
@@ -39,12 +39,12 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-# Heartbeat interval in seconds — keeps SSE connections alive
+# Heartbeat interval in seconds -- keeps SSE connections alive
 # through proxies and load balancers that drop idle connections.
 SSE_HEARTBEAT_SECONDS = 15
 
 
-# ── Lifespan ──
+# -- Lifespan --
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -57,16 +57,20 @@ async def lifespan(app: FastAPI):
         os.getenv("API_SEED_MOCK_DATA", "true"),
     )
     yield
-    # Shutdown: clean up SSE subscribers
+    # Shutdown: cancel running tasks, then clean up SSE subscribers
+    from .runner import task_runner
+
     logger.info(
-        "Dev Suite API shutting down | sse_subscribers=%d | events_published=%d",
+        "Dev Suite API shutting down | running_tasks=%d | sse_subscribers=%d | events_published=%d",
+        task_runner.running_count,
         event_bus.subscriber_count,
         event_bus.event_counter,
     )
+    await task_runner.shutdown()
     await event_bus.clear()
 
 
-# ── App Configuration ──
+# -- App Configuration --
 
 # CORS: allow SvelteKit dev server and configurable origins
 _allowed_origins = os.getenv(
@@ -92,7 +96,7 @@ app.add_middleware(
 )
 
 
-# ── Helpers ──
+# -- Helpers --
 
 def _ok(data) -> ApiResponse:
     """Wrap data in the standard API response envelope."""
@@ -111,11 +115,11 @@ def _error(message: str, status: int = 400) -> None:
     raise HTTPException(status_code=status, detail=message)
 
 
-# ── Health ──
+# -- Health --
 
 @app.get("/health", response_model=HealthResponse)
 async def health():
-    """Health check — no auth required."""
+    """Health check -- no auth required."""
     return HealthResponse(
         uptime_seconds=state_manager.get_uptime(),
         active_tasks=state_manager.get_active_task_count(),
@@ -123,27 +127,14 @@ async def health():
     )
 
 
-# ── SSE Stream ──
+# -- SSE Stream --
 
 @app.get("/stream")
 async def stream(
     request: Request,
     _auth: str | None = Depends(require_auth),
 ):
-    """Server-Sent Events endpoint for real-time dashboard updates.
-
-    Streams structured JSON events as they occur:
-    - agent_status: agent state changes (idle → coding → testing)
-    - task_progress: task timeline events (blueprint created, tests running)
-    - task_complete: task finished (success or exhausted retries)
-    - memory_added: new memory entry pending approval
-    - log_line: terminal-style log output
-
-    Sends a heartbeat comment every 15s to keep connections alive.
-    Supports multiple concurrent clients with automatic cleanup on disconnect.
-
-    Auth: Bearer token (same as REST endpoints).
-    """
+    """Server-Sent Events endpoint for real-time dashboard updates."""
     return EventSourceResponse(
         _sse_generator(request),
         media_type="text/event-stream",
@@ -151,12 +142,7 @@ async def stream(
 
 
 async def _sse_generator(request: Request):
-    """Async generator that yields SSE events from the EventBus.
-
-    Each connected client gets its own asyncio.Queue via subscribe().
-    On disconnect, the queue is removed via unsubscribe() in the
-    finally block — guaranteeing no memory leaks.
-    """
+    """Async generator that yields SSE events from the EventBus."""
     queue = await event_bus.subscribe()
     event_id = event_bus.event_counter
 
@@ -167,13 +153,11 @@ async def _sse_generator(request: Request):
 
     try:
         while True:
-            # Check if client disconnected
             if await request.is_disconnected():
                 logger.debug("SSE client disconnected (detected via request)")
                 break
 
             try:
-                # Wait for next event with heartbeat timeout
                 event: SSEEvent = await asyncio.wait_for(
                     queue.get(),
                     timeout=SSE_HEARTBEAT_SECONDS,
@@ -187,7 +171,6 @@ async def _sse_generator(request: Request):
                 }
 
             except asyncio.TimeoutError:
-                # No events within heartbeat window — send keepalive
                 yield {"comment": "keepalive"}
 
     except asyncio.CancelledError:
@@ -200,7 +183,7 @@ async def _sse_generator(request: Request):
         )
 
 
-# ── Agents ──
+# -- Agents --
 
 @app.get("/agents", response_model=ApiResponse)
 async def get_agents(_auth: str | None = Depends(require_auth)):
@@ -208,7 +191,7 @@ async def get_agents(_auth: str | None = Depends(require_auth)):
     return _ok(state_manager.get_agents())
 
 
-# ── Tasks ──
+# -- Tasks --
 
 @app.get("/tasks", response_model=ApiResponse)
 async def get_tasks(_auth: str | None = Depends(require_auth)):
@@ -259,7 +242,7 @@ async def retry_task(task_id: str, _auth: str | None = Depends(require_auth)):
     return _ok({"task_id": task_id, "status": "queued"})
 
 
-# ── Memory ──
+# -- Memory --
 
 @app.get("/memory", response_model=ApiResponse)
 async def get_memory(
@@ -291,7 +274,7 @@ async def update_memory(
     return _ok(entry)
 
 
-# ── Pull Requests ──
+# -- Pull Requests --
 
 @app.get("/prs", response_model=ApiResponse)
 async def get_prs(_auth: str | None = Depends(require_auth)):
