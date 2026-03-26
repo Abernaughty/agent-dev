@@ -2,6 +2,7 @@
 
 Issue #34: FastAPI Bootstrap — API Layer for Orchestrator
 Issue #35: Updated for async StateManager mutations and version 0.2.0
+Issue #50: PR tests updated for live GitHub integration
 
 Uses httpx TestClient (async) to test all endpoints against
 the seeded mock data. Tests cover:
@@ -9,31 +10,30 @@ the seeded mock data. Tests cover:
 - Agent listing
 - Task CRUD (list, detail, create, cancel, retry)
 - Memory listing with filters, approve/reject
-- PR listing
+- PR listing (mocked provider for isolation)
 - Auth enforcement
 - Error cases (404, 400, 409)
 """
 
 import os
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
 from src.api.main import app
+from src.api.models import PRFileChange, PRStatus, PRSummary, PRTestResults
 from src.api.state import StateManager
 
 
 @pytest.fixture()
 def client():
     """Fresh TestClient with a clean StateManager for each test."""
-    # Reset the state manager singleton for test isolation
     from src.api import state as state_mod
 
     fresh_manager = StateManager()
     state_mod.state_manager = fresh_manager
 
-    # Also patch the reference in main module
     from src.api import main as main_mod
 
     main_mod.state_manager = fresh_manager
@@ -159,17 +159,15 @@ class TestTasks:
         assert "task_id" in data
         assert data["status"] == "queued"
 
-        # Verify it appears in the list
         r2 = client.get("/tasks")
         task_ids = [t["id"] for t in r2.json()["data"]]
         assert data["task_id"] in task_ids
 
     def test_create_task_empty_description(self, client):
         r = client.post("/tasks", json={"description": ""})
-        assert r.status_code == 422  # Pydantic validation
+        assert r.status_code == 422
 
     def test_cancel_task(self, client):
-        # Create a task first
         r = client.post("/tasks", json={"description": "Test task"})
         task_id = r.json()["data"]["task_id"]
 
@@ -186,7 +184,6 @@ class TestTasks:
         assert r.status_code == 409
 
     def test_retry_failed_task(self, client):
-        # Create and cancel a task, then manually set to failed
         from src.api.state import state_manager
         from src.api.models import TaskStatus
 
@@ -199,7 +196,6 @@ class TestTasks:
         assert r2.json()["data"]["status"] == "queued"
 
     def test_retry_non_retryable_task(self, client):
-        # The mock task is PASSED, which is not retryable
         r = client.post("/tasks/supabase-auth-rls/retry")
         assert r.status_code == 400
 
@@ -235,7 +231,7 @@ class TestMemory:
         r = client.get("/memory?status=pending")
         assert r.status_code == 200
         entries = r.json()["data"]
-        assert len(entries) == 3  # All are pending in mock data
+        assert len(entries) == 3
 
     def test_approve_memory(self, client):
         r = client.patch("/memory/mem-1", json={"action": "approve"})
@@ -244,7 +240,6 @@ class TestMemory:
         assert entry["status"] == "approved"
         assert entry["verified"] is True
 
-        # Confirm it persisted
         r2 = client.get("/memory?status=approved")
         assert len(r2.json()["data"]) == 1
 
@@ -259,32 +254,79 @@ class TestMemory:
 
     def test_memory_invalid_action(self, client):
         r = client.patch("/memory/mem-1", json={"action": "invalid"})
-        assert r.status_code == 422  # Pydantic validation
+        assert r.status_code == 422
 
 
 # ── Pull Requests ──
 
 
+MOCK_PRS = [
+    PRSummary(
+        id="#52", number=52, title="feat: orchestrator bridge",
+        author="Abernaughty", status=PRStatus.MERGED, branch="feat/orchestrator-bridge",
+        additions=500, deletions=20, file_count=3,
+    ),
+    PRSummary(
+        id="#53", number=53, title="feat: GitHub PR integration",
+        author="Abernaughty", status=PRStatus.MERGED, branch="feat/github-prs",
+        additions=800, deletions=30, file_count=5,
+        files=[PRFileChange(name="src/api/github_prs.py", additions=400, deletions=0, status="added")],
+        tests=PRTestResults(passed=45, failed=0, total=45),
+    ),
+]
+
+
 class TestPRs:
     def test_list_prs(self, client):
-        r = client.get("/prs")
+        """GET /prs returns PR list from the provider."""
+        with patch("src.api.github_prs.github_pr_provider") as mock_provider:
+            mock_provider.configured = True
+            mock_provider.list_prs = AsyncMock(return_value=MOCK_PRS)
+            r = client.get("/prs")
         assert r.status_code == 200
         prs = r.json()["data"]
         assert len(prs) == 2
 
+    def test_pr_has_expected_fields(self, client):
+        """PR response includes all required fields."""
+        with patch("src.api.github_prs.github_pr_provider") as mock_provider:
+            mock_provider.configured = True
+            mock_provider.list_prs = AsyncMock(return_value=MOCK_PRS)
+            r = client.get("/prs")
+        pr = r.json()["data"][0]
+        for field in ("id", "number", "title", "author", "status", "branch", "additions", "deletions", "file_count"):
+            assert field in pr
+
     def test_pr_has_files(self, client):
-        r = client.get("/prs")
-        pr = next(p for p in r.json()["data"] if p["id"] == "#142")
-        assert pr["file_count"] == 4
-        assert len(pr["files"]) == 4
-        assert pr["additions"] == 187
+        """PR with files populated should include them."""
+        with patch("src.api.github_prs.github_pr_provider") as mock_provider:
+            mock_provider.configured = True
+            mock_provider.list_prs = AsyncMock(return_value=MOCK_PRS)
+            r = client.get("/prs")
+        pr = next(p for p in r.json()["data"] if p["id"] == "#53")
+        assert pr["file_count"] == 5
+        assert len(pr["files"]) == 1
+        assert pr["files"][0]["name"] == "src/api/github_prs.py"
 
     def test_pr_has_tests(self, client):
-        r = client.get("/prs")
-        pr = next(p for p in r.json()["data"] if p["id"] == "#142")
-        assert pr["tests"]["passed"] == 14
+        """PR with test results should include them."""
+        with patch("src.api.github_prs.github_pr_provider") as mock_provider:
+            mock_provider.configured = True
+            mock_provider.list_prs = AsyncMock(return_value=MOCK_PRS)
+            r = client.get("/prs")
+        pr = next(p for p in r.json()["data"] if p["id"] == "#53")
+        assert pr["tests"]["passed"] == 45
         assert pr["tests"]["failed"] == 0
-        assert pr["tests"]["total"] == 14
+        assert pr["tests"]["total"] == 45
+
+    def test_prs_state_filter(self, client):
+        """GET /prs?state=open should pass the filter to the provider."""
+        with patch("src.api.github_prs.github_pr_provider") as mock_provider:
+            mock_provider.configured = True
+            mock_provider.list_prs = AsyncMock(return_value=[])
+            r = client.get("/prs?state=open")
+            mock_provider.list_prs.assert_called_once_with(state="open")
+        assert r.status_code == 200
 
 
 # ── Auth ──
@@ -292,30 +334,21 @@ class TestPRs:
 
 class TestAuth:
     def test_no_auth_in_dev_mode(self, client):
-        """Without API_SECRET set, all endpoints work without auth."""
         r = client.get("/agents")
         assert r.status_code == 200
 
     def test_auth_required_when_secret_set(self, auth_client):
-        """With API_SECRET set, endpoints require Bearer token."""
         r = auth_client.get("/agents")
         assert r.status_code == 401
 
     def test_auth_with_valid_token(self, auth_client):
-        r = auth_client.get(
-            "/agents",
-            headers={"Authorization": "Bearer test-secret-123"},
-        )
+        r = auth_client.get("/agents", headers={"Authorization": "Bearer test-secret-123"})
         assert r.status_code == 200
 
     def test_auth_with_invalid_token(self, auth_client):
-        r = auth_client.get(
-            "/agents",
-            headers={"Authorization": "Bearer wrong-token"},
-        )
+        r = auth_client.get("/agents", headers={"Authorization": "Bearer wrong-token"})
         assert r.status_code == 403
 
     def test_health_bypasses_auth(self, auth_client):
-        """Health endpoint never requires auth."""
         r = auth_client.get("/health")
         assert r.status_code == 200
