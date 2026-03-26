@@ -2,7 +2,8 @@
 
 This is the main entry point for the agent workflow.
 Implements the state machine with retry logic, token budgets,
-structured Blueprint passing, and human escalation.
+structured Blueprint passing, human escalation, and memory
+write-back (flush_memory node with mini-summarizer).
 """
 
 import json
@@ -20,7 +21,9 @@ from pydantic import BaseModel
 
 from .agents.architect import Blueprint
 from .agents.qa import FailureReport
-from .memory.chroma_store import ChromaMemoryStore
+from .memory.factory import create_memory_store
+from .memory.protocol import MemoryQueryResult, MemoryStore
+from .memory.summarizer import summarize_writes_sync
 from .tracing import add_trace_event, create_trace_config
 
 load_dotenv()
@@ -62,9 +65,7 @@ class GraphState(TypedDict, total=False):
 
     D1 fix: Uses TypedDict (not Pydantic BaseModel) for reliable dict-merge
     semantics in LangGraph. Fields present in a node's return dict replace
-    the existing value; fields absent are left unchanged. This prevents the
-    state-reset bug where Pydantic defaults (0, "", []) silently overwrite
-    accumulated values like retry_count and tokens_used.
+    the existing value; fields absent are left unchanged.
     """
 
     task_description: str
@@ -76,14 +77,13 @@ class GraphState(TypedDict, total=False):
     tokens_used: int
     error_message: str
     memory_context: list[str]
+    memory_writes: list[dict]
     trace: list[str]
 
 
 class AgentState(BaseModel):
     """Pydantic model used at the boundary — for constructing the initial
     state and wrapping the final result with validation and attribute access.
-
-    Not used as the LangGraph graph state (that's GraphState TypedDict).
     """
 
     task_description: str = ""
@@ -95,20 +95,14 @@ class AgentState(BaseModel):
     tokens_used: int = 0
     error_message: str = ""
     memory_context: list[str] = []
+    memory_writes: list[dict] = []
     trace: list[str] = []
 
 
 # -- LLM Initialization --
 
 def _get_architect_llm():
-    """Gemini for the Architect agent (large context, planning only).
-
-    Default: gemini-3-flash-preview — frontier-class reasoning with
-    free tier access. Best balance of intelligence and cost for
-    structured Blueprint generation.
-
-    Override via ARCHITECT_MODEL env var.
-    """
+    """Gemini for the Architect agent (large context, planning only)."""
     return ChatGoogleGenerativeAI(
         model=os.getenv("ARCHITECT_MODEL", "gemini-3-flash-preview"),
         google_api_key=os.getenv("GOOGLE_API_KEY"),
@@ -139,12 +133,7 @@ def _get_qa_llm():
 # -- Helpers --
 
 def _extract_text_content(content: Any) -> str:
-    """Extract text from an LLM response's content field.
-
-    D3 fix: Handles both string content (Anthropic) and list-of-blocks
-    content (Google GenAI / Gemini with thinking mode). When content is
-    a list, concatenates all text blocks.
-    """
+    """Extract text from an LLM response's content field."""
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -161,20 +150,12 @@ def _extract_text_content(content: Any) -> str:
 
 
 def _extract_json(raw: str) -> dict:
-    """Extract a JSON object from LLM output text.
-
-    D3 fix: Handles clean JSON, code-fenced JSON, and JSON embedded
-    in preamble text (scans for first { and last }).
-    """
+    """Extract a JSON object from LLM output text."""
     text = raw.strip()
-
-    # Try 1: direct parse
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
-
-    # Try 2: code fence extraction
     if "```" in text:
         parts = text.split("```")
         for part in parts[1::2]:
@@ -185,8 +166,6 @@ def _extract_json(raw: str) -> dict:
                 return json.loads(inner)
             except json.JSONDecodeError:
                 continue
-
-    # Try 3: scan for first { and last }
     first_brace = text.find("{")
     last_brace = text.rfind("}")
     if first_brace != -1 and last_brace > first_brace:
@@ -194,7 +173,6 @@ def _extract_json(raw: str) -> dict:
             return json.loads(text[first_brace:last_brace + 1])
         except json.JSONDecodeError:
             pass
-
     raise json.JSONDecodeError(
         f"No valid JSON found in response ({len(text)} chars): {text[:200]}...",
         text, 0,
@@ -202,11 +180,7 @@ def _extract_json(raw: str) -> dict:
 
 
 def _extract_token_count(response: Any) -> int:
-    """Extract total token count from an LLM response.
-
-    Handles different metadata formats across providers (Anthropic, Google).
-    Returns 0 if token count cannot be determined.
-    """
+    """Extract total token count from an LLM response."""
     meta = getattr(response, "usage_metadata", None)
     if not meta:
         return 0
@@ -221,24 +195,38 @@ def _extract_token_count(response: Any) -> int:
     return 0
 
 
+def _get_memory_store() -> MemoryStore:
+    """Get the memory store via factory (respects MEMORY_BACKEND env var)."""
+    return create_memory_store()
+
+
 def _fetch_memory_context(task_description: str) -> list[str]:
-    """Query Chroma for relevant context across all tiers."""
+    """Query memory for relevant context across all tiers."""
     try:
-        store = ChromaMemoryStore()
+        store = _get_memory_store()
         results = store.query(task_description, n_results=10)
-        return [r["content"] for r in results]
+        return [r.content for r in results]
     except Exception:
         return []
+
+
+def _infer_module(target_files: list[str]) -> str:
+    """Infer module name from target file paths."""
+    if not target_files:
+        return "global"
+    first_file = target_files[0]
+    parts = first_file.replace("\\", "/").split("/")
+    if len(parts) > 2 and parts[0] == "src":
+        return parts[1]
+    if len(parts) > 1:
+        return parts[0]
+    return "global"
 
 
 # -- Node Functions --
 
 def architect_node(state: GraphState) -> dict:
-    """Architect: generates a structured Blueprint from the task description.
-
-    Queries memory for context, then uses Gemini to plan the task.
-    Never writes code -- only produces a Blueprint JSON.
-    """
+    """Architect: generates a structured Blueprint from the task description."""
     trace = list(state.get("trace", []))
     trace.append("architect: starting planning")
 
@@ -314,6 +302,7 @@ def developer_node(state: GraphState) -> dict:
     """Lead Dev: executes the Blueprint and generates code."""
     trace = list(state.get("trace", []))
     trace.append("developer: starting build")
+    memory_writes = list(state.get("memory_writes", []))
 
     retry_count = state.get("retry_count", 0)
     tokens_used = state.get("tokens_used", 0)
@@ -362,11 +351,23 @@ Write clean, well-documented code."""
     tokens_used = tokens_used + _extract_token_count(response)
     logger.info("[DEV] done. tokens_used now=%d", tokens_used)
 
+    memory_writes.append({
+        "content": f"Implemented blueprint {blueprint.task_id}: {blueprint.instructions[:200]}",
+        "tier": "l1",
+        "module": _infer_module(blueprint.target_files),
+        "source_agent": "developer",
+        "confidence": 1.0,
+        "sandbox_origin": "locked-down",
+        "related_files": ",".join(blueprint.target_files),
+        "task_id": blueprint.task_id,
+    })
+
     return {
         "generated_code": content,
         "status": WorkflowStatus.REVIEWING,
         "tokens_used": tokens_used,
         "trace": trace,
+        "memory_writes": memory_writes,
     }
 
 
@@ -374,6 +375,7 @@ def qa_node(state: GraphState) -> dict:
     """QA: reviews the generated code and produces a structured FailureReport."""
     trace = list(state.get("trace", []))
     trace.append("qa: starting review")
+    memory_writes = list(state.get("memory_writes", []))
 
     retry_count = state.get("retry_count", 0)
     tokens_used = state.get("tokens_used", 0)
@@ -442,8 +444,28 @@ def qa_node(state: GraphState) -> dict:
 
     if failure_report.status == "pass":
         status = WorkflowStatus.PASSED
+        memory_writes.append({
+            "content": f"QA passed for {blueprint.task_id}: {failure_report.tests_passed} tests passed",
+            "tier": "l2",
+            "module": _infer_module(blueprint.target_files),
+            "source_agent": "qa",
+            "confidence": 1.0,
+            "sandbox_origin": "locked-down",
+            "related_files": ",".join(blueprint.target_files),
+            "task_id": blueprint.task_id,
+        })
     elif failure_report.is_architectural:
         status = WorkflowStatus.ESCALATED
+        memory_writes.append({
+            "content": f"Architectural issue in {blueprint.task_id}: {failure_report.recommendation}",
+            "tier": "l0-discovered",
+            "module": _infer_module(blueprint.target_files),
+            "source_agent": "qa",
+            "confidence": 0.85,
+            "sandbox_origin": "locked-down",
+            "related_files": ",".join(failure_report.failed_files),
+            "task_id": blueprint.task_id,
+        })
     else:
         status = WorkflowStatus.REVIEWING
 
@@ -457,12 +479,73 @@ def qa_node(state: GraphState) -> dict:
         "tokens_used": tokens_used,
         "retry_count": new_retry_count,
         "trace": trace,
+        "memory_writes": memory_writes,
     }
+
+
+def flush_memory_node(state: GraphState) -> dict:
+    """Flush accumulated memory_writes to the memory store.
+
+    Runs the mini-summarizer to deduplicate/compress writes,
+    then persists to Chroma. Gracefully degrades if store is unreachable.
+    """
+    trace = list(state.get("trace", []))
+    trace.append("flush_memory: starting")
+
+    memory_writes = state.get("memory_writes", [])
+    if not memory_writes:
+        trace.append("flush_memory: no writes to flush")
+        return {"trace": trace}
+
+    consolidated = summarize_writes_sync(memory_writes)
+    trace.append(
+        f"flush_memory: summarizer {len(memory_writes)} -> {len(consolidated)} entries"
+    )
+
+    try:
+        store = _get_memory_store()
+        written = 0
+        for entry in consolidated:
+            tier = entry.get("tier", "l1")
+            content = entry.get("content", "")
+            module = entry.get("module", "global")
+            source_agent = entry.get("source_agent", "unknown")
+            confidence = entry.get("confidence", 1.0)
+            sandbox_origin = entry.get("sandbox_origin", "none")
+            related_files = entry.get("related_files", "")
+            task_id = entry.get("task_id", "")
+
+            if tier == "l0-discovered":
+                store.add_l0_discovered(
+                    content, module=module, source_agent=source_agent,
+                    confidence=confidence, sandbox_origin=sandbox_origin,
+                    related_files=related_files, task_id=task_id,
+                )
+            elif tier == "l2":
+                store.add_l2(
+                    content, module=module, source_agent=source_agent,
+                    related_files=related_files, task_id=task_id,
+                )
+            else:
+                store.add_l1(
+                    content, module=module, source_agent=source_agent,
+                    confidence=confidence, sandbox_origin=sandbox_origin,
+                    related_files=related_files, task_id=task_id,
+                )
+            written += 1
+
+        trace.append(f"flush_memory: wrote {written} entries to store")
+        logger.info("[FLUSH] Wrote %d memory entries", written)
+    except Exception as e:
+        trace.append(f"flush_memory: store write failed: {e}")
+        logger.warning("[FLUSH] Memory store write failed: %s", e)
+
+    return {"trace": trace}
 
 
 # -- Routing Functions --
 
-def route_after_qa(state: GraphState) -> Literal["developer", "architect", "__end__"]:
+def route_after_qa(state: GraphState) -> Literal["flush_memory", "developer", "architect", "__end__"]:
     """Decide where to go after QA review."""
     status = state.get("status", WorkflowStatus.FAILED)
     retry_count = state.get("retry_count", 0)
@@ -475,19 +558,19 @@ def route_after_qa(state: GraphState) -> Literal["developer", "architect", "__en
     )
 
     if status == WorkflowStatus.PASSED:
-        logger.info("[ROUTER] -> END (passed)")
-        return END
+        logger.info("[ROUTER] -> flush_memory (passed)")
+        return "flush_memory"
 
     if status == WorkflowStatus.FAILED:
         logger.info("[ROUTER] -> END (failed: %s)", state.get("error_message", ""))
         return END
 
     if retry_count >= MAX_RETRIES:
-        logger.info("[ROUTER] -> END (max retries)")
-        return END
+        logger.info("[ROUTER] -> flush_memory (max retries, saving what we have)")
+        return "flush_memory"
     if tokens_used >= TOKEN_BUDGET:
-        logger.info("[ROUTER] -> END (token budget)")
-        return END
+        logger.info("[ROUTER] -> flush_memory (token budget, saving what we have)")
+        return "flush_memory"
 
     if status == WorkflowStatus.ESCALATED:
         logger.info("[ROUTER] -> architect (escalation)")
@@ -504,21 +587,23 @@ def build_graph() -> StateGraph:
 
     Flow:
         START -> architect -> developer -> qa -> (conditional)
-            -> pass: END
+            -> pass: flush_memory -> END
             -> fail: developer (retry)
             -> escalate: architect (re-plan)
-            -> budget exhausted: END
+            -> budget/retries exhausted: flush_memory -> END
     """
     graph = StateGraph(GraphState)
 
     graph.add_node("architect", architect_node)
     graph.add_node("developer", developer_node)
     graph.add_node("qa", qa_node)
+    graph.add_node("flush_memory", flush_memory_node)
 
     graph.add_edge(START, "architect")
     graph.add_edge("architect", "developer")
     graph.add_edge("developer", "qa")
     graph.add_conditional_edges("qa", route_after_qa)
+    graph.add_edge("flush_memory", END)
 
     return graph
 
@@ -532,16 +617,7 @@ def create_workflow():
 # -- Entry Point --
 
 def run_task(task_description: str, enable_tracing: bool = True) -> AgentState:
-    """Run a task through the full agent workflow.
-
-    Args:
-        task_description: What you want the agents to build.
-        enable_tracing: Whether to send traces to Langfuse (default True).
-            Gracefully degrades if Langfuse is not configured.
-
-    Returns:
-        Final AgentState with results, trace, and status.
-    """
+    """Run a task through the full agent workflow."""
     trace_config = create_trace_config(
         enabled=enable_tracing,
         task_description=task_description,
@@ -559,6 +635,7 @@ def run_task(task_description: str, enable_tracing: bool = True) -> AgentState:
         "tokens_used": 0,
         "error_message": "",
         "memory_context": [],
+        "memory_writes": [],
         "trace": [],
     }
 
@@ -581,6 +658,7 @@ def run_task(task_description: str, enable_tracing: bool = True) -> AgentState:
         "status": final_state.status.value,
         "tokens_used": final_state.tokens_used,
         "retry_count": final_state.retry_count,
+        "memory_writes_count": len(final_state.memory_writes),
     })
 
     trace_config.flush()
