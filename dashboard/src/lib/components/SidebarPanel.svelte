@@ -6,6 +6,7 @@
 	selectedId prop and onSelect callback.
 
 	Issue #38: Data Integration — PR3
+	Updated: Added Session Debrief + Cost Tracker entries
 -->
 <script lang="ts">
 	import { agentsStore } from '$lib/stores/agents.svelte.js';
@@ -40,6 +41,8 @@
 	};
 
 	const aliveStatuses = ['planning', 'coding', 'reviewing'];
+
+	const hasCompletedTask = $derived(tasksStore.list.some((t) => t.completed_at));
 </script>
 
 {#if activePanel}
@@ -65,7 +68,7 @@
 				{#each tasksStore.list as task (task.id)}
 					<button onclick={() => onSelect(`task-${task.id}`)} class="flex w-full items-center gap-2 border-l-2 px-2.5 py-1.5 text-left transition-colors hover:bg-[var(--color-bg-hover)]" style="border-color: {selectedId === `task-${task.id}` ? 'var(--color-accent-cyan)' : 'transparent'}; background: {selectedId === `task-${task.id}` ? 'var(--color-bg-surface)' : 'transparent'};">
 						<div class="min-w-0 flex-1">
-							<div class="truncate text-[11px]" style="color: {selectedId === `task-${task.id}` ? 'var(--color-text-bright)' : 'var(--color-text-muted)'};">{task.description.length > 35 ? task.description.slice(0, 35) + '...' : task.description}</div>
+							<div class="truncate text-[11px]" style="color: {selectedId === `task-${task.id}` ? 'var(--color-text-bright)' : 'var(--color-text-muted)'};\">{task.description.length > 35 ? task.description.slice(0, 35) + '...' : task.description}</div>
 							<div class="mt-0.5 truncate text-[9px]" style="color: var(--color-text-dim);">{task.id} | {task.status}</div>
 						</div>
 						<span class="shrink-0 rounded-sm px-1.5 py-px text-[8px] uppercase" style="color: {task.status === 'passed' ? 'var(--color-accent-green)' : task.status === 'failed' ? 'var(--color-accent-red)' : 'var(--color-accent-yellow)'}; background: {task.status === 'passed' ? 'var(--color-accent-green)' : task.status === 'failed' ? 'var(--color-accent-red)' : 'var(--color-accent-yellow)'}12;">{task.status}</span>
@@ -76,12 +79,29 @@
 				{#each agentsStore.list as agent (agent.id)}
 					<button onclick={() => onSelect(`agent-${agent.id}`)} class="flex w-full items-center gap-2 border-l-2 px-2.5 py-1.5 text-left transition-colors hover:bg-[var(--color-bg-hover)]" style="border-color: {selectedId === `agent-${agent.id}` ? agent.color : 'transparent'}; background: {selectedId === `agent-${agent.id}` ? 'var(--color-bg-surface)' : 'transparent'};">
 						<div class="min-w-0 flex-1">
-							<div class="truncate text-[11px]" style="color: {selectedId === `agent-${agent.id}` ? 'var(--color-text-bright)' : 'var(--color-text-muted)'};">{agent.name}</div>
+							<div class="truncate text-[11px]" style="color: {selectedId === `agent-${agent.id}` ? 'var(--color-text-bright)' : 'var(--color-text-muted)'};\">{agent.name}</div>
 							<div class="mt-0.5 truncate text-[9px]" style="color: var(--color-text-dim);">{agent.model}</div>
 						</div>
 						<span class="inline-block h-[7px] w-[7px] shrink-0 rounded-full" style="background: {statusColors[agent.status] || 'var(--color-text-dim)'}; animation: {aliveStatuses.includes(agent.status) ? 'pulse 1.5s ease-in-out infinite' : 'none'};"></span>
 					</button>
 				{/each}
+				<div class="mx-2 my-1" style="height: 1px; background: var(--color-border);"></div>
+				<div class="px-2.5 py-1"><span class="text-[9px] uppercase" style="color: var(--color-text-faint); letter-spacing: 0.8px;">Session</span></div>
+				<button onclick={() => onSelect('__debrief')} class="flex w-full items-center gap-2 border-l-2 px-2.5 py-1.5 text-left transition-colors hover:bg-[var(--color-bg-hover)]" style="border-color: {selectedId === '__debrief' ? 'var(--color-accent-green)' : 'transparent'}; background: {selectedId === '__debrief' ? 'var(--color-bg-surface)' : 'transparent'};">
+					<div class="min-w-0 flex-1">
+						<div class="truncate text-[11px]" style="color: {selectedId === '__debrief' ? 'var(--color-text-bright)' : 'var(--color-text-muted)'};">Session Debrief</div>
+						<div class="mt-0.5 truncate text-[9px]" style="color: var(--color-text-dim);">Latest task summary</div>
+					</div>
+					{#if hasCompletedTask}
+						<span class="shrink-0 rounded-sm px-1.5 py-px text-[7px] font-semibold" style="color: var(--color-accent-green); background: var(--color-accent-green)12; border: 1px solid var(--color-accent-green)25;">DONE</span>
+					{/if}
+				</button>
+				<button onclick={() => onSelect('__costs')} class="flex w-full items-center gap-2 border-l-2 px-2.5 py-1.5 text-left transition-colors hover:bg-[var(--color-bg-hover)]" style="border-color: {selectedId === '__costs' ? 'var(--color-accent-amber)' : 'transparent'}; background: {selectedId === '__costs' ? 'var(--color-bg-surface)' : 'transparent'};">
+					<div class="min-w-0 flex-1">
+						<div class="truncate text-[11px]" style="color: {selectedId === '__costs' ? 'var(--color-text-bright)' : 'var(--color-text-muted)'};">Cost Tracker</div>
+						<div class="mt-0.5 truncate text-[9px]" style="color: var(--color-text-dim);">Aggregate spending</div>
+					</div>
+				</button>
 
 			{:else if activePanel === 'memory'}
 				<button onclick={() => onSelect('__memory-home')} class="flex w-full items-center gap-2 border-l-2 px-2.5 py-1.5 text-left transition-colors hover:bg-[var(--color-bg-hover)]" style="border-color: {selectedId === '__memory-home' ? 'var(--color-accent-cyan)' : 'transparent'}; background: {selectedId === '__memory-home' ? 'var(--color-bg-surface)' : 'transparent'};">
@@ -95,7 +115,7 @@
 					{@const tierColor = entry.tier.includes('l0') ? 'var(--color-accent-amber)' : 'var(--color-accent-purple)'}
 					<button onclick={() => onSelect(entry.id)} class="flex w-full items-center gap-2 border-l-2 px-2.5 py-1.5 text-left transition-colors hover:bg-[var(--color-bg-hover)]" style="border-color: {selectedId === entry.id ? tierColor : 'transparent'}; background: {selectedId === entry.id ? 'var(--color-bg-surface)' : 'transparent'}; opacity: {entry.status !== 'pending' ? 0.4 : 1};">
 						<div class="min-w-0 flex-1">
-							<div class="truncate text-[11px]" style="color: {selectedId === entry.id ? 'var(--color-text-bright)' : 'var(--color-text-muted)'};">{entry.content.length > 40 ? entry.content.slice(0, 40) + '...' : entry.content}</div>
+							<div class="truncate text-[11px]" style="color: {selectedId === entry.id ? 'var(--color-text-bright)' : 'var(--color-text-muted)'};\">{entry.content.length > 40 ? entry.content.slice(0, 40) + '...' : entry.content}</div>
 							<div class="mt-0.5 truncate text-[9px]" style="color: var(--color-text-dim);">{entry.tier} | {entry.source_agent}</div>
 						</div>
 						{#if entry.status === 'pending'}
@@ -115,7 +135,7 @@
 				{#each prsStore.list as pr (pr.id)}
 					<button onclick={() => onSelect(`pr-${pr.id}`)} class="flex w-full items-center gap-2 border-l-2 px-2.5 py-1.5 text-left transition-colors hover:bg-[var(--color-bg-hover)]" style="border-color: {selectedId === `pr-${pr.id}` ? (pr.status === 'merged' ? 'var(--color-accent-green)' : 'var(--color-accent-yellow)') : 'transparent'}; background: {selectedId === `pr-${pr.id}` ? 'var(--color-bg-surface)' : 'transparent'};">
 						<div class="min-w-0 flex-1">
-							<div class="truncate text-[11px]" style="color: {selectedId === `pr-${pr.id}` ? 'var(--color-text-bright)' : 'var(--color-text-muted)'};">{pr.id} {pr.title}</div>
+							<div class="truncate text-[11px]" style="color: {selectedId === `pr-${pr.id}` ? 'var(--color-text-bright)' : 'var(--color-text-muted)'};\">{pr.id} {pr.title}</div>
 							<div class="mt-0.5 truncate text-[9px]" style="color: var(--color-text-dim);">{pr.status} | +{pr.additions} -{pr.deletions}</div>
 						</div>
 					</button>
