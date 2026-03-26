@@ -5,6 +5,9 @@ exposes it to FastAPI routes. Starts with mock data shaped identically
 to the real orchestrator models, so the dashboard can develop against
 a realistic API surface before live wiring.
 
+Issue #35: Mutation methods now emit SSE events via the EventBus,
+so the dashboard receives real-time updates when state changes.
+
 Usage:
     from src.api.state import state_manager
     agents = state_manager.get_agents()
@@ -19,6 +22,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 
+from .events import EventType, SSEEvent, event_bus
 from .models import (
     AgentInfo,
     AgentStatus,
@@ -61,6 +65,18 @@ class StateManager:
         if os.getenv("API_SEED_MOCK_DATA", "true").lower() == "true":
             self._seed_mock_data()
 
+    # ── Event Emission ──
+
+    async def _emit(self, event_type: EventType, data: dict) -> None:
+        """Publish an SSE event to all connected dashboard clients.
+
+        Best-effort: if publication fails, the mutation still succeeds.
+        """
+        try:
+            await event_bus.publish(SSEEvent(type=event_type, data=data))
+        except Exception:
+            logger.debug("Failed to emit %s event", event_type.value, exc_info=True)
+
     # ── Agent State ──
 
     def _init_agents(self) -> dict[str, AgentInfo]:
@@ -91,10 +107,16 @@ class StateManager:
     def get_agents(self) -> list[AgentInfo]:
         return list(self._agents.values())
 
-    def update_agent_status(self, agent_id: str, status: AgentStatus, task_id: str | None = None):
+    async def update_agent_status(
+        self, agent_id: str, status: AgentStatus, task_id: str | None = None
+    ) -> None:
         if agent_id in self._agents:
             self._agents[agent_id].status = status
             self._agents[agent_id].current_task_id = task_id
+            await self._emit(
+                EventType.AGENT_STATUS,
+                {"agent": agent_id, "status": status.value, "task_id": task_id},
+            )
 
     # ── Task State ──
 
@@ -107,7 +129,7 @@ class StateManager:
     def get_task(self, task_id: str) -> TaskDetail | None:
         return self._tasks.get(task_id)
 
-    def create_task(self, description: str) -> str:
+    async def create_task(self, description: str) -> str:
         task_id = f"task-{uuid.uuid4().hex[:8]}"
         self._tasks[task_id] = TaskDetail(
             id=task_id,
@@ -116,9 +138,18 @@ class StateManager:
             created_at=_utcnow(),
         )
         logger.info("Task created: %s", task_id)
+        await self._emit(
+            EventType.TASK_PROGRESS,
+            {
+                "task_id": task_id,
+                "event": "task_queued",
+                "agent": None,
+                "detail": f"Task queued: {description[:100]}",
+            },
+        )
         return task_id
 
-    def cancel_task(self, task_id: str) -> bool:
+    async def cancel_task(self, task_id: str) -> bool:
         task = self._tasks.get(task_id)
         if not task:
             return False
@@ -126,9 +157,13 @@ class StateManager:
             return False
         task.status = TaskStatus.CANCELLED
         task.completed_at = _utcnow()
+        await self._emit(
+            EventType.TASK_COMPLETE,
+            {"task_id": task_id, "status": "cancelled", "detail": "Task cancelled by user"},
+        )
         return True
 
-    def retry_task(self, task_id: str) -> bool:
+    async def retry_task(self, task_id: str) -> bool:
         task = self._tasks.get(task_id)
         if not task:
             return False
@@ -137,6 +172,15 @@ class StateManager:
         task.status = TaskStatus.QUEUED
         task.completed_at = None
         task.budget.retries_used = 0
+        await self._emit(
+            EventType.TASK_PROGRESS,
+            {
+                "task_id": task_id,
+                "event": "task_retried",
+                "agent": None,
+                "detail": "Task re-queued for retry",
+            },
+        )
         return True
 
     # ── Memory State ──
@@ -156,7 +200,7 @@ class StateManager:
     def get_memory_entry(self, entry_id: str) -> MemoryEntryResponse | None:
         return self._memory.get(entry_id)
 
-    def approve_memory(self, entry_id: str) -> MemoryEntryResponse | None:
+    async def approve_memory(self, entry_id: str) -> MemoryEntryResponse | None:
         entry = self._memory.get(entry_id)
         if not entry:
             return None
@@ -164,15 +208,33 @@ class StateManager:
         entry.verified = True
         entry.expires_at = None
         entry.hours_remaining = None
-        # TODO: Wire to ChromaMemoryStore.approve_discovered()
+        await self._emit(
+            EventType.MEMORY_ADDED,
+            {
+                "id": entry_id,
+                "tier": entry.tier.value,
+                "agent": entry.source_agent,
+                "content": entry.content,
+                "status": "approved",
+            },
+        )
         return entry
 
-    def reject_memory(self, entry_id: str) -> MemoryEntryResponse | None:
+    async def reject_memory(self, entry_id: str) -> MemoryEntryResponse | None:
         entry = self._memory.get(entry_id)
         if not entry:
             return None
         entry.status = MemoryStatus.REJECTED
-        # TODO: Wire to ChromaMemoryStore.reject_discovered()
+        await self._emit(
+            EventType.MEMORY_ADDED,
+            {
+                "id": entry_id,
+                "tier": entry.tier.value,
+                "agent": entry.source_agent,
+                "content": entry.content,
+                "status": "rejected",
+            },
+        )
         return entry
 
     # ── PR State ──

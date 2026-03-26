@@ -19,7 +19,7 @@ class ApiMeta(BaseModel):
     """Metadata included in every API response."""
 
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    version: str = "0.1.0"
+    version: str = "0.2.0"
 
 
 class ApiResponse(BaseModel):
@@ -226,7 +226,8 @@ class HealthResponse(BaseModel):
     """Health check response."""
 
     status: str = "ok"
-    version: str = "0.1.0"
+    version: str = "0.2.0"
     uptime_seconds: float = 0.0
     agents: int = 3
     active_tasks: int = 0
+    sse_subscribers: int = 0

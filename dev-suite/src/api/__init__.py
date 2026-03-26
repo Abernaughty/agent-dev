@@ -1,4 +1,6 @@
-"""FastAPI layer exposing orchestrator state to the SvelteKit dashboard.
+"""Dev Suite API — FastAPI backend for the SvelteKit dashboard."""
 
-Issue #34: FastAPI Bootstrap — API Layer for Orchestrator
-"""
+from .events import EventBus, EventType, SSEEvent, event_bus
+from .main import app
+
+__all__ = ["app", "event_bus", "EventBus", "EventType", "SSEEvent"]
