@@ -1,4 +1,17 @@
+<!--
+	BottomPanel — resizable terminal panel with SSE log streaming.
+
+	In live mode: listens for SSE `log_line` events via window CustomEvent.
+	In mock mode: loads MOCK_LOG_LINES from mock-data.
+	Command input triggers task creation via tasksStore.
+
+	Issue #38: Data Integration — PR4
+-->
 <script lang="ts">
+	import { onMount } from 'svelte';
+	import { tasksStore } from '$lib/stores/tasks.svelte.js';
+	import { PUBLIC_USE_MOCK_DATA } from '$env/static/public';
+
 	interface Props {
 		height: number;
 		onResize: (height: number) => void;
@@ -13,17 +26,14 @@
 	const tabs = ['TERMINAL', 'PROBLEMS', 'OUTPUT'];
 	let activeTab = $state('TERMINAL');
 
-	const terminalLines = [
-		{ type: 'cmd', text: "$ langgraph run --task 'supabase-auth-rls'" },
-		{ type: 'info', text: '[orchestrator] Task accepted. Spinning up agent team...' },
-		{ type: 'info', text: '[orchestrator] Architect assigned -> blueprint generation' },
-		{ type: 'info', text: '[sandbox:locked] E2B micro-VM started (dev-sandbox-a3f2)' },
-		{ type: 'warn', text: '[qa] 2/14 tests failed - session cookie not set on redirect' },
-		{ type: 'info', text: '[orchestrator] Retry 1/3 dispatched to Lead Dev' },
-		{ type: 'success', text: '[qa] 14/14 tests passing' },
-		{ type: 'success', text: '[github] PR #142 opened -> feat: add Supabase auth middleware' },
-		{ type: 'info', text: '[memory] 3 new entries pending approval' }
-	];
+	interface LogLine {
+		type: string;
+		text: string;
+	}
+
+	let lines = $state<LogLine[]>([]);
+	let input = $state('');
+	let scrollTarget: HTMLDivElement | undefined = $state();
 
 	const typeColors: Record<string, string> = {
 		cmd: 'var(--color-text-bright)',
@@ -32,6 +42,34 @@
 		success: 'var(--color-accent-green)',
 		error: 'var(--color-accent-red)'
 	};
+
+	const isMockMode = PUBLIC_USE_MOCK_DATA === 'true';
+
+	onMount(() => {
+		if (isMockMode) {
+			import('$lib/stores/mock-data.js').then(({ MOCK_LOG_LINES }) => {
+				lines = [...MOCK_LOG_LINES];
+			});
+		}
+
+		function handleLogLine(e: Event) {
+			const detail = (e as CustomEvent).detail;
+			if (detail?.text) {
+				lines = [...lines, { type: detail.type || 'info', text: detail.text }];
+			} else if (detail?.detail) {
+				lines = [...lines, { type: detail.type || 'info', text: detail.detail }];
+			}
+		}
+
+		window.addEventListener('sse:log_line', handleLogLine);
+		return () => window.removeEventListener('sse:log_line', handleLogLine);
+	});
+
+	$effect(() => {
+		if (lines.length > 0) {
+			scrollTarget?.scrollIntoView({ behavior: 'smooth' });
+		}
+	});
 
 	function handleMouseDown(e: MouseEvent) {
 		isDragging = true;
@@ -48,6 +86,34 @@
 	function handleMouseUp() {
 		isDragging = false;
 	}
+
+	async function handleCmd() {
+		const text = input.trim();
+		if (!text) return;
+
+		lines = [...lines, { type: 'cmd', text: `$ ${text}` }];
+		input = '';
+
+		if (text.startsWith('run ') || text.startsWith('task ')) {
+			const desc = text.replace(/^(run|task)\s+/, '');
+			lines = [...lines, { type: 'info', text: `[orchestrator] Processing: "${desc}"...` }];
+			const taskId = await tasksStore.create(desc);
+			if (taskId) {
+				lines = [...lines, { type: 'success', text: `[orchestrator] Task ${taskId} created` }];
+			} else {
+				lines = [...lines, { type: 'error', text: `[orchestrator] Failed: ${tasksStore.error ?? 'Unknown error'}` }];
+			}
+		} else {
+			lines = [...lines, { type: 'info', text: `[shell] Command not recognized. Use "run <description>" to create a task.` }];
+		}
+	}
+
+	function handleKeydown(e: KeyboardEvent) {
+		if (e.key === 'Enter') {
+			e.preventDefault();
+			handleCmd();
+		}
+	}
 </script>
 
 <svelte:window onmousemove={handleMouseMove} onmouseup={handleMouseUp} />
@@ -56,60 +122,47 @@
 	class="flex shrink-0 flex-col border-t"
 	style="height: {height}px; background: var(--color-bg-activity); border-color: var(--color-border);"
 >
-	<!-- Drag handle -->
 	<!-- svelte-ignore a11y_no_static_element_interactions -->
 	<div
 		class="flex h-1 shrink-0 cursor-ns-resize items-center justify-center"
 		style="background: {isDragging ? 'var(--color-accent-cyan)' : 'transparent'};"
 		onmousedown={handleMouseDown}
 	>
-		<div
-			class="h-0.5 w-10 rounded-sm"
-			style="background: var(--color-bg-surface);"
-		></div>
+		<div class="h-0.5 w-10 rounded-sm" style="background: var(--color-bg-surface);"></div>
 	</div>
 
-	<!-- Tab bar -->
-	<div
-		class="flex h-7 shrink-0 items-center gap-4 border-b px-3"
-		style="border-color: var(--color-border);"
-	>
+	<div class="flex h-7 shrink-0 items-center gap-4 border-b px-3" style="border-color: var(--color-border);">
 		{#each tabs as tab (tab)}
 			<button
 				onclick={() => (activeTab = tab)}
 				class="pb-1.5 pt-1.5 text-[10px]"
-				style="
-					font-family: var(--font-mono);
-					color: {activeTab === tab ? 'var(--color-text-bright)' : 'var(--color-text-dim)'};
-					border-bottom: {activeTab === tab ? '1px solid var(--color-accent-cyan)' : '1px solid transparent'};
-				"
+				style="font-family: var(--font-mono); color: {activeTab === tab ? 'var(--color-text-bright)' : 'var(--color-text-dim)'}; border-bottom: {activeTab === tab ? '1px solid var(--color-accent-cyan)' : '1px solid transparent'};"
 			>
 				{tab}
 			</button>
 		{/each}
 	</div>
 
-	<!-- Terminal content -->
 	<div class="flex-1 overflow-y-auto px-3.5 py-1">
-		{#each terminalLines as line (line.text)}
-			<div
-				class="text-[11px] leading-7"
-				style="color: {typeColors[line.type] || 'var(--color-text-dim)'}; font-family: var(--font-mono);"
-			>
-				{line.text}
+		{#if lines.length === 0}
+			<div class="py-3 text-center text-[10px]" style="color: var(--color-text-faint); font-family: var(--font-mono);">
+				Waiting for log events...
 			</div>
-		{/each}
+		{:else}
+			{#each lines as line, i (i)}
+				<div class="text-[11px] leading-7" style="color: {typeColors[line.type] || 'var(--color-text-dim)'}; font-family: var(--font-mono);">
+					{line.text}
+				</div>
+			{/each}
+		{/if}
+		<div bind:this={scrollTarget}></div>
 	</div>
 
-	<!-- Input -->
-	<div
-		class="flex shrink-0 items-center gap-1.5 px-3.5 pb-1.5 pt-1"
-	>
-		<span
-			class="text-[11px]"
-			style="color: var(--color-accent-cyan); font-family: var(--font-mono);"
-		>$</span>
+	<div class="flex shrink-0 items-center gap-1.5 px-3.5 pb-1.5 pt-1">
+		<span class="text-[11px]" style="color: var(--color-accent-cyan); font-family: var(--font-mono);">$</span>
 		<input
+			bind:value={input}
+			onkeydown={handleKeydown}
 			type="text"
 			placeholder="run command..."
 			class="flex-1 border-none bg-transparent text-[11px] outline-none"

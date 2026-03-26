@@ -16,15 +16,7 @@ import { tasksStore } from './tasks.svelte.js';
 import { memoryStore } from './memory.svelte.js';
 import { prsStore } from './prs.svelte.js';
 import { connection } from './connection.svelte.js';
-
-/** Check if mock data mode is enabled (PUBLIC_ prefix = client-visible). */
-function useMockData(): boolean {
-	try {
-		return import.meta.env.PUBLIC_USE_MOCK_DATA === 'true';
-	} catch {
-		return false;
-	}
-}
+import { PUBLIC_USE_MOCK_DATA } from '$env/static/public';
 
 /**
  * Kick off initial data fetch for all stores.
@@ -36,13 +28,13 @@ function useMockData(): boolean {
  * Called once from +layout.svelte on mount.
  */
 export async function initAllStores(): Promise<void> {
-	if (useMockData()) {
+	if (PUBLIC_USE_MOCK_DATA === 'true') {
 		const { MOCK_AGENTS, MOCK_TASKS, MOCK_MEMORY, MOCK_PRS } = await import('./mock-data.js');
 		agentsStore.loadMock(MOCK_AGENTS);
 		tasksStore.loadMock(MOCK_TASKS);
 		memoryStore.loadMock(MOCK_MEMORY);
 		prsStore.loadMock(MOCK_PRS);
-		connection.setConnected(); // Fake connected in mock mode
+		connection.setConnected();
 		return;
 	}
 
@@ -61,5 +53,5 @@ export function destroyAllStores(): void {
 	agentsStore.reset();
 	tasksStore.reset();
 	memoryStore.reset();
-	prsStore.reset(); // also stops polling
+	prsStore.reset();
 }
