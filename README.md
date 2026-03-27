@@ -45,7 +45,7 @@ agent-dev/
 
 **Execution**: E2B sandboxed micro-VMs with structured JSON output wrappers. Role-specific sandbox profiles (locked-down for Dev/QA, permissive for research).
 
-**Dashboard**: SvelteKit (Svelte 5 + TailwindCSS v4) with SSE real-time streaming. VS Code-inspired layout with activity bar, sidebar panels, and bottom terminal.
+**Dashboard**: SvelteKit (Svelte 5 + TailwindCSS v4) with SSE real-time streaming. VS Code-inspired layout with activity bar, sidebar panels, and bottom terminal. Degrades gracefully when backends are unavailable.
 
 ## Quick Start
 
@@ -104,7 +104,6 @@ Set in `dev-suite/.env`:
 - `API_SECRET` — Dashboard API auth token
 
 Set in `dashboard/.env`:
-- `PUBLIC_USE_MOCK_DATA` — `true` for mock mode, `false` for live API
 - `BACKEND_URL` — API base URL (e.g. `http://localhost:8000`)
 - `API_SECRET` — Must match the API's secret
 
