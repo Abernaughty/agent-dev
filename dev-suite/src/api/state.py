@@ -1,13 +1,13 @@
 """State manager bridging the LangGraph orchestrator to the API layer.
 
 Provides a singleton that holds current agent/task/memory state and
-exposes it to FastAPI routes. Starts with mock data shaped identically
-to the real orchestrator models, so the dashboard can develop against
-a realistic API surface before live wiring.
+exposes it to FastAPI routes. State starts empty and is populated by
+real orchestrator runs, Chroma queries, and GitHub API calls.
 
 Issue #35: Mutation methods now emit SSE events via the EventBus,
 so the dashboard receives real-time updates when state changes.
 Issue #50: PR methods delegate to GitHubPRProvider for live data.
+Issue #51: Removed mock data seeding — always starts with clean state.
 
 Usage:
     from src.api.state import state_manager
@@ -52,8 +52,8 @@ def _utcnow() -> datetime:
 class StateManager:
     """In-memory state for the API layer.
 
-    Phase 1: Mock data matching the dashboard mockup shape.
-    Phase 2: Wire to real LangGraph state, Chroma, and GitHub.
+    State starts empty. Populated by real orchestrator runs,
+    Chroma memory queries, and GitHub API calls.
     """
 
     def __init__(self):
@@ -63,10 +63,7 @@ class StateManager:
         self._memory: dict[str, MemoryEntryResponse] = {}
         self._prs: dict[str, PRSummary] = {}
 
-        if os.getenv("API_SEED_MOCK_DATA", "true").lower() == "true":
-            self._seed_mock_data()
-
-    # ── Event Emission ──
+    # -- Event Emission --
 
     async def _emit(self, event_type: EventType, data: dict) -> None:
         try:
@@ -74,7 +71,7 @@ class StateManager:
         except Exception:
             logger.debug("Failed to emit %s event", event_type.value, exc_info=True)
 
-    # ── Agent State ──
+    # -- Agent State --
 
     def _init_agents(self) -> dict[str, AgentInfo]:
         return {
@@ -92,7 +89,7 @@ class StateManager:
             self._agents[agent_id].current_task_id = task_id
             await self._emit(EventType.AGENT_STATUS, {"agent": agent_id, "status": status.value, "task_id": task_id})
 
-    # ── Task State ──
+    # -- Task State --
 
     def get_tasks(self) -> list[TaskSummary]:
         return [TaskSummary(**t.model_dump(exclude={"blueprint", "generated_code", "error_message"})) for t in self._tasks.values()]
@@ -130,7 +127,7 @@ class StateManager:
         await self._emit(EventType.TASK_PROGRESS, {"task_id": task_id, "event": "task_retried", "agent": None, "detail": "Task re-queued for retry"})
         return True
 
-    # ── Memory State ──
+    # -- Memory State --
 
     def get_memory(self, tier: MemoryTierEnum | None = None, status: MemoryStatus | None = None) -> list[MemoryEntryResponse]:
         entries = list(self._memory.values())
@@ -162,45 +159,44 @@ class StateManager:
         await self._emit(EventType.MEMORY_ADDED, {"id": entry_id, "tier": entry.tier.value, "agent": entry.source_agent, "content": entry.content, "status": "rejected"})
         return entry
 
-    # ── PR State ──
+    # -- PR State --
 
     def get_prs(self) -> list[PRSummary]:
-        """Return mock PRs (for backward compat). Use async methods for live data."""
+        """Return in-memory PRs (for backward compat). Use async methods for live data."""
         return list(self._prs.values())
 
     def get_pr(self, pr_id: str) -> PRSummary | None:
-        """Return mock PR by id. Use async methods for live data."""
+        """Return in-memory PR by id. Use async methods for live data."""
         return self._prs.get(pr_id)
 
     async def get_live_prs(self, state: str = "all") -> list[PRSummary]:
-        """Fetch real PRs from GitHub API. Falls back to mock data."""
+        """Fetch real PRs from GitHub API. Returns empty list if unavailable."""
         from .github_prs import github_pr_provider
         if not github_pr_provider.configured:
-            logger.debug("No GITHUB_TOKEN — returning mock PR data")
-            return list(self._prs.values())
+            logger.debug("No GITHUB_TOKEN -- returning empty PR list")
+            return []
         try:
             return await github_pr_provider.list_prs(state=state)
         except Exception:
-            logger.warning("GitHub PR fetch failed, returning mock data", exc_info=True)
-            return list(self._prs.values())
+            logger.warning("GitHub PR fetch failed, returning empty list", exc_info=True)
+            return []
 
     async def get_live_pr(self, number: int) -> PRSummary | None:
         """Fetch a single PR with reviews and check status."""
         from .github_prs import github_pr_provider
         if not github_pr_provider.configured:
-            return self._prs.get(f"#{number}")
+            return None
         try:
             return await github_pr_provider.get_pr(number)
         except Exception:
             logger.warning("GitHub PR detail fetch failed", exc_info=True)
-            return self._prs.get(f"#{number}")
+            return None
 
     async def get_live_pr_files(self, number: int) -> list:
         """Fetch changed files for a PR."""
         from .github_prs import github_pr_provider
         if not github_pr_provider.configured:
-            pr = self._prs.get(f"#{number}")
-            return pr.files if pr else []
+            return []
         try:
             return await github_pr_provider.get_pr_files(number)
         except Exception:
@@ -241,7 +237,7 @@ class StateManager:
         from .github_prs import github_pr_provider
         return await github_pr_provider.merge_pr(number, method)
 
-    # ── Health ──
+    # -- Health --
 
     def get_uptime(self) -> float:
         return time.time() - self._start_time
@@ -249,51 +245,6 @@ class StateManager:
     def get_active_task_count(self) -> int:
         active_statuses = {TaskStatus.QUEUED, TaskStatus.PLANNING, TaskStatus.BUILDING, TaskStatus.REVIEWING}
         return sum(1 for t in self._tasks.values() if t.status in active_statuses)
-
-    # ── Mock Data Seeding ──
-
-    def _seed_mock_data(self):
-        logger.info("Seeding mock data for API development")
-        self._agents["arch"].status = AgentStatus.IDLE
-        self._agents["dev"].status = AgentStatus.IDLE
-        self._agents["qa"].status = AgentStatus.IDLE
-
-        task_id = "supabase-auth-rls"
-        self._tasks[task_id] = TaskDetail(
-            id=task_id, description="Set up Supabase auth with RLS for the user_profiles table",
-            status=TaskStatus.PASSED,
-            created_at=datetime(2026, 3, 25, 14, 32, tzinfo=timezone.utc),
-            completed_at=datetime(2026, 3, 25, 14, 37, tzinfo=timezone.utc),
-            budget=TaskBudget(tokens_used=38200, token_budget=50000, retries_used=1, max_retries=3, cost_used=0.47, cost_budget=1.00),
-            timeline=[
-                TimelineEvent(time="14:32", agent="arch", action="Blueprint created for auth-middleware module", type="plan"),
-                TimelineEvent(time="14:33", agent="dev", action="Picked up blueprint. Writing auth.js...", type="code"),
-                TimelineEvent(time="14:35", agent="dev", action="E2B sandbox spun up. Running npm test...", type="exec"),
-                TimelineEvent(time="14:36", agent="qa", action="2 tests failed: session cookie not set on redirect", type="fail"),
-                TimelineEvent(time="14:36", agent="dev", action="Retry 1/3 \u2014 applying fix from QA failure report", type="retry"),
-                TimelineEvent(time="14:37", agent="dev", action="All 14 tests passing. PR #142 opened.", type="success"),
-            ],
-            blueprint=BlueprintResponse(
-                task_id="supabase-auth-rls",
-                target_files=["src/middleware/auth.js", "src/lib/supabase.js", "supabase/migrations/003_rls.sql", "tests/auth.test.js"],
-                instructions="Implement cookie-based authentication middleware using supabase-ssr. Create a server client that reads session from cookies, validates it, and redirects unauthenticated users to /login. Add RLS policies to user_profiles table restricting access to authenticated users only.",
-                constraints=["Use supabase-ssr createServerClient, NOT the legacy supabase-js createClient", "Sessions must use cookie storage, not localStorage", "RLS policies must cover SELECT, INSERT, and UPDATE operations", "Do not expose SUPABASE_SERVICE_ROLE_KEY to the client"],
-                acceptance_criteria=["All 14 existing auth test specs pass", "Unauthenticated requests to /api/* return 302 redirect to /login", "user_profiles table rejects SELECT from unauthenticated roles", "Session refresh works automatically on cookie expiry"],
-            ),
-            generated_code="// Generated auth middleware code...",
-        )
-
-        now = time.time()
-        self._memory = {
-            "mem-1": MemoryEntryResponse(id="mem-1", content="Supabase auth requires RLS policies on all public tables", tier=MemoryTierEnum.L0_DISCOVERED, module="auth", source_agent="Architect", verified=False, status=MemoryStatus.PENDING, created_at=now - 120, expires_at=now + (47 * 3600 + 58 * 60), hours_remaining=47.97),
-            "mem-2": MemoryEntryResponse(id="mem-2", content="auth.js depends on supabase-ssr v0.5+ for cookie-based sessions", tier=MemoryTierEnum.L1, module="auth", source_agent="Lead Dev", verified=True, status=MemoryStatus.PENDING, created_at=now - 480),
-            "mem-3": MemoryEntryResponse(id="mem-3", content="Rate limiter middleware must wrap all /api/* routes", tier=MemoryTierEnum.L0_DISCOVERED, module="middleware", source_agent="QA Agent", verified=False, status=MemoryStatus.PENDING, created_at=now - 840, expires_at=now + (47 * 3600 + 46 * 60), hours_remaining=47.77),
-        }
-
-        self._prs = {
-            "#142": PRSummary(id="#142", title="feat: add Supabase auth middleware", author="Lead Dev", status=PRStatus.REVIEW, branch="feature/supabase-auth", summary="Adds cookie-based auth middleware with automatic session refresh.", additions=187, deletions=23, file_count=4, files=[PRFileChange(name="src/middleware/auth.js", additions=94, deletions=0, status="added"), PRFileChange(name="src/lib/supabase.js", additions=52, deletions=12, status="modified"), PRFileChange(name="supabase/migrations/003_rls.sql", additions=28, deletions=0, status="added"), PRFileChange(name="tests/auth.test.js", additions=13, deletions=11, status="modified")], tests=PRTestResults(passed=14, failed=0, total=14)),
-            "#141": PRSummary(id="#141", title="fix: RLS policy for user_profiles", author="Lead Dev", status=PRStatus.MERGED, branch="fix/rls-profiles", summary="Fixes permissive RLS policy.", additions=34, deletions=8, file_count=2, files=[PRFileChange(name="supabase/migrations/002_rls.sql", additions=34, deletions=8, status="modified")], tests=PRTestResults(passed=9, failed=0, total=9)),
-        }
 
 
 state_manager = StateManager()

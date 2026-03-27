@@ -3,6 +3,7 @@
 Issue #34: FastAPI Bootstrap -- API Layer for Orchestrator
 Issue #35: SSE Event System -- Real-Time Task Streaming
 Issue #50: Full GitHub PR endpoints (read + write)
+Issue #51: Removed mock_data from startup log
 
 Run with:
     uv run --group api uvicorn src.api.main:app --reload --port 8000
@@ -47,7 +48,7 @@ SSE_HEARTBEAT_SECONDS = 15
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     secret_set = bool(os.getenv("API_SECRET"))
-    logger.info("Dev Suite API starting | auth=%s | cors=%s | mock_data=%s", "enabled" if secret_set else "disabled (dev mode)", _allowed_origins, os.getenv("API_SEED_MOCK_DATA", "true"))
+    logger.info("Dev Suite API starting | auth=%s | cors=%s", "enabled" if secret_set else "disabled (dev mode)", _allowed_origins)
     yield
     from .runner import task_runner
     logger.info("Dev Suite API shutting down | running_tasks=%d | sse_subscribers=%d | events_published=%d", task_runner.running_count, event_bus.subscriber_count, event_bus.event_counter)

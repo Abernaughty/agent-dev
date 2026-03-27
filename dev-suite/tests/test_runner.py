@@ -60,7 +60,7 @@ def runner():
 
 @pytest.fixture
 def fresh_state():
-    """Fresh StateManager with mock data seeded."""
+    """Fresh StateManager (empty state)."""
     return StateManager()
 
 
