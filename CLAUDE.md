@@ -54,7 +54,7 @@ Key modules:
 - `src/memory/` — Chroma vector store with L0/L1/L2 tiered metadata
 - `src/sandbox/` — E2B sandbox runner with structured JSON output wrappers
 - `src/tools/` — MCP bridge (mcp_bridge.py), tool providers (provider.py, mcp_provider.py)
-- `src/api/` — FastAPI backend with REST + SSE endpoints, Bearer auth, mock StateManager
+- `src/api/` — FastAPI backend with REST + SSE endpoints, Bearer auth
 - `src/cli.py` — CLI interface
 - `src/tracing.py` — Langfuse observability integration
 
@@ -66,7 +66,7 @@ SvelteKit app (Svelte 5 + TailwindCSS v4 + pnpm) with VS Code-inspired layout:
 - +layout.svelte = chrome shell, +page.svelte renders MainContent via context
 - SSE client with window event dispatch for real-time updates
 - Stores: agents, tasks, memory, prs, connection, dashboard
-- Mock mode via PUBLIC_USE_MOCK_DATA=true
+- Graceful degradation when backends are unavailable (empty state, not errors)
 
 **CRITICAL**: SvelteKit PUBLIC_* env vars use `import { X } from '$env/static/public'` — NOT import.meta.env.
 **CRITICAL**: Google Fonts @import MUST precede @import "tailwindcss" in app.css.
@@ -120,7 +120,6 @@ agent-dev/
 - `ARCHITECT_MODEL` / `DEVELOPER_MODEL` / `QA_MODEL` — Override agent models
 
 ### dashboard/.env
-- `PUBLIC_USE_MOCK_DATA` — `true` for mock mode
 - `BACKEND_URL` — API base URL
 - `API_SECRET` — Must match API's secret
 
