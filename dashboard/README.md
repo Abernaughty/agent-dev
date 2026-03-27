@@ -20,6 +20,9 @@ pnpm dev
 
 Open [http://localhost:5173](http://localhost:5173).
 
+The dashboard connects to the FastAPI backend at `BACKEND_URL` (default `http://localhost:8000`).
+If the backend isn't running, each panel degrades gracefully — agents show idle, tasks/memory/PRs show empty state, and the connection banner indicates disconnected status.
+
 ## Layout
 
 VS Code-style shell with:
