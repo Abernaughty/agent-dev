@@ -146,12 +146,5 @@ export const tasksStore = {
 	reset() {
 		tasks = [];
 		error = null;
-	},
-
-	/** Load mock data directly (used when PUBLIC_USE_MOCK_DATA=true). */
-	loadMock(data: TaskSummary[]) {
-		tasks = data;
-		loading = false;
-		error = null;
 	}
 };
