@@ -129,12 +129,5 @@ export const memoryStore = {
 	reset() {
 		entries = [];
 		error = null;
-	},
-
-	/** Load mock data directly (used when PUBLIC_USE_MOCK_DATA=true). */
-	loadMock(data: MemoryEntry[]) {
-		entries = data;
-		loading = false;
-		error = null;
 	}
 };
