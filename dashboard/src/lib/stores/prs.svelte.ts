@@ -69,12 +69,5 @@ export const prsStore = {
 		prs = [];
 		error = null;
 		this.stopPolling();
-	},
-
-	/** Load mock data directly (used when PUBLIC_USE_MOCK_DATA=true). */
-	loadMock(data: PullRequest[]) {
-		prs = data;
-		loading = false;
-		error = null;
 	}
 };
