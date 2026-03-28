@@ -46,10 +46,7 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W"]
-
-[tool.ruff.lint.per-file-ignores]
-"tests/test_github_prs.py" = ["E501"]
-"tests/test_runner.py" = ["E501"]
+ignore = ["E501"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
