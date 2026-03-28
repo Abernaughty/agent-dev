@@ -135,7 +135,9 @@ async def get_task(task_id: str, _auth: str | None = Depends(require_auth)):
 
 @app.post("/tasks", response_model=ApiResponse, status_code=201)
 async def create_task(body: CreateTaskRequest, _auth: str | None = Depends(require_auth)):
+    from .runner import task_runner
     task_id = await state_manager.create_task(body.description)
+    task_runner.submit(task_id, body.description)
     return _ok(CreateTaskResponse(task_id=task_id))
 
 
@@ -158,6 +160,11 @@ async def retry_task(task_id: str, _auth: str | None = Depends(require_auth)):
             _error(f"Task '{task_id}' not found", 404)
         else:
             _error(f"Task '{task_id}' is not in a retryable state (status: {task.status})", 400)
+        return _ok({"task_id": task_id, "status": task.status if task else "not_found"})
+    from .runner import task_runner
+    task = state_manager.get_task(task_id)
+    if task:
+        task_runner.submit(task_id, task.description)
     return _ok({"task_id": task_id, "status": "queued"})
 
 
