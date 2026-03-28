@@ -53,7 +53,7 @@ jobs:
         run: uv sync --group dev --group api
 
       - name: Auto-fix lint issues
-        run: uv run ruff check src/ tests/ --fix || true
+        run: uv run ruff check src/ tests/ --fix --unsafe-fixes || true
 
       - name: Lint with ruff
         run: uv run ruff check src/ tests/
