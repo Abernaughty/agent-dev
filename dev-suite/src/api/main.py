@@ -4,6 +4,7 @@ Issue #34: FastAPI Bootstrap -- API Layer for Orchestrator
 Issue #35: SSE Event System -- Real-Time Task Streaming
 Issue #50: Full GitHub PR endpoints (read + write)
 Issue #51: Removed mock_data from startup log
+Issue #19: Memory audit log endpoint
 
 Run with:
     uv run --group api uvicorn src.api.main:app --reload --port 8000
@@ -179,6 +180,13 @@ async def update_memory(entry_id: str, body: MemoryAction, _auth: str | None = D
     if not entry:
         _error(f"Memory entry '{entry_id}' not found", 404)
     return _ok(entry)
+
+
+# -- Memory Audit Log --
+
+@app.get("/memory/audit", response_model=ApiResponse)
+async def get_memory_audit(limit: int = Query(100, ge=1, le=1000), _auth: str | None = Depends(require_auth)):
+    return _ok(state_manager.get_audit_log(limit=limit))
 
 
 # -- Pull Requests --
