@@ -20,7 +20,7 @@ Covers:
 
 import os
 import time
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -43,7 +43,7 @@ from src.api.models import (
 from src.api.state import StateManager
 
 
-# ── Helpers ──
+# -- Helpers --
 
 
 def _seed_task(sm: StateManager) -> str:
@@ -105,7 +105,7 @@ def _seed_memory(sm: StateManager) -> None:
     }
 
 
-# ── Fixtures ──
+# -- Fixtures --
 
 
 @pytest.fixture()
@@ -147,7 +147,7 @@ def auth_client():
         yield TestClient(app)
 
 
-# ── Health ──
+# -- Health --
 
 
 class TestHealth:
@@ -167,7 +167,7 @@ class TestHealth:
         assert r.status_code == 200
 
 
-# ── Agents ──
+# -- Agents --
 
 
 class TestAgents:
@@ -199,7 +199,7 @@ class TestAgents:
         assert data["errors"] == []
 
 
-# ── Tasks ──
+# -- Tasks --
 
 
 class TestTasks:
@@ -254,27 +254,30 @@ class TestTasks:
         assert r.status_code == 404
 
     def test_create_task(self, client):
-        r = client.post("/tasks", json={"description": "Build a login page"})
-        assert r.status_code == 201
-        data = r.json()["data"]
-        assert "task_id" in data
-        assert data["status"] == "queued"
+        with patch("src.api.runner.task_runner") as mock_runner:
+            r = client.post("/tasks", json={"description": "Build a login page"})
+            assert r.status_code == 201
+            data = r.json()["data"]
+            assert "task_id" in data
+            assert data["status"] == "queued"
+            mock_runner.submit.assert_called_once_with(data["task_id"], "Build a login page")
 
-        r2 = client.get("/tasks")
-        task_ids = [t["id"] for t in r2.json()["data"]]
-        assert data["task_id"] in task_ids
+            r2 = client.get("/tasks")
+            task_ids = [t["id"] for t in r2.json()["data"]]
+            assert data["task_id"] in task_ids
 
     def test_create_task_empty_description(self, client):
         r = client.post("/tasks", json={"description": ""})
         assert r.status_code == 422
 
     def test_cancel_task(self, client):
-        r = client.post("/tasks", json={"description": "Test task"})
-        task_id = r.json()["data"]["task_id"]
+        with patch("src.api.runner.task_runner"):
+            r = client.post("/tasks", json={"description": "Test task"})
+            task_id = r.json()["data"]["task_id"]
 
-        r2 = client.post(f"/tasks/{task_id}/cancel")
-        assert r2.status_code == 200
-        assert r2.json()["data"]["status"] == "cancelled"
+            r2 = client.post(f"/tasks/{task_id}/cancel")
+            assert r2.status_code == 200
+            assert r2.json()["data"]["status"] == "cancelled"
 
     def test_cancel_nonexistent_task(self, client):
         r = client.post("/tasks/nonexistent/cancel")
@@ -290,9 +293,11 @@ class TestTasks:
         from src.api import state as state_mod
         state_mod.state_manager._tasks["test-task-001"].status = TaskStatus.FAILED
 
-        r = seeded_client.post("/tasks/test-task-001/retry")
-        assert r.status_code == 200
-        assert r.json()["data"]["status"] == "queued"
+        with patch("src.api.runner.task_runner") as mock_runner:
+            r = seeded_client.post("/tasks/test-task-001/retry")
+            assert r.status_code == 200
+            assert r.json()["data"]["status"] == "queued"
+            mock_runner.submit.assert_called_once()
 
     def test_retry_non_retryable_task(self, seeded_client):
         """Cannot retry a task that passed."""
@@ -300,7 +305,7 @@ class TestTasks:
         assert r.status_code == 400
 
 
-# ── Memory ──
+# -- Memory --
 
 
 class TestMemory:
@@ -365,7 +370,7 @@ class TestMemory:
         assert r.status_code == 422
 
 
-# ── Pull Requests ──
+# -- Pull Requests --
 
 
 FIXTURE_PRS = [
@@ -445,7 +450,7 @@ class TestPRs:
         assert r.json()["data"] == []
 
 
-# ── Auth ──
+# -- Auth --
 
 
 class TestAuth:
