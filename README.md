@@ -1,5 +1,7 @@
 # Agent Dev — Stateful AI Workforce
 
+[![CI](https://github.com/Abernaughty/agent-dev/actions/workflows/ci.yml/badge.svg)](https://github.com/Abernaughty/agent-dev/actions/workflows/ci.yml)
+
 A LangGraph-orchestrated AI development team with a SvelteKit dashboard for real-time monitoring. Three specialized agents (Architect, Lead Dev, QA) collaborate through structured JSON blueprints, execute code in E2B sandboxes, and persist knowledge via Chroma tiered memory.
 
 ## Project Structure
@@ -25,7 +27,7 @@ agent-dev/
 │   │   └── routes/             # Layout + page components
 │   ├── package.json            # pnpm dependencies
 │   └── svelte.config.js
-├── .github/                    # Issue templates, labels, project config
+├── .github/                    # Issue templates, labels, CI workflows
 ├── CLAUDE.md                   # Claude Code context
 └── CONTRIBUTING.md             # Contribution guidelines
 ```
@@ -114,10 +116,11 @@ Set in `dashboard/.env`:
 - ✅ Chroma tiered memory
 - ✅ MCP tool bridge (Filesystem + GitHub)
 - ✅ FastAPI dashboard backend (REST + SSE)
-- ✅ SvelteKit dashboard with full data integration
-- 🚧 Live SSE wiring (dashboard ↔ running orchestrator)
-- 🚧 Memory approval UI
-- 🚧 Blueprint editor
+- ✅ SvelteKit dashboard scaffold (VS Code layout)
+- ✅ GitHub Actions CI
+- 🚧 Dashboard data wiring (stores ↔ API)
+- 🚧 Memory approval UI (L0-Discovered review)
+- 🚧 OTEL trace propagation
 - 📋 CI/CD Pipeline MCP
-- 📋 Langfuse integration
+- 📋 Secrets provider integration
 - 📋 Cost alerting thresholds
