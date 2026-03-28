@@ -1,13 +1,15 @@
 <!--
 	MemoryDetailView — detail view for a single memory entry.
 
-	Shows trust assessment, metadata, related info, and
-	approve/reject buttons that call memoryStore mutations.
+	Shows trust assessment (computed from real confidence/sandbox/tier data),
+	metadata, related files, and approve/reject buttons that call
+	memoryStore mutations.
 
-	Issue #38: Data Integration — PR3
+	Issue #19: L0 Approval UI — wired to real entry data
 -->
 <script lang="ts">
 	import { memoryStore } from '$lib/stores/memory.svelte.js';
+	import TrustIndicator from '$lib/components/TrustIndicator.svelte';
 	import type { MemoryEntry } from '$lib/types/api.js';
 
 	interface Props {
@@ -16,10 +18,18 @@
 
 	let { entry }: Props = $props();
 
+	const sandboxLabel = $derived(() => {
+		if (entry.sandbox === 'locked-down') return 'Locked (trusted)';
+		if (entry.sandbox === 'permissive') return 'Open egress (untrusted)';
+		return entry.sandbox || 'Unknown';
+	});
+
+	const sandboxTrusted = $derived(() => entry.sandbox === 'locked-down');
+
 	const trustScore = $derived(() => {
-		const sandboxScore = 30;
+		const sandboxScore = sandboxTrusted() ? 30 : 10;
 		const tierScore = entry.tier === 'l0-discovered' ? 10 : 20;
-		const confScore = 40;
+		const confScore = Math.round((entry.confidence ?? 0) * 0.4);
 		return Math.min(100, sandboxScore + tierScore + confScore);
 	});
 
@@ -56,6 +66,7 @@
 		<span class="text-[11px]" style="color: var(--color-text-faint);">{entry.module}</span>
 	</div>
 
+	<!-- Trust Assessment -->
 	<div class="mb-5 rounded-md border p-3" style="background: {trustLevel().color}08; border-color: {trustLevel().color}20;">
 		<div class="mb-2.5 flex items-center justify-between">
 			<span class="text-[10px]" style="color: var(--color-text-dim); letter-spacing: 1px;">TRUST ASSESSMENT</span>
@@ -68,9 +79,9 @@
 		</div>
 		<div class="flex gap-3">
 			{#each [
-				{ label: 'Sandbox', value: 'Locked (trusted)', good: true },
-				{ label: 'Tier', value: entry.tier, good: entry.tier === 'l1' },
-				{ label: 'Status', value: entry.status, good: entry.status === 'approved' }
+				{ label: 'Sandbox', value: sandboxLabel(), good: sandboxTrusted() },
+				{ label: 'Confidence', value: `${entry.confidence ?? 0}%`, good: (entry.confidence ?? 0) >= 85 },
+				{ label: 'Tier', value: entry.tier, good: entry.tier === 'l1' }
 			] as factor}
 				<div class="flex-1 rounded-md p-1.5 px-2" style="background: var(--color-bg-activity)60;">
 					<div class="text-[8px]" style="color: var(--color-text-dim);">{factor.label}</div>
@@ -80,16 +91,20 @@
 		</div>
 	</div>
 
+	<!-- Content -->
 	<div class="mb-5 rounded-md border p-4" style="background: var(--color-bg-activity); border-color: var(--color-border); border-left: 3px solid {tierColor()};">
 		<div class="text-[13px] leading-relaxed" style="color: var(--color-text-bright);">"{entry.content}"</div>
 	</div>
 
+	<!-- Metadata Grid -->
 	<div class="mb-5 grid grid-cols-2 gap-3">
 		{#each [
-			{ label: 'Module', value: entry.module, color: 'var(--color-text-muted)' },
-			{ label: 'Verified', value: entry.verified ? 'Yes' : 'No', color: entry.verified ? 'var(--color-accent-green)' : 'var(--color-accent-amber)' },
+			{ label: 'Confidence', value: `${entry.confidence ?? 0}%`, color: (entry.confidence ?? 0) >= 85 ? 'var(--color-accent-green)' : 'var(--color-accent-amber)' },
+			{ label: 'Sandbox Origin', value: sandboxLabel(), color: 'var(--color-accent-cyan)' },
 			{ label: 'Source Agent', value: entry.source_agent, color: 'var(--color-accent-cyan)' },
-			{ label: 'Expires', value: entry.hours_remaining ? `${entry.hours_remaining.toFixed(0)}h remaining` : 'Never (L1)', color: entry.hours_remaining ? 'var(--color-accent-amber)' : 'var(--color-text-dim)' }
+			{ label: 'Expires', value: entry.hours_remaining ? `${entry.hours_remaining.toFixed(0)}h remaining` : 'Never (L1)', color: entry.hours_remaining ? 'var(--color-accent-amber)' : 'var(--color-text-dim)' },
+			{ label: 'Module', value: entry.module, color: 'var(--color-text-muted)' },
+			{ label: 'Verified', value: entry.verified ? 'Yes' : 'No', color: entry.verified ? 'var(--color-accent-green)' : 'var(--color-accent-amber)' }
 		] as item}
 			<div class="rounded-md border p-2.5" style="background: var(--color-bg-activity); border-color: var(--color-border);">
 				<div class="mb-1 text-[9px]" style="color: var(--color-text-dim); letter-spacing: 0.5px;">{item.label}</div>
@@ -98,6 +113,19 @@
 		{/each}
 	</div>
 
+	<!-- Related Files -->
+	{#if entry.related_files && entry.related_files.length > 0}
+		<div class="mb-5">
+			<div class="mb-2 text-[10px]" style="color: var(--color-text-dim); letter-spacing: 1px;">RELATED FILES</div>
+			<div class="flex flex-col gap-1">
+				{#each entry.related_files as file}
+					<div class="rounded px-2 py-1 text-[11px]" style="color: var(--color-accent-cyan); background: var(--color-accent-cyan)08;">{file}</div>
+				{/each}
+			</div>
+		</div>
+	{/if}
+
+	<!-- Actions -->
 	{#if entry.status === 'pending'}
 		<div class="flex gap-2.5">
 			<button onclick={handleApprove} disabled={actionInProgress} class="cursor-pointer rounded-md border px-6 py-2 text-[12px] font-medium transition-opacity disabled:cursor-not-allowed disabled:opacity-50" style="background: var(--color-accent-green)20; border-color: var(--color-accent-green)40; color: var(--color-accent-green);">
