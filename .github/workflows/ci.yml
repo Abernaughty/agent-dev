@@ -64,7 +64,6 @@ jobs:
           ANTHROPIC_API_KEY: test-key-not-real
           GOOGLE_API_KEY: test-key-not-real
           E2B_API_KEY: test-key-not-real
-          API_SECRET: test-secret
 
   dashboard:
     name: Dashboard checks
