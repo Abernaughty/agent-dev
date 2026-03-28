@@ -43,6 +43,7 @@ packages = ["src"]
 [tool.ruff]
 line-length = 120
 target-version = "py311"
+exclude = ["tests/test_github_prs_TEMP.py"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W"]
