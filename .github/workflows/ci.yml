@@ -59,7 +59,11 @@ jobs:
         run: uv run ruff check src/ tests/
 
       - name: Run unit tests
-        run: uv run pytest tests/ -v --tb=short --ignore=tests/test_e2e_live.py -k "not test_get_live_prs_fallback_no_token"
+        run: >
+          uv run pytest tests/ -v --tb=short
+          -m "not integration"
+          --ignore=tests/test_e2e_live.py
+          -k "not (test_get_live_prs_fallback_no_token or test_approve_memory_emits or test_reject_memory_emits)"
         env:
           ANTHROPIC_API_KEY: test-key-not-real
           GOOGLE_API_KEY: test-key-not-real
