@@ -126,40 +126,27 @@ class TestE2EHappyPath:
     @patch("src.orchestrator._get_architect_llm")
     def test_full_pipeline_pass(self, mock_arch_llm, mock_dev_llm, mock_qa_llm, mock_memory):
         """A task goes through the full loop and passes QA on the first try."""
-        # Mock memory
         mock_memory.return_value = ["Project uses Python 3.13", "Use type hints everywhere"]
-
-        # Mock Architect → returns Blueprint JSON
         arch_response = _make_llm_response(SAMPLE_BLUEPRINT.model_dump_json(), total_tokens=800)
         mock_arch_llm.return_value.invoke.return_value = arch_response
-
-        # Mock Lead Dev → returns code
         dev_response = _make_llm_response(SAMPLE_CODE, total_tokens=1200)
         mock_dev_llm.return_value.invoke.return_value = dev_response
-
-        # Mock QA → returns pass
         qa_response = _make_llm_response(SAMPLE_QA_PASS.model_dump_json(), total_tokens=400)
         mock_qa_llm.return_value.invoke.return_value = qa_response
 
-        # Run the full pipeline
         result = run_task("Create a Python function that validates email addresses", enable_tracing=False)
 
-        # Verify final state
         assert result.status == WorkflowStatus.PASSED
         assert result.retry_count == 0
-        assert result.tokens_used == 800 + 1200 + 400  # Sum of all agents
+        assert result.tokens_used == 800 + 1200 + 400
         assert result.blueprint is not None
         assert result.blueprint.task_id == "e2e-test-001"
         assert len(result.generated_code) > 0
         assert result.failure_report is not None
         assert result.failure_report.status == "pass"
-
-        # Verify trace has entries from all three agents
         assert any("architect" in t for t in result.trace)
         assert any("developer" in t for t in result.trace)
         assert any("qa" in t for t in result.trace)
-
-        # Verify memory was queried
         mock_memory.assert_called_once()
 
     @patch("src.orchestrator._fetch_memory_context")
@@ -171,7 +158,6 @@ class TestE2EHappyPath:
     ):
         """Memory context should be included in the Architect's system prompt."""
         mock_memory.return_value = ["Framework: SvelteKit", "Database: CosmosDB"]
-
         arch_response = _make_llm_response(SAMPLE_BLUEPRINT.model_dump_json())
         mock_arch_llm.return_value.invoke.return_value = arch_response
         dev_response = _make_llm_response(SAMPLE_CODE)
@@ -181,7 +167,6 @@ class TestE2EHappyPath:
 
         result = run_task("Build a new endpoint", enable_tracing=False)
 
-        # Check that the architect LLM was called with memory context in the prompt
         arch_call_args = mock_arch_llm.return_value.invoke.call_args[0][0]
         system_msg = arch_call_args[0].content
         assert "SvelteKit" in system_msg
@@ -201,16 +186,10 @@ class TestE2ERetryPath:
     def test_retry_then_pass(self, mock_arch_llm, mock_dev_llm, mock_qa_llm, mock_memory):
         """QA fails on first attempt, passes on retry."""
         mock_memory.return_value = []
-
-        # Architect
         arch_response = _make_llm_response(SAMPLE_BLUEPRINT.model_dump_json(), total_tokens=800)
         mock_arch_llm.return_value.invoke.return_value = arch_response
-
-        # Developer: called twice (initial + retry)
         dev_response = _make_llm_response(SAMPLE_CODE, total_tokens=1200)
         mock_dev_llm.return_value.invoke.return_value = dev_response
-
-        # QA: first fails, second passes
         qa_fail = _make_llm_response(SAMPLE_QA_FAIL.model_dump_json(), total_tokens=400)
         qa_pass = _make_llm_response(SAMPLE_QA_PASS.model_dump_json(), total_tokens=400)
         mock_qa_llm.return_value.invoke.side_effect = [qa_fail, qa_pass]
@@ -218,9 +197,9 @@ class TestE2ERetryPath:
         result = run_task("Create email validator", enable_tracing=False)
 
         assert result.status == WorkflowStatus.PASSED
-        assert result.retry_count == 1  # One failure before pass
-        assert mock_dev_llm.return_value.invoke.call_count == 2  # Initial + retry
-        assert mock_qa_llm.return_value.invoke.call_count == 2  # Fail + pass
+        assert result.retry_count == 1
+        assert mock_dev_llm.return_value.invoke.call_count == 2
+        assert mock_qa_llm.return_value.invoke.call_count == 2
 
     @patch("src.orchestrator._fetch_memory_context")
     @patch("src.orchestrator._get_qa_llm")
@@ -231,26 +210,19 @@ class TestE2ERetryPath:
     ):
         """Developer's retry prompt should include the QA failure report."""
         mock_memory.return_value = []
-
         arch_response = _make_llm_response(SAMPLE_BLUEPRINT.model_dump_json())
         mock_arch_llm.return_value.invoke.return_value = arch_response
-
         dev_response = _make_llm_response(SAMPLE_CODE)
         mock_dev_llm.return_value.invoke.return_value = dev_response
-
-        # QA fails then passes
         qa_fail = _make_llm_response(SAMPLE_QA_FAIL.model_dump_json())
         qa_pass = _make_llm_response(SAMPLE_QA_PASS.model_dump_json())
         mock_qa_llm.return_value.invoke.side_effect = [qa_fail, qa_pass]
 
         result = run_task("Create email validator", enable_tracing=False)
 
-        # The second developer call should include failure context
         dev_calls = mock_dev_llm.return_value.invoke.call_args_list
         assert len(dev_calls) == 2
-
-        # Second call's user message should contain failure info
-        retry_msg = dev_calls[1][0][0][1].content  # Second call, messages list, HumanMessage
+        retry_msg = dev_calls[1][0][0][1].content
         assert "PREVIOUS ATTEMPT FAILED" in retry_msg
         assert "Missing edge case for empty string" in retry_msg
 
@@ -270,16 +242,10 @@ class TestE2EEscalation:
     ):
         """QA escalates → Architect re-plans → Developer retries → QA passes."""
         mock_memory.return_value = []
-
-        # Architect called twice: initial plan + re-plan after escalation
         arch_response = _make_llm_response(SAMPLE_BLUEPRINT.model_dump_json(), total_tokens=800)
         mock_arch_llm.return_value.invoke.return_value = arch_response
-
-        # Developer called twice: initial + after re-plan
         dev_response = _make_llm_response(SAMPLE_CODE, total_tokens=1200)
         mock_dev_llm.return_value.invoke.return_value = dev_response
-
-        # QA: first escalates, second passes
         qa_escalate = _make_llm_response(SAMPLE_QA_ESCALATE.model_dump_json(), total_tokens=400)
         qa_pass = _make_llm_response(SAMPLE_QA_PASS.model_dump_json(), total_tokens=400)
         mock_qa_llm.return_value.invoke.side_effect = [qa_escalate, qa_pass]
@@ -287,7 +253,7 @@ class TestE2EEscalation:
         result = run_task("Create email validator", enable_tracing=False)
 
         assert result.status == WorkflowStatus.PASSED
-        assert mock_arch_llm.return_value.invoke.call_count == 2  # Initial + re-plan
+        assert mock_arch_llm.return_value.invoke.call_count == 2
         assert mock_dev_llm.return_value.invoke.call_count == 2
         assert mock_qa_llm.return_value.invoke.call_count == 2
 
@@ -300,23 +266,19 @@ class TestE2EEscalation:
     ):
         """Re-plan prompt should include the QA escalation reason."""
         mock_memory.return_value = []
-
         arch_response = _make_llm_response(SAMPLE_BLUEPRINT.model_dump_json())
         mock_arch_llm.return_value.invoke.return_value = arch_response
-
         dev_response = _make_llm_response(SAMPLE_CODE)
         mock_dev_llm.return_value.invoke.return_value = dev_response
-
         qa_escalate = _make_llm_response(SAMPLE_QA_ESCALATE.model_dump_json())
         qa_pass = _make_llm_response(SAMPLE_QA_PASS.model_dump_json())
         mock_qa_llm.return_value.invoke.side_effect = [qa_escalate, qa_pass]
 
         result = run_task("Create email validator", enable_tracing=False)
 
-        # Second architect call should include escalation reason
         arch_calls = mock_arch_llm.return_value.invoke.call_args_list
         assert len(arch_calls) == 2
-        replan_msg = arch_calls[1][0][0][1].content  # Second call, HumanMessage
+        replan_msg = arch_calls[1][0][0][1].content
         assert "PREVIOUS ATTEMPT FAILED" in replan_msg
         assert "architectural" in replan_msg.lower() or "parsing library" in replan_msg
 
@@ -336,26 +298,17 @@ class TestE2EBudgetLimits:
     ):
         """Pipeline stops after MAX_RETRIES failures."""
         mock_memory.return_value = []
-
         arch_response = _make_llm_response(SAMPLE_BLUEPRINT.model_dump_json(), total_tokens=100)
         mock_arch_llm.return_value.invoke.return_value = arch_response
-
         dev_response = _make_llm_response(SAMPLE_CODE, total_tokens=100)
         mock_dev_llm.return_value.invoke.return_value = dev_response
-
-        # QA always fails
         qa_fail = _make_llm_response(SAMPLE_QA_FAIL.model_dump_json(), total_tokens=100)
         mock_qa_llm.return_value.invoke.return_value = qa_fail
 
         result = run_task("Create email validator", enable_tracing=False)
 
-        # Should stop at MAX_RETRIES (3)
         assert result.retry_count >= MAX_RETRIES
         assert result.status != WorkflowStatus.PASSED
-
-        # Developer called: initial + (MAX_RETRIES - 1) retries = MAX_RETRIES
-        # On the final QA fail, retry_count hits MAX_RETRIES and the pipeline
-        # exits via route_after_qa before the dev gets another chance.
         assert mock_dev_llm.return_value.invoke.call_count == MAX_RETRIES
 
     @patch("src.orchestrator.TOKEN_BUDGET", 1000)
@@ -368,21 +321,15 @@ class TestE2EBudgetLimits:
     ):
         """Pipeline stops when token budget is exhausted."""
         mock_memory.return_value = []
-
-        # Each call burns 400 tokens → architect(400) + dev(400) = 800, QA(400) = 1200 > budget
         arch_response = _make_llm_response(SAMPLE_BLUEPRINT.model_dump_json(), total_tokens=400)
         mock_arch_llm.return_value.invoke.return_value = arch_response
-
         dev_response = _make_llm_response(SAMPLE_CODE, total_tokens=400)
         mock_dev_llm.return_value.invoke.return_value = dev_response
-
-        # QA fails and uses enough tokens to exceed budget
         qa_fail = _make_llm_response(SAMPLE_QA_FAIL.model_dump_json(), total_tokens=400)
         mock_qa_llm.return_value.invoke.return_value = qa_fail
 
         result = run_task("Create email validator", enable_tracing=False)
 
-        # Should have stopped due to budget — token_used >= 1000
         assert result.tokens_used >= 1000
 
 
@@ -390,10 +337,7 @@ class TestE2EBudgetLimits:
 
 
 class TestE2ENodeFunctions:
-    """Test individual node functions with realistic mock data.
-
-    Node functions expect GraphState (TypedDict/dict), not AgentState.
-    """
+    """Test individual node functions with realistic mock data."""
 
     @patch("src.orchestrator._fetch_memory_context")
     @patch("src.orchestrator._get_architect_llm")
@@ -476,7 +420,7 @@ class TestE2ENodeFunctions:
 
         assert result["status"] == WorkflowStatus.REVIEWING
         assert result["failure_report"].status == "fail"
-        assert result["retry_count"] == 1  # Incremented
+        assert result["retry_count"] == 1
 
     @patch("src.orchestrator._get_qa_llm")
     def test_qa_node_returns_escalate(self, mock_llm):
@@ -529,19 +473,19 @@ class TestE2EMemoryIntegration:
 
         results = store.query("What programming language does this project use?")
         assert len(results) > 0
-        assert any("Python" in r["content"] for r in results)
+        assert any("Python" in r.content for r in results)
 
     def test_memory_context_survives_pipeline(self, tmp_path):
         """Memory context retrieved early in pipeline should be in final state."""
         store = ChromaMemoryStore(persist_dir=str(tmp_path / "chroma"), collection_name="e2e_mem")
         store.add_l0_core("Test memory entry")
 
-        with patch("src.orchestrator.ChromaMemoryStore") as MockStore:
+        with patch("src.memory.chroma_store.ChromaMemoryStore") as MockStore:
             MockStore.return_value = store
             context = []
             try:
                 results = store.query("test", n_results=5)
-                context = [r["content"] for r in results]
+                context = [r.content for r in results]
             except Exception:
                 pass
 
@@ -563,7 +507,6 @@ class TestE2ETracingIntegration:
     ):
         """Pipeline should work with tracing explicitly disabled."""
         mock_memory.return_value = []
-
         arch_response = _make_llm_response(SAMPLE_BLUEPRINT.model_dump_json())
         mock_arch_llm.return_value.invoke.return_value = arch_response
         dev_response = _make_llm_response(SAMPLE_CODE)
@@ -571,7 +514,6 @@ class TestE2ETracingIntegration:
         qa_response = _make_llm_response(SAMPLE_QA_PASS.model_dump_json())
         mock_qa_llm.return_value.invoke.return_value = qa_response
 
-        # Should not raise even with no Langfuse keys
         result = run_task("Create email validator", enable_tracing=False)
         assert result.status == WorkflowStatus.PASSED
 
@@ -586,7 +528,6 @@ class TestE2ETracingIntegration:
         """When tracing is enabled, create_trace_config should be called."""
         mock_memory.return_value = []
         mock_trace.return_value = MagicMock(callbacks=[], enabled=False, trace_id=None, flush=MagicMock())
-
         arch_response = _make_llm_response(SAMPLE_BLUEPRINT.model_dump_json())
         mock_arch_llm.return_value.invoke.return_value = arch_response
         dev_response = _make_llm_response(SAMPLE_CODE)
