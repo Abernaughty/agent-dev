@@ -1,16 +1,15 @@
 <!--
 	BottomPanel — resizable terminal panel with SSE log streaming.
 
-	In live mode: listens for SSE `log_line` events via window CustomEvent.
-	In mock mode: loads MOCK_LOG_LINES from mock-data.
+	Listens for SSE `log_line` events via window CustomEvent.
 	Command input triggers task creation via tasksStore.
 
 	Issue #38: Data Integration — PR4
+	Issue #51: Removed mock mode — SSE-only log streaming
 -->
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { tasksStore } from '$lib/stores/tasks.svelte.js';
-	import { PUBLIC_USE_MOCK_DATA } from '$env/static/public';
 
 	interface Props {
 		height: number;
@@ -43,15 +42,7 @@
 		error: 'var(--color-accent-red)'
 	};
 
-	const isMockMode = PUBLIC_USE_MOCK_DATA === 'true';
-
 	onMount(() => {
-		if (isMockMode) {
-			import('$lib/stores/mock-data.js').then(({ MOCK_LOG_LINES }) => {
-				lines = [...MOCK_LOG_LINES];
-			});
-		}
-
 		function handleLogLine(e: Event) {
 			const detail = (e as CustomEvent).detail;
 			if (detail?.text) {
