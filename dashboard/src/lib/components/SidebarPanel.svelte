@@ -6,6 +6,7 @@
 	selectedId prop and onSelect callback.
 
 	Issue #38: Data Integration — PR3
+	Issue #19: Memory entries grouped by module via memoryStore.groupedByModule
 	Updated: Added Session Debrief + Cost Tracker entries
 -->
 <script lang="ts">
@@ -111,17 +112,35 @@
 					</div>
 				</button>
 				<div class="mx-2 my-1" style="height: 1px; background: var(--color-border);"></div>
-				{#each memoryStore.list as entry (entry.id)}
-					{@const tierColor = entry.tier.includes('l0') ? 'var(--color-accent-amber)' : 'var(--color-accent-purple)'}
-					<button onclick={() => onSelect(entry.id)} class="flex w-full items-center gap-2 border-l-2 px-2.5 py-1.5 text-left transition-colors hover:bg-[var(--color-bg-hover)]" style="border-color: {selectedId === entry.id ? tierColor : 'transparent'}; background: {selectedId === entry.id ? 'var(--color-bg-surface)' : 'transparent'}; opacity: {entry.status !== 'pending' ? 0.4 : 1};">
-						<div class="min-w-0 flex-1">
-							<div class="truncate text-[11px]" style="color: {selectedId === entry.id ? 'var(--color-text-bright)' : 'var(--color-text-muted)'};\">{entry.content.length > 40 ? entry.content.slice(0, 40) + '...' : entry.content}</div>
-							<div class="mt-0.5 truncate text-[9px]" style="color: var(--color-text-dim);">{entry.tier} | {entry.source_agent}</div>
-						</div>
-						{#if entry.status === 'pending'}
-							<span class="inline-block h-1.5 w-1.5 shrink-0 rounded-full" style="background: var(--color-accent-amber);"></span>
+				<!-- Audit Log sidebar entry -->
+				<button onclick={() => onSelect('__memory-audit')} class="flex w-full items-center gap-2 border-l-2 px-2.5 py-1.5 text-left transition-colors hover:bg-[var(--color-bg-hover)]" style="border-color: {selectedId === '__memory-audit' ? 'var(--color-accent-cyan)' : 'transparent'}; background: {selectedId === '__memory-audit' ? 'var(--color-bg-surface)' : 'transparent'};">
+					<div class="min-w-0 flex-1">
+						<div class="truncate text-[11px]" style="color: {selectedId === '__memory-audit' ? 'var(--color-text-bright)' : 'var(--color-text-muted)'};">Audit Log</div>
+						<div class="mt-0.5 truncate text-[9px]" style="color: var(--color-text-dim);">Approval history</div>
+					</div>
+				</button>
+				<div class="mx-2 my-1" style="height: 1px; background: var(--color-border);"></div>
+				<!-- Grouped by module -->
+				{#each memoryStore.groupedByModule as group (group.module)}
+					{@const groupPending = group.entries.filter(e => e.status === 'pending').length}
+					<div class="flex items-center justify-between px-2.5 py-1">
+						<span class="text-[9px] uppercase" style="color: var(--color-text-faint); letter-spacing: 0.8px;">{group.module}</span>
+						{#if groupPending > 0}
+							<span class="min-w-[14px] rounded-full px-1 text-center text-[8px] font-semibold" style="background: var(--color-accent-amber)20; color: var(--color-accent-amber);">{groupPending}</span>
 						{/if}
-					</button>
+					</div>
+					{#each group.entries as entry (entry.id)}
+						{@const tierColor = entry.tier.includes('l0') ? 'var(--color-accent-amber)' : 'var(--color-accent-purple)'}
+						<button onclick={() => onSelect(entry.id)} class="flex w-full items-center gap-2 border-l-2 px-2.5 py-1.5 text-left transition-colors hover:bg-[var(--color-bg-hover)]" style="border-color: {selectedId === entry.id ? tierColor : 'transparent'}; background: {selectedId === entry.id ? 'var(--color-bg-surface)' : 'transparent'}; opacity: {entry.status !== 'pending' ? 0.4 : 1};">
+							<div class="min-w-0 flex-1">
+								<div class="truncate text-[11px]" style="color: {selectedId === entry.id ? 'var(--color-text-bright)' : 'var(--color-text-muted)'};\">{entry.content.length > 40 ? entry.content.slice(0, 40) + '...' : entry.content}</div>
+								<div class="mt-0.5 truncate text-[9px]" style="color: var(--color-text-dim);">{entry.tier} | {entry.source_agent}</div>
+							</div>
+							{#if entry.status === 'pending'}
+								<span class="inline-block h-1.5 w-1.5 shrink-0 rounded-full" style="background: var(--color-accent-amber);"></span>
+							{/if}
+						</button>
+					{/each}
 				{/each}
 
 			{:else if activePanel === 'prs'}
