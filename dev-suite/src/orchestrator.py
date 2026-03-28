@@ -616,11 +616,29 @@ def create_workflow():
 
 # -- Entry Point --
 
-def run_task(task_description: str, enable_tracing: bool = True) -> AgentState:
-    """Run a task through the full agent workflow."""
+def run_task(
+    task_description: str,
+    enable_tracing: bool = True,
+    session_id: str | None = None,
+    tags: list[str] | None = None,
+) -> AgentState:
+    """Run a task through the full agent workflow.
+
+    Args:
+        task_description: What to build.
+        enable_tracing: Whether to send traces to Langfuse.
+        session_id: Optional session ID for grouping related traces.
+        tags: Optional tags for filtering traces in Langfuse UI.
+    """
     trace_config = create_trace_config(
         enabled=enable_tracing,
         task_description=task_description,
+        session_id=session_id,
+        tags=tags or ["orchestrator"],
+        metadata={
+            "max_retries": str(MAX_RETRIES),
+            "token_budget": str(TOKEN_BUDGET),
+        },
     )
 
     workflow = create_workflow()
@@ -645,21 +663,24 @@ def run_task(task_description: str, enable_tracing: bool = True) -> AgentState:
     if trace_config.callbacks:
         invoke_config["callbacks"] = trace_config.callbacks
 
-    add_trace_event(trace_config, "orchestrator_start", metadata={
-        "task_preview": task_description[:200],
-        "max_retries": MAX_RETRIES,
-        "token_budget": TOKEN_BUDGET,
-    })
+    # Wrap the entire workflow execution in propagation context so that
+    # session_id, tags, and metadata flow through to all Langfuse spans.
+    with trace_config.propagation_context():
+        add_trace_event(trace_config, "orchestrator_start", metadata={
+            "task_preview": task_description[:200],
+            "max_retries": MAX_RETRIES,
+            "token_budget": TOKEN_BUDGET,
+        })
 
-    result = workflow.invoke(initial_state, config=invoke_config)
-    final_state = AgentState(**result)
+        result = workflow.invoke(initial_state, config=invoke_config)
+        final_state = AgentState(**result)
 
-    add_trace_event(trace_config, "orchestrator_complete", metadata={
-        "status": final_state.status.value,
-        "tokens_used": final_state.tokens_used,
-        "retry_count": final_state.retry_count,
-        "memory_writes_count": len(final_state.memory_writes),
-    })
+        add_trace_event(trace_config, "orchestrator_complete", metadata={
+            "status": final_state.status.value,
+            "tokens_used": final_state.tokens_used,
+            "retry_count": final_state.retry_count,
+            "memory_writes_count": len(final_state.memory_writes),
+        })
 
     trace_config.flush()
 
