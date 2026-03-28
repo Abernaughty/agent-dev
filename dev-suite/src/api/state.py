@@ -7,7 +7,8 @@ real orchestrator runs, Chroma queries, and GitHub API calls.
 Issue #35: Mutation methods now emit SSE events via the EventBus,
 so the dashboard receives real-time updates when state changes.
 Issue #50: PR methods delegate to GitHubPRProvider for live data.
-Issue #51: Removed mock data seeding — always starts with clean state.
+Issue #51: Removed mock data seeding -- always starts with clean state.
+Issue #19: Added audit log for memory approve/reject actions.
 
 Usage:
     from src.api.state import state_manager
@@ -27,6 +28,8 @@ from .events import EventType, SSEEvent, event_bus
 from .models import (
     AgentInfo,
     AgentStatus,
+    AuditAction,
+    AuditLogEntry,
     BlueprintResponse,
     MemoryEntryResponse,
     MemoryStatus,
@@ -62,6 +65,7 @@ class StateManager:
         self._tasks: dict[str, TaskDetail] = {}
         self._memory: dict[str, MemoryEntryResponse] = {}
         self._prs: dict[str, PRSummary] = {}
+        self._audit_log: list[AuditLogEntry] = []
 
     # -- Event Emission --
 
@@ -140,6 +144,17 @@ class StateManager:
     def get_memory_entry(self, entry_id: str) -> MemoryEntryResponse | None:
         return self._memory.get(entry_id)
 
+    def _record_audit(self, entry: MemoryEntryResponse, action: AuditAction) -> None:
+        """Record an approve/reject action in the audit log."""
+        self._audit_log.append(AuditLogEntry(
+            id=f"audit-{uuid.uuid4().hex[:8]}",
+            entry_id=entry.id,
+            entry_content=entry.content,
+            entry_tier=entry.tier.value,
+            entry_module=entry.module,
+            action=action,
+        ))
+
     async def approve_memory(self, entry_id: str) -> MemoryEntryResponse | None:
         entry = self._memory.get(entry_id)
         if not entry:
@@ -148,6 +163,7 @@ class StateManager:
         entry.verified = True
         entry.expires_at = None
         entry.hours_remaining = None
+        self._record_audit(entry, AuditAction.APPROVE)
         await self._emit(EventType.MEMORY_ADDED, {"id": entry_id, "tier": entry.tier.value, "agent": entry.source_agent, "content": entry.content, "status": "approved"})
         return entry
 
@@ -156,8 +172,15 @@ class StateManager:
         if not entry:
             return None
         entry.status = MemoryStatus.REJECTED
+        self._record_audit(entry, AuditAction.REJECT)
         await self._emit(EventType.MEMORY_ADDED, {"id": entry_id, "tier": entry.tier.value, "agent": entry.source_agent, "content": entry.content, "status": "rejected"})
         return entry
+
+    # -- Audit Log --
+
+    def get_audit_log(self, limit: int = 100) -> list[AuditLogEntry]:
+        """Return most recent audit entries, newest first."""
+        return list(reversed(self._audit_log[-limit:]))
 
     # -- PR State --
 

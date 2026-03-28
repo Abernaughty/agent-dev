@@ -5,9 +5,10 @@
  * Shared between stores, proxy routes, and components.
  *
  * Issue #37: SvelteKit API Routes & Providers
+ * Issue #19: Added confidence, sandbox, related_files to MemoryEntry; AuditLogEntry
  */
 
-// ── Envelope ──
+// -- Envelope --
 
 export interface ApiMeta {
 	timestamp: string;
@@ -20,7 +21,7 @@ export interface ApiResponse<T = unknown> {
 	errors: string[];
 }
 
-// ── Agents ──
+// -- Agents --
 
 export type AgentStatus = 'idle' | 'planning' | 'coding' | 'reviewing' | 'waiting' | 'error';
 
@@ -33,7 +34,7 @@ export interface Agent {
 	color: string;
 }
 
-// ── Tasks ──
+// -- Tasks --
 
 export type TaskStatus =
 	| 'queued'
@@ -95,7 +96,7 @@ export interface CreateTaskResponse {
 	status: TaskStatus;
 }
 
-// ── Memory ──
+// -- Memory --
 
 export type MemoryTier = 'l0-core' | 'l0-discovered' | 'l1' | 'l2';
 export type MemoryStatus = 'pending' | 'approved' | 'rejected';
@@ -111,13 +112,30 @@ export interface MemoryEntry {
 	created_at: number;
 	expires_at: number | null;
 	hours_remaining: number | null;
+	confidence: number;
+	sandbox: string;
+	related_files: string[];
 }
 
 export interface MemoryActionRequest {
 	action: 'approve' | 'reject';
 }
 
-// ── Pull Requests ──
+// -- Audit Log --
+
+export type AuditAction = 'approve' | 'reject';
+
+export interface AuditLogEntry {
+	id: string;
+	entry_id: string;
+	entry_content: string;
+	entry_tier: string;
+	entry_module: string;
+	action: AuditAction;
+	timestamp: string;
+}
+
+// -- Pull Requests --
 
 export type PRStatus = 'open' | 'review' | 'merged' | 'closed';
 
@@ -149,7 +167,7 @@ export interface PullRequest {
 	tests: PRTestResults;
 }
 
-// ── SSE ──
+// -- SSE --
 
 export type SSEEventType =
 	| 'agent_status'
@@ -164,11 +182,11 @@ export interface SSEEventData {
 	data: Record<string, unknown>;
 }
 
-// ── Connection ──
+// -- Connection --
 
 export type ConnectionStatus = 'connected' | 'disconnected' | 'reconnecting';
 
-// ── Health ──
+// -- Health --
 
 export interface HealthResponse {
 	status: string;

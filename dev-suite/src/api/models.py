@@ -2,6 +2,8 @@
 
 These define the contract between the FastAPI backend and the SvelteKit
 dashboard. All endpoints return an ApiResponse envelope.
+
+Issue #19: Added AuditLogEntry, confidence/sandbox/related_files to MemoryEntryResponse
 """
 
 from __future__ import annotations
@@ -12,7 +14,7 @@ from enum import Enum
 from pydantic import BaseModel, Field
 
 
-# ── Envelope ──
+# -- Envelope --
 
 
 class ApiMeta(BaseModel):
@@ -30,7 +32,7 @@ class ApiResponse(BaseModel):
     errors: list[str] = []
 
 
-# ── Agent Models ──
+# -- Agent Models --
 
 
 class AgentStatus(str, Enum):
@@ -53,7 +55,7 @@ class AgentInfo(BaseModel):
     color: str = "#64748b"
 
 
-# ── Task Models ──
+# -- Task Models --
 
 
 class TaskStatus(str, Enum):
@@ -118,7 +120,7 @@ class TaskDetail(TaskSummary):
     error_message: str = ""
 
 
-# ── Memory Models ──
+# -- Memory Models --
 
 
 class MemoryTierEnum(str, Enum):
@@ -147,6 +149,9 @@ class MemoryEntryResponse(BaseModel):
     created_at: float = 0.0
     expires_at: float | None = None
     hours_remaining: float | None = None
+    confidence: float = 0.0
+    sandbox: str = "locked-down"
+    related_files: list[str] = []
 
 
 class MemoryAction(BaseModel):
@@ -155,7 +160,27 @@ class MemoryAction(BaseModel):
     action: str = Field(..., pattern="^(approve|reject)$")
 
 
-# ── PR Models ──
+# -- Audit Log Models --
+
+
+class AuditAction(str, Enum):
+    APPROVE = "approve"
+    REJECT = "reject"
+
+
+class AuditLogEntry(BaseModel):
+    """Record of a memory approval/rejection action."""
+
+    id: str
+    entry_id: str
+    entry_content: str
+    entry_tier: str
+    entry_module: str
+    action: AuditAction
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+# -- PR Models --
 
 
 class PRStatus(str, Enum):
@@ -247,7 +272,7 @@ class MergePRRequest(BaseModel):
     method: str = Field(default="squash", pattern="^(merge|squash|rebase)$")
 
 
-# ── Task Creation ──
+# -- Task Creation --
 
 
 class CreateTaskRequest(BaseModel):
@@ -259,7 +284,7 @@ class CreateTaskResponse(BaseModel):
     status: TaskStatus = TaskStatus.QUEUED
 
 
-# ── Health ──
+# -- Health --
 
 
 class HealthResponse(BaseModel):
