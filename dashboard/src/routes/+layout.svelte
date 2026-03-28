@@ -9,7 +9,6 @@
 	import { sseClient } from '$lib/sse.js';
 	import { initAllStores, destroyAllStores, memoryStore, prsStore } from '$lib/stores/index.js';
 	import { setDashboardContext } from '$lib/stores/dashboard.svelte.js';
-	import { PUBLIC_USE_MOCK_DATA } from '$env/static/public';
 
 	let { children } = $props();
 
@@ -20,18 +19,12 @@
 	const pendingMemory = $derived(memoryStore.pendingCount);
 	const pendingPR = $derived(prsStore.openCount);
 
-	const isMockMode = PUBLIC_USE_MOCK_DATA === 'true';
-
 	onMount(() => {
 		initAllStores();
-		if (!isMockMode) {
-			sseClient.connect();
-		}
+		sseClient.connect();
 
 		return () => {
-			if (!isMockMode) {
-				sseClient.disconnect();
-			}
+			sseClient.disconnect();
 			destroyAllStores();
 		};
 	});
