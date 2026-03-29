@@ -1,0 +1,73 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "FastAPI Backend",
+      "type": "shell",
+      "command": "uv run --group api uvicorn src.api.main:app --reload --port 8000",
+      "options": {
+        "cwd": "${workspaceFolder}/dev-suite"
+      },
+      "isBackground": true,
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "group": "dev-env"
+      }
+    },
+    {
+      "label": "SvelteKit Dashboard",
+      "type": "shell",
+      "command": "pnpm dev",
+      "options": {
+        "cwd": "${workspaceFolder}/dashboard"
+      },
+      "isBackground": true,
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "group": "dev-env"
+      }
+    },
+    {
+      "label": "Start Dev Environment",
+      "dependsOn": [
+        "FastAPI Backend",
+        "SvelteKit Dashboard"
+      ],
+      "dependsOrder": "parallel",
+      "problemMatcher": [],
+      "runOptions": {
+        "runOn": "default"
+      }
+    },
+    {
+      "label": "Verify Stack",
+      "type": "shell",
+      "command": "bash scripts/verify-stack.sh",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      }
+    },
+    {
+      "label": "Smoke Test",
+      "type": "shell",
+      "command": "bash scripts/smoke-test.sh",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      }
+    }
+  ]
+}
