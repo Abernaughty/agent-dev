@@ -9,7 +9,6 @@
 <script lang="ts">
 	import { agentsStore } from '$lib/stores/agents.svelte.js';
 	import { tasksStore } from '$lib/stores/tasks.svelte.js';
-	import { connectionStore } from '$lib/stores/connection.svelte.js';
 
 	const statusColors: Record<string, string> = {
 		idle: 'var(--color-text-dim)',
