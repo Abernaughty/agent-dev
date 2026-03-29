@@ -40,20 +40,27 @@ check() {
     fi
 }
 
-# SSE endpoints stream indefinitely, so curl -o /dev/null -w %{http_code}
-# appends the status code to the output bytes (e.g. "200000" instead of "200").
-# Use --head-only response code extraction: write headers to a temp file,
-# kill curl after 2s, and parse the status from the header.
+# SSE endpoints stream indefinitely. curl -o /dev/null -w %{http_code}
+# doesn't work reliably because:
+#   - Direct SSE: status code gets appended to body bytes ("200000")
+#   - Proxied SSE: SvelteKit dev server may not flush headers before timeout
+#
+# Use python urllib which reads headers before body, with a 5s timeout.
 check_sse() {
     local label="$1" url="$2"
     printf "  %-40s " "$label"
-    # Use -D to dump headers, --max-time 2 to cut the stream short
-    local tmpheaders
-    tmpheaders=$(mktemp)
-    curl -s -D "$tmpheaders" --max-time 2 "$url" >/dev/null 2>/dev/null || true
     local code
-    code=$(head -1 "$tmpheaders" 2>/dev/null | grep -oP '\d{3}' | head -1 || echo "000")
-    rm -f "$tmpheaders"
+    code=$(python3 -c "
+import urllib.request, urllib.error
+try:
+    resp = urllib.request.urlopen('$url', timeout=5)
+    print(resp.status)
+    resp.close()
+except urllib.error.HTTPError as e:
+    print(e.code)
+except Exception:
+    print('000')
+" 2>/dev/null || echo "000")
     if [ "$code" = "200" ]; then
         printf "${GREEN}OK${NC} (SSE %s)\n" "$code"
         pass=$((pass + 1))
