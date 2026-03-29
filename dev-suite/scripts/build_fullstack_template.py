@@ -12,7 +12,10 @@ The script will:
 2. Build it on E2B's cloud infrastructure
 3. Print the template ID/name to add to your .env
 
-Estimated build time: 3-8 minutes (Node.js + pnpm + deps install).
+Estimated build time: 3-8 minutes.
+
+Note: The code-interpreter-v1 base image already includes Node.js 20 LTS
+(via NodeSource) and common system packages. We layer pnpm and ruff on top.
 """
 
 import sys
@@ -31,23 +34,22 @@ except ImportError:
 def define_template():
     """Define the fullstack-dev sandbox template.
 
-    Starts from the code-interpreter base (Python + Jupyter),
-    then layers Node.js 22 LTS, pnpm, and SvelteKit toolchain.
+    The code-interpreter-v1 base already includes:
+      - Python 3.x + Jupyter + pip
+      - Node.js 20 LTS (via NodeSource)
+      - curl, jq, gnupg, ca-certificates
+
+    We add: pnpm (via corepack as root), ruff, and verify everything.
     """
     template = (
         Template()
-        # Base: E2B code-interpreter (Python 3.x + Jupyter)
+        # Base: E2B code-interpreter (Python 3.x + Jupyter + Node.js 20)
         .from_template("code-interpreter-v1")
-        # System packages
-        .apt_install(["curl", "jq", "gnupg", "ca-certificates"])
-        # Node.js 22 LTS via NodeSource
-        .run_cmd("curl -fsSL https://deb.nodesource.com/setup_22.x | bash -")
-        .apt_install(["nodejs"])
-        # pnpm via corepack
+        # pnpm via corepack (needs root for symlink into /usr/bin)
         .run_cmd([
             "corepack enable",
             "corepack prepare pnpm@latest --activate",
-        ])
+        ], user="root")
         # Python linting tools
         .pip_install(["ruff"])
         # Verify installations
@@ -56,6 +58,7 @@ def define_template():
             "pnpm --version",
             "python3 --version",
             "ruff --version",
+            "echo 'fullstack-dev template ready'",
         ])
     )
     return template
@@ -95,7 +98,8 @@ def build():
     print("Then test with:")
     print('  uv run python -c "from e2b_code_interpreter import Sandbox; '
           f"sbx = Sandbox.create(template='{build_info.name}'); "
-          "print(sbx.commands.run('node --version').stdout); sbx.kill()\"")
+          "print(sbx.commands.run('node --version').stdout); "
+          "print(sbx.commands.run('pnpm --version').stdout); sbx.kill()\"")
     print()
 
 
