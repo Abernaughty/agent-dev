@@ -98,7 +98,7 @@ check_json_field() {
     body=$(curl_get "$url" 2>/dev/null || echo "")
     if [ -z "$body" ]; then
         printf "${RED}UNREACHABLE${NC}\n"
-        ((stage1_fail++))
+        stage1_fail=$((stage1_fail + 1))
         return
     fi
     result=$(echo "$body" | python3 -c "
@@ -117,38 +117,20 @@ except Exception as e:
 " 2>/dev/null || echo "PARSE_ERROR")
     if [[ "$result" == "OK" ]]; then
         printf "${GREEN}OK${NC}\n"
-        ((stage1_pass++))
+        stage1_pass=$((stage1_pass + 1))
     else
         printf "${RED}FAILED${NC} (%s)\n" "$result"
-        ((stage1_fail++))
+        stage1_fail=$((stage1_fail + 1))
     fi
 }
 
-# Verify agents endpoint returns data array
+# Verify API endpoints return expected data
 check_json_field "GET /agents -> data array" "$API_URL/agents" "data"
-
-# Verify tasks endpoint returns data array
 check_json_field "GET /tasks -> data array" "$API_URL/tasks" "data"
-
-# Verify memory endpoint returns data array
 check_json_field "GET /memory -> data array" "$API_URL/memory" "data"
-
-# Verify health has uptime
 check_json_field "GET /health -> uptime_seconds" "$API_URL/health" "uptime_seconds"
 
-# Verify SSE endpoint is reachable (just check HTTP status)
-printf "  %-40s " "GET /stream (SSE reachable)"
-sse_status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 3 ${AUTH_HEADER:+-H "$AUTH_HEADER"} "$API_URL/stream" 2>/dev/null || echo "000")
-if [ "$sse_status" = "200" ]; then
-    printf "${GREEN}OK${NC} (%s)\n" "$sse_status"
-    ((stage1_pass++))
-elif [ "$sse_status" = "000" ]; then
-    printf "${RED}UNREACHABLE${NC}\n"
-    ((stage1_fail++))
-else
-    printf "${YELLOW}UNEXPECTED${NC} (%s)\n" "$sse_status"
-    ((stage1_fail++))
-fi
+# SSE already verified by Stage 0 (verify-stack.sh), no need to recheck
 
 echo ""
 if [ "$stage1_fail" -gt 0 ]; then
