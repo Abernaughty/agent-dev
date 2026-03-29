@@ -38,11 +38,36 @@ pnpm build        # Production build
 pnpm check        # Type checking
 ```
 
+### Dev Environment (VS Code)
+
+Use the compound task to start both servers in parallel:
+
+- **Ctrl+Shift+P** > "Tasks: Run Task" > **Start Dev Environment**
+- Or run individually: "FastAPI Backend" / "SvelteKit Dashboard"
+
+### Smoke Test
+
+```bash
+# Full E2E smoke test (stages 0-2, makes real LLM calls ~$0.05-0.50)
+bash scripts/smoke-test.sh
+
+# Dry run -- stages 0-1 only (no LLM calls, no cost)
+bash scripts/smoke-test.sh --dry-run
+
+# Infrastructure health check only
+bash scripts/verify-stack.sh
+```
+
+**Canonical test prompt** (used by smoke-test.sh Stage 2):
+> Create a Python function called `greet` in a new file `greet.py` that takes a name parameter and returns a greeting string
+
+This prompt exercises the full Architect -> Lead Dev -> QA loop with minimal token cost. Use it when validating the pipeline after changes to the orchestrator, API, or dashboard wiring.
+
 ## Architecture
 
 ### Orchestrator (dev-suite/)
 
-LangGraph state machine orchestrating three agents in a plan → build → test loop:
+LangGraph state machine orchestrating three agents in a plan -> build -> test loop:
 
 - **Architect** (Gemini 2.5 Flash) — Creates structured JSON blueprints. Never writes code.
 - **Lead Dev** (Claude Sonnet 4) — Executes blueprints. Writes and refactors code in E2B sandboxes.
@@ -83,6 +108,8 @@ MCP server versions pinned in `dev-suite/mcp-config.json`. Filesystem MCP via np
 
 ```
 agent-dev/
+├── .vscode/
+│   └── tasks.json              # Compound launch (FastAPI + SvelteKit)
 ├── dev-suite/                  # Python orchestrator
 │   ├── src/
 │   │   ├── agents/             # Architect, Lead Dev, QA
@@ -104,6 +131,9 @@ agent-dev/
 │   ├── package.json
 │   ├── svelte.config.js
 │   └── .env.example
+├── scripts/
+│   ├── verify-stack.sh         # Infrastructure health check (14 checks)
+│   └── smoke-test.sh           # E2E smoke test (stages 0-2)
 ├── .github/                    # Issue templates, labels
 ├── CONTRIBUTING.md
 └── CLAUDE.md                   # This file
@@ -127,6 +157,6 @@ agent-dev/
 
 - **Repo**: Abernaughty/agent-dev
 - **Project board**: github.com/users/Abernaughty/projects/3
-- **PR workflow**: Create PR → Codex auto-reviews → fix if needed → merge
+- **PR workflow**: Create PR -> Codex auto-reviews -> fix if needed -> merge
 - **Labels**: 18 configured, 3 milestones (Phase 1/2/3)
 - **PAT**: Fine-grained for Issues/PRs/Contents; classic for Projects v2 GraphQL
