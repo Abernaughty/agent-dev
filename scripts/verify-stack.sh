@@ -30,13 +30,13 @@ check() {
     status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "$url" 2>/dev/null || echo "000")
     if [ "$status" = "$expect" ]; then
         printf "${GREEN}OK${NC} (%s)\n" "$status"
-        ((pass++))
+        pass=$((pass + 1))
     elif [ "$status" = "000" ]; then
         printf "${RED}UNREACHABLE${NC}\n"
-        ((fail++))
+        fail=$((fail + 1))
     else
         printf "${YELLOW}UNEXPECTED${NC} (got %s, expected %s)\n" "$status" "$expect"
-        ((fail++))
+        fail=$((fail + 1))
     fi
 }
 
@@ -46,16 +46,16 @@ check_json() {
     body=$(curl -s --max-time 5 "$url" 2>/dev/null || echo "")
     if [ -z "$body" ]; then
         printf "${RED}UNREACHABLE${NC}\n"
-        ((fail++))
+        fail=$((fail + 1))
         return
     fi
     result=$(echo "$body" | python3 -c "import sys,json; d=json.load(sys.stdin); print($jq_filter)" 2>/dev/null || echo "PARSE_ERROR")
     if [ "$result" != "PARSE_ERROR" ] && [ -n "$result" ]; then
         printf "${GREEN}OK${NC} (%s)\n" "$result"
-        ((pass++))
+        pass=$((pass + 1))
     else
         printf "${RED}FAILED${NC} (bad response)\n"
-        ((fail++))
+        fail=$((fail + 1))
     fi
 }
 
