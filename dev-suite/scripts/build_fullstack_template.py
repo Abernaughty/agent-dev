@@ -14,8 +14,15 @@ The script will:
 
 Estimated build time: 3-8 minutes.
 
-Note: The code-interpreter-v1 base image already includes Node.js 20 LTS
-(via NodeSource) and common system packages. We layer pnpm and ruff on top.
+Target versions (as of March 2026):
+  - Node.js 22 LTS (v22.22.2 'Jod') — supported through April 2027
+  - pnpm latest (via corepack)
+  - ruff latest (Python linter)
+
+Node.js 22 chosen over 24 because the code-interpreter base image uses
+NodeSource's Debian repo — upgrading the major NodeSource repo version
+(20 -> 22) is simpler than (20 -> 24) and 22 LTS is in active support.
+If you want Node 24, change setup_22.x to setup_24.x below.
 """
 
 import sys
@@ -34,17 +41,27 @@ except ImportError:
 def define_template():
     """Define the fullstack-dev sandbox template.
 
-    The code-interpreter-v1 base already includes:
+    The code-interpreter-v1 base includes:
       - Python 3.x + Jupyter + pip
-      - Node.js 20 LTS (via NodeSource)
+      - Node.js 20 LTS (via NodeSource apt repo)
       - curl, jq, gnupg, ca-certificates
 
-    We add: pnpm (via corepack as root), ruff, and verify everything.
+    We upgrade Node.js to 22 LTS, add pnpm + ruff, and verify.
+    All apt/system operations run as root.
     """
     template = (
         Template()
         # Base: E2B code-interpreter (Python 3.x + Jupyter + Node.js 20)
         .from_template("code-interpreter-v1")
+        # Upgrade Node.js 20 -> 22 LTS via NodeSource (must run as root)
+        .run_cmd(
+            "curl -fsSL https://deb.nodesource.com/setup_22.x | bash -",
+            user="root",
+        )
+        .run_cmd(
+            "apt-get install -y nodejs",
+            user="root",
+        )
         # pnpm via corepack (needs root for symlink into /usr/bin)
         .run_cmd([
             "corepack enable",
@@ -70,6 +87,7 @@ def build():
     print("Building fullstack-dev E2B sandbox template")
     print("=" * 60)
     print()
+    print("Target: Node.js 22 LTS + pnpm + ruff")
     print("This will take 3-8 minutes. Build logs will stream below.")
     print()
 
