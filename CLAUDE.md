@@ -63,6 +63,25 @@ bash scripts/verify-stack.sh
 
 This prompt exercises the full Architect -> Lead Dev -> QA loop with minimal token cost. Use it when validating the pipeline after changes to the orchestrator, API, or dashboard wiring.
 
+### E2B Sandbox Templates
+
+Custom templates give agents access to frontend toolchains (Node.js, pnpm, svelte-check) in addition to Python.
+
+```bash
+# Build the fullstack-dev template (run from repo root)
+e2b template build \
+  --name fullstack-dev \
+  --dockerfile dev-suite/sandbox-templates/fullstack-dev/e2b.Dockerfile \
+  --path .
+
+# Copy the resulting template ID to dev-suite/.env:
+# E2B_TEMPLATE_FULLSTACK=<template-id-from-build-output>
+```
+
+**Rebuild when:** `dashboard/package.json`, `dashboard/pnpm-lock.yaml`, or `dev-suite/pyproject.toml` changes. See `dev-suite/sandbox-templates/fullstack-dev/README.md` for full details.
+
+**Template routing:** The `select_template_for_files()` function in `e2b_runner.py` automatically selects the fullstack template when Blueprint target files include `.svelte`, `.ts`, `.js`, or `.css` extensions. Python-only tasks use the default bare sandbox.
+
 ## Architecture
 
 ### Orchestrator (dev-suite/)
@@ -77,7 +96,7 @@ Key modules:
 - `src/orchestrator.py` — LangGraph state machine with retry logic (max 3 attempts + token budget)
 - `src/agents/` — Agent definitions (architect.py, developer.py, qa.py)
 - `src/memory/` — Chroma vector store with L0/L1/L2 tiered metadata
-- `src/sandbox/` — E2B sandbox runner with structured JSON output wrappers
+- `src/sandbox/` — E2B sandbox runner with structured JSON output wrappers and template routing
 - `src/tools/` — MCP bridge (mcp_bridge.py), tool providers (provider.py, mcp_provider.py)
 - `src/api/` — FastAPI backend with REST + SSE endpoints, Bearer auth
 - `src/cli.py` — CLI interface
@@ -115,11 +134,15 @@ agent-dev/
 │   │   ├── agents/             # Architect, Lead Dev, QA
 │   │   ├── api/                # FastAPI backend (main, auth, events, models, state)
 │   │   ├── memory/             # Chroma store + seed data
-│   │   ├── sandbox/            # E2B runner
+│   │   ├── sandbox/            # E2B runner + template routing
 │   │   ├── tools/              # MCP bridge + providers
 │   │   ├── orchestrator.py
 │   │   ├── cli.py
 │   │   └── tracing.py
+│   ├── sandbox-templates/      # Custom E2B Dockerfiles
+│   │   └── fullstack-dev/      # Node.js + pnpm + SvelteKit
+│   │       ├── e2b.Dockerfile
+│   │       └── README.md
 │   ├── tests/                  # 12 test files
 │   ├── pyproject.toml
 │   ├── mcp-config.json
@@ -145,6 +168,8 @@ agent-dev/
 - `ANTHROPIC_API_KEY` — Claude API
 - `GOOGLE_API_KEY` — Gemini API
 - `E2B_API_KEY` — Sandbox execution
+- `E2B_TEMPLATE_DEFAULT` — Custom Python sandbox template ID (optional)
+- `E2B_TEMPLATE_FULLSTACK` — Fullstack sandbox template ID (Node.js + pnpm + SvelteKit)
 - `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` — Observability
 - `API_SECRET` — Dashboard API auth
 - `ARCHITECT_MODEL` / `DEVELOPER_MODEL` / `QA_MODEL` — Override agent models
