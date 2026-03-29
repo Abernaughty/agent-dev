@@ -15,14 +15,9 @@ The script will:
 Estimated build time: 3-8 minutes.
 
 Target versions (as of March 2026):
-  - Node.js 22 LTS (v22.22.2 'Jod') — supported through April 2027
+  - Node.js 24 LTS (v24.14.1 'Krypton') — supported through April 2028
   - pnpm latest (via corepack)
   - ruff latest (Python linter)
-
-Node.js 22 chosen over 24 because the code-interpreter base image uses
-NodeSource's Debian repo — upgrading the major NodeSource repo version
-(20 -> 22) is simpler than (20 -> 24) and 22 LTS is in active support.
-If you want Node 24, change setup_22.x to setup_24.x below.
 """
 
 import sys
@@ -46,16 +41,16 @@ def define_template():
       - Node.js 20 LTS (via NodeSource apt repo)
       - curl, jq, gnupg, ca-certificates
 
-    We upgrade Node.js to 22 LTS, add pnpm + ruff, and verify.
+    We upgrade Node.js to 24 LTS, add pnpm + ruff, and verify.
     All apt/system operations run as root.
     """
     template = (
         Template()
         # Base: E2B code-interpreter (Python 3.x + Jupyter + Node.js 20)
         .from_template("code-interpreter-v1")
-        # Upgrade Node.js 20 -> 22 LTS via NodeSource (must run as root)
+        # Upgrade Node.js 20 -> 24 LTS via NodeSource (must run as root)
         .run_cmd(
-            "curl -fsSL https://deb.nodesource.com/setup_22.x | bash -",
+            "curl -fsSL https://deb.nodesource.com/setup_24.x | bash -",
             user="root",
         )
         .run_cmd(
@@ -87,7 +82,7 @@ def build():
     print("Building fullstack-dev E2B sandbox template")
     print("=" * 60)
     print()
-    print("Target: Node.js 22 LTS + pnpm + ruff")
+    print("Target: Node.js 24 LTS + pnpm + ruff")
     print("This will take 3-8 minutes. Build logs will stream below.")
     print()
 
