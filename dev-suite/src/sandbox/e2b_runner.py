@@ -6,6 +6,11 @@ output and returns only structured JSON results.
 Role-specific profiles:
   - Locked-Down: Dev/QA (whitelisted domains, secrets injected)
   - Permissive: Research (open egress, zero secrets)
+
+Template support:
+  - Default: bare Python (e2b-code-interpreter base image)
+  - Fullstack: Python + Node.js 22 + pnpm + SvelteKit toolchain
+  - Templates configured via E2B_TEMPLATE_DEFAULT / E2B_TEMPLATE_FULLSTACK env vars
 """
 
 import os
@@ -16,7 +21,7 @@ from e2b_code_interpreter import Sandbox
 from pydantic import BaseModel
 
 
-# ── Sandbox Profiles ──
+# -- Sandbox Profiles --
 
 class SandboxProfile(str, Enum):
     """Sandbox security profiles.
@@ -28,12 +33,12 @@ class SandboxProfile(str, Enum):
     PERMISSIVE = "permissive"
 
 
-# ── Structured Output ──
+# -- Structured Output --
 
 class SandboxResult(BaseModel):
     """Structured output from sandbox execution.
 
-    This is ALL the agent sees — never raw terminal output.
+    This is ALL the agent sees - never raw terminal output.
     """
     exit_code: int
     tests_passed: int | None = None
@@ -44,14 +49,16 @@ class SandboxResult(BaseModel):
     timed_out: bool = False
 
 
-# ── Secret Patterns for Scanning ──
+# -- Secret Patterns for Scanning --
 
 SECRET_PATTERNS = [
     re.compile(r"sk-ant-[a-zA-Z0-9_-]{20,}"),          # Anthropic
     re.compile(r"sk-[a-zA-Z0-9]{20,}"),                 # OpenAI-style
     re.compile(r"AIza[a-zA-Z0-9_-]{35}"),               # Google
     re.compile(r"ghp_[a-zA-Z0-9]{36}"),                 # GitHub PAT
+    re.compile(r"ghs_[a-zA-Z0-9]{36}"),                 # GitHub App token
     re.compile(r"e2b_[a-zA-Z0-9]{20,}"),                # E2B
+    re.compile(r"npm_[a-zA-Z0-9]{36}"),                 # npm token
     re.compile(r"(?i)(password|secret|token|key)\s*[=:]\s*\S+"),  # Generic
 ]
 
@@ -67,7 +74,7 @@ def _scan_for_secrets(text: str) -> str:
 def _parse_test_output(output: str) -> dict:
     """Extract test pass/fail counts from common test runner output.
 
-    Supports pytest, unittest, and jest-style output.
+    Supports pytest, unittest, jest-style, and svelte-check output.
     """
     result = {"tests_passed": None, "tests_failed": None}
 
@@ -96,6 +103,22 @@ def _parse_test_output(output: str) -> dict:
         result["tests_failed"] = failed
         return result
 
+    # svelte-check: "svelte-check found 0 errors and 0 warnings"
+    svelte_match = re.search(r"svelte-check found (\d+) error", output)
+    if svelte_match:
+        errors = int(svelte_match.group(1))
+        result["tests_failed"] = errors
+        result["tests_passed"] = 1 if errors == 0 else 0
+        return result
+
+    # tsc: "Found 0 errors." or "Found 3 errors."
+    tsc_match = re.search(r"Found (\d+) error", output)
+    if tsc_match:
+        errors = int(tsc_match.group(1))
+        result["tests_failed"] = errors
+        result["tests_passed"] = 1 if errors == 0 else 0
+        return result
+
     return result
 
 
@@ -113,6 +136,12 @@ def _extract_errors(output: str) -> list[str]:
         if m not in errors:
             errors.extend(js_matches[:10])
             break
+
+    # Svelte/TS compilation errors
+    svelte_matches = re.findall(r"(Error: [^\n]*)", output)
+    for m in svelte_matches:
+        if m not in errors:
+            errors.append(m)
 
     return errors[:10]  # Hard cap
 
@@ -141,7 +170,66 @@ def _extract_execution_error(error_obj) -> str:
     return str(error_obj)
 
 
-# ── Runner ──
+# -- Template Configuration --
+
+def _get_template_id(template: str | None) -> str | None:
+    """Resolve a template name to an E2B template ID.
+
+    Template names map to environment variables:
+      - "fullstack" -> E2B_TEMPLATE_FULLSTACK
+      - "default"   -> E2B_TEMPLATE_DEFAULT
+      - None        -> E2B_TEMPLATE_DEFAULT (if set), else bare E2B default
+
+    If the value looks like a raw template ID (no env var mapping),
+    it's used directly.
+    """
+    if template is None:
+        return os.getenv("E2B_TEMPLATE_DEFAULT") or None
+
+    template_lower = template.lower()
+
+    env_map = {
+        "fullstack": "E2B_TEMPLATE_FULLSTACK",
+        "fullstack-dev": "E2B_TEMPLATE_FULLSTACK",
+        "default": "E2B_TEMPLATE_DEFAULT",
+        "python": "E2B_TEMPLATE_DEFAULT",
+        "python-dev": "E2B_TEMPLATE_DEFAULT",
+    }
+
+    if template_lower in env_map:
+        return os.getenv(env_map[template_lower]) or None
+
+    # Treat as a raw template ID
+    return template
+
+
+# -- File-Type to Template Routing --
+
+FRONTEND_EXTENSIONS = {".svelte", ".ts", ".tsx", ".js", ".jsx", ".css", ".vue"}
+PYTHON_EXTENSIONS = {".py", ".pyi"}
+
+
+def select_template_for_files(target_files: list[str]) -> str | None:
+    """Select the appropriate sandbox template based on target file types.
+
+    Returns:
+        Template name ("fullstack" or None for default Python).
+        Returns None if no files are provided or all files are Python-only.
+    """
+    if not target_files:
+        return None
+
+    has_frontend = False
+    for filepath in target_files:
+        _, ext = os.path.splitext(filepath.lower())
+        if ext in FRONTEND_EXTENSIONS:
+            has_frontend = True
+            break
+
+    return "fullstack" if has_frontend else None
+
+
+# -- Runner --
 
 class E2BRunner:
     """Execute code in E2B sandboxes with structured output.
@@ -156,6 +244,9 @@ class E2BRunner:
         runner = E2BRunner()
         result = runner.run("print('hello')")
         print(result.output_summary)
+
+        # With a custom template:
+        result = runner.run("console.log('hi')", template="fullstack")
     """
 
     def __init__(self, api_key: str | None = None, default_timeout: int = 30):
@@ -171,6 +262,7 @@ class E2BRunner:
         profile: SandboxProfile = SandboxProfile.LOCKED,
         env_vars: dict[str, str] | None = None,
         timeout: int | None = None,
+        template: str | None = None,
     ) -> SandboxResult:
         """Execute code in a sandbox and return structured results.
 
@@ -179,6 +271,10 @@ class E2BRunner:
             profile: Security profile (LOCKED or PERMISSIVE).
             env_vars: Environment variables to inject (secrets for LOCKED only).
             timeout: Execution timeout in seconds.
+            template: Sandbox template name or ID.
+                      "fullstack" -> E2B_TEMPLATE_FULLSTACK env var.
+                      None -> E2B_TEMPLATE_DEFAULT or bare E2B default.
+                      Any other string -> used as raw template ID.
 
         Returns:
             SandboxResult with structured output. Never raw stdout/stderr.
@@ -189,10 +285,17 @@ class E2BRunner:
         if profile == SandboxProfile.PERMISSIVE:
             env_vars = None
 
+        # Resolve template name to ID
+        template_id = _get_template_id(template)
+
         try:
             # E2B v2 SDK: Sandbox.create() is the public factory method.
             # Using it as a context manager auto-kills the sandbox on exit.
-            with Sandbox.create() as sbx:
+            create_kwargs = {}
+            if template_id:
+                create_kwargs["template"] = template_id
+
+            with Sandbox.create(**create_kwargs) as sbx:
                 # Inject env vars if provided
                 if env_vars:
                     env_setup = "\n".join(
@@ -265,6 +368,7 @@ class E2BRunner:
         project_files: dict[str, str] | None = None,
         env_vars: dict[str, str] | None = None,
         timeout: int = 60,
+        template: str | None = None,
     ) -> SandboxResult:
         """Run a test suite in the sandbox.
 
@@ -273,6 +377,7 @@ class E2BRunner:
             project_files: Dict of {filepath: content} to write before testing.
             env_vars: Secrets to inject.
             timeout: Test timeout in seconds.
+            template: Sandbox template name or ID (e.g., "fullstack" for Node.js tasks).
         """
         # Build code that writes files then runs tests
         setup_code = ""
@@ -298,4 +403,10 @@ if result.stderr:
 """
 
         full_code = setup_code + run_code
-        return self.run(full_code, profile=SandboxProfile.LOCKED, env_vars=env_vars, timeout=timeout + 10)
+        return self.run(
+            full_code,
+            profile=SandboxProfile.LOCKED,
+            env_vars=env_vars,
+            timeout=timeout + 10,
+            template=template,
+        )
