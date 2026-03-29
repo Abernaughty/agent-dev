@@ -40,6 +40,32 @@ check() {
     fi
 }
 
+# SSE endpoints stream indefinitely, so curl -o /dev/null -w %{http_code}
+# appends the status code to the output bytes (e.g. "200000" instead of "200").
+# Use --head-only response code extraction: write headers to a temp file,
+# kill curl after 2s, and parse the status from the header.
+check_sse() {
+    local label="$1" url="$2"
+    printf "  %-40s " "$label"
+    # Use -D to dump headers, --max-time 2 to cut the stream short
+    local tmpheaders
+    tmpheaders=$(mktemp)
+    curl -s -D "$tmpheaders" --max-time 2 "$url" >/dev/null 2>/dev/null || true
+    local code
+    code=$(head -1 "$tmpheaders" 2>/dev/null | grep -oP '\d{3}' | head -1 || echo "000")
+    rm -f "$tmpheaders"
+    if [ "$code" = "200" ]; then
+        printf "${GREEN}OK${NC} (SSE %s)\n" "$code"
+        pass=$((pass + 1))
+    elif [ -z "$code" ] || [ "$code" = "000" ]; then
+        printf "${RED}UNREACHABLE${NC}\n"
+        fail=$((fail + 1))
+    else
+        printf "${YELLOW}UNEXPECTED${NC} (got %s, expected 200)\n" "$code"
+        fail=$((fail + 1))
+    fi
+}
+
 check_json() {
     local label="$1" url="$2" jq_filter="$3"
     printf "  %-40s " "$label"
@@ -75,7 +101,7 @@ if [ "${1:-}" != "--dash-only" ]; then
     check "Memory endpoint" "$API_URL/memory"
     check "PRs endpoint" "$API_URL/prs"
     check "OpenAPI docs" "$API_URL/docs"
-    check "SSE stream (reachable)" "$API_URL/stream"
+    check_sse "SSE stream (reachable)" "$API_URL/stream"
 fi
 
 # --- Dashboard checks ---
@@ -88,7 +114,7 @@ if [ "${1:-}" != "--api-only" ]; then
     check "Proxy: /api/tasks" "$DASH_URL/api/tasks"
     check "Proxy: /api/memory" "$DASH_URL/api/memory"
     check "Proxy: /api/prs" "$DASH_URL/api/prs"
-    check "Proxy: /api/stream" "$DASH_URL/api/stream"
+    check_sse "Proxy: /api/stream" "$DASH_URL/api/stream"
 fi
 
 # --- Summary ---
