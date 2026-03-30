@@ -20,12 +20,14 @@ Target versions (as of March 2026):
   - ruff latest (Python linter)
 
 Architecture note:
-  The code-interpreter-v1 base runs a FastAPI server on port 49999 that
-  proxies to a Jupyter server on port 8888. The startup script at
-  /root/.jupyter/start-up.sh handles: starting Jupyter, waiting for it,
-  creating a default kernel, then starting the FastAPI server.
-  After a Node.js upgrade, we must re-run this startup script (not
-  systemctl) because the IJavaScript kernel and npm paths may have changed.
+  The code-interpreter-v1 template snapshot runs a systemd service called
+  'jupyter' which manages:
+    1. Jupyter server on port 8888
+    2. A default Python kernel session
+    3. FastAPI proxy server (Uvicorn) on port 49999
+  Port 49999 is the FastAPI health endpoint, not Jupyter directly.
+  When using from_template(), we inherit the snapshot's systemd config —
+  the Docker-era /root/.jupyter/start-up.sh does NOT exist in the snapshot.
 """
 
 import sys
@@ -44,16 +46,23 @@ except ImportError:
 def define_template():
     """Define the fullstack-dev sandbox template.
 
-    The code-interpreter-v1 base includes:
+    The code-interpreter-v1 template snapshot includes:
       - Python 3.x + Jupyter (port 8888) + FastAPI proxy (port 49999)
       - Node.js 20 LTS (via NodeSource apt repo)
-      - IJavaScript, Deno, R, Java kernels
+      - systemd service 'jupyter' managing the full startup chain
       - curl, jq, gnupg, ca-certificates
-      - Startup: /root/.jupyter/start-up.sh (Jupyter -> kernel -> FastAPI)
 
-    We upgrade Node.js to 24 LTS, add pnpm + ruff, then re-set the
-    start command to use the actual startup script (not systemctl).
-    All apt/system operations run as root.
+    We upgrade Node.js to 24 LTS, add pnpm + ruff, and override the
+    start command with the correct ready check.
+
+    Previous failures and what we learned:
+      - Attempt 1: No set_start_cmd -> inherited 'systemctl start jupyter'
+        with 'ss -tuln | grep :49999' ready check -> timed out after 10min
+      - Attempt 2: set_start_cmd('/root/.jupyter/start-up.sh') ->
+        'command not found' because that path exists in the Docker image,
+        not in the template snapshot
+      - This attempt: 'systemctl start jupyter' (correct for snapshot) +
+        wait_for_url health check (correct for FastAPI on 49999)
     """
     template = (
         Template()
@@ -73,11 +82,6 @@ def define_template():
             "corepack enable",
             "corepack prepare pnpm@latest --activate",
         ], user="root")
-        # Reinstall IJavaScript kernel for Node 24 (old kernel linked to Node 20)
-        .run_cmd(
-            "npm rebuild --prefix /usr/local/lib/node_modules || true",
-            user="root",
-        )
         # Python linting tools
         .pip_install(["ruff"])
         # Verify installations
@@ -88,16 +92,16 @@ def define_template():
             "ruff --version",
             "echo 'fullstack-dev template ready'",
         ])
-        # Start command: use the actual startup script, NOT systemctl.
-        # The script at /root/.jupyter/start-up.sh does:
-        #   1. Start Jupyter on port 8888
-        #   2. Wait for Jupyter to be ready
-        #   3. Create a default Python kernel session
-        #   4. Start FastAPI (Uvicorn) on port 49999
-        # Ready check: wait for FastAPI health endpoint to respond 200.
-        # Per E2B docs: https://e2b.dev/docs/troubleshooting/templates/49999-port-not-open
+        # Start command: systemctl is the correct mechanism for template
+        # snapshots (from_template). The /root/.jupyter/start-up.sh path
+        # only exists in the Docker image, not the snapshot.
+        #
+        # Ready check: wait_for_url on the FastAPI health endpoint.
+        # Previous failure used wait_for_port (ss -tuln) which timed out.
+        # The health endpoint actually confirms the full stack is up
+        # (FastAPI -> Jupyter -> kernel).
         .set_start_cmd(
-            "sudo /root/.jupyter/start-up.sh",
+            "sudo systemctl start jupyter",
             wait_for_url("http://localhost:49999/health"),
         )
     )
