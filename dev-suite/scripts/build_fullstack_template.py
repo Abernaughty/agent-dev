@@ -27,7 +27,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 try:
-    from e2b import Template, default_build_logger
+    from e2b import Template, default_build_logger, wait_for_port
 except ImportError:
     print("ERROR: e2b SDK not found. Run: uv sync")
     sys.exit(1)
@@ -40,8 +40,10 @@ def define_template():
       - Python 3.x + Jupyter + pip
       - Node.js 20 LTS (via NodeSource apt repo)
       - curl, jq, gnupg, ca-certificates
+      - Jupyter server on port 49999 (start command + ready check)
 
-    We upgrade Node.js to 24 LTS, add pnpm + ruff, and verify.
+    We upgrade Node.js to 24 LTS, add pnpm + ruff, then re-set the
+    start command so Jupyter restarts cleanly after the Node upgrade.
     All apt/system operations run as root.
     """
     template = (
@@ -72,6 +74,14 @@ def define_template():
             "ruff --version",
             "echo 'fullstack-dev template ready'",
         ])
+        # Re-set the start command so Jupyter restarts after Node upgrade.
+        # The base template's start command (systemctl start jupyter) runs
+        # during finalize, but upgrading Node can break the Jupyter kernel.
+        # This ensures the snapshot captures a running Jupyter server.
+        .set_start_cmd(
+            "sudo systemctl start jupyter",
+            wait_for_port(49999),
+        )
     )
     return template
 
