@@ -18,6 +18,14 @@ Target versions (as of March 2026):
   - Node.js 24 LTS (v24.14.1 'Krypton') — supported through April 2028
   - pnpm latest (via corepack)
   - ruff latest (Python linter)
+
+Architecture note:
+  The code-interpreter-v1 base runs a FastAPI server on port 49999 that
+  proxies to a Jupyter server on port 8888. The startup script at
+  /root/.jupyter/start-up.sh handles: starting Jupyter, waiting for it,
+  creating a default kernel, then starting the FastAPI server.
+  After a Node.js upgrade, we must re-run this startup script (not
+  systemctl) because the IJavaScript kernel and npm paths may have changed.
 """
 
 import sys
@@ -27,7 +35,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 try:
-    from e2b import Template, default_build_logger, wait_for_port
+    from e2b import Template, default_build_logger, wait_for_url
 except ImportError:
     print("ERROR: e2b SDK not found. Run: uv sync")
     sys.exit(1)
@@ -37,13 +45,14 @@ def define_template():
     """Define the fullstack-dev sandbox template.
 
     The code-interpreter-v1 base includes:
-      - Python 3.x + Jupyter + pip
+      - Python 3.x + Jupyter (port 8888) + FastAPI proxy (port 49999)
       - Node.js 20 LTS (via NodeSource apt repo)
+      - IJavaScript, Deno, R, Java kernels
       - curl, jq, gnupg, ca-certificates
-      - Jupyter server on port 49999 (start command + ready check)
+      - Startup: /root/.jupyter/start-up.sh (Jupyter -> kernel -> FastAPI)
 
     We upgrade Node.js to 24 LTS, add pnpm + ruff, then re-set the
-    start command so Jupyter restarts cleanly after the Node upgrade.
+    start command to use the actual startup script (not systemctl).
     All apt/system operations run as root.
     """
     template = (
@@ -64,6 +73,11 @@ def define_template():
             "corepack enable",
             "corepack prepare pnpm@latest --activate",
         ], user="root")
+        # Reinstall IJavaScript kernel for Node 24 (old kernel linked to Node 20)
+        .run_cmd(
+            "npm rebuild --prefix /usr/local/lib/node_modules || true",
+            user="root",
+        )
         # Python linting tools
         .pip_install(["ruff"])
         # Verify installations
@@ -74,13 +88,17 @@ def define_template():
             "ruff --version",
             "echo 'fullstack-dev template ready'",
         ])
-        # Re-set the start command so Jupyter restarts after Node upgrade.
-        # The base template's start command (systemctl start jupyter) runs
-        # during finalize, but upgrading Node can break the Jupyter kernel.
-        # This ensures the snapshot captures a running Jupyter server.
+        # Start command: use the actual startup script, NOT systemctl.
+        # The script at /root/.jupyter/start-up.sh does:
+        #   1. Start Jupyter on port 8888
+        #   2. Wait for Jupyter to be ready
+        #   3. Create a default Python kernel session
+        #   4. Start FastAPI (Uvicorn) on port 49999
+        # Ready check: wait for FastAPI health endpoint to respond 200.
+        # Per E2B docs: https://e2b.dev/docs/troubleshooting/templates/49999-port-not-open
         .set_start_cmd(
-            "sudo systemctl start jupyter",
-            wait_for_port(49999),
+            "sudo /root/.jupyter/start-up.sh",
+            wait_for_url("http://localhost:49999/health"),
         )
     )
     return template
