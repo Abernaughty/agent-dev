@@ -17,12 +17,9 @@ Estimated build time: 3-8 minutes.
 Target versions (as of March 2026):
   - Node.js 24 LTS (v24.14.1 'Krypton') — supported through April 2028
   - pnpm 10.33+ (via corepack)
-  - Python 3.x + pip + ruff (Python linter)
+  - Python 3.x + pip + ruff + pytest
 
 Built from ubuntu:24.04 Docker image (not code-interpreter-v1).
-The code-interpreter template's Jupyter/FastAPI stack (port 49999) is
-incompatible with Node.js 24 due to IJavaScript kernel ABI mismatch.
-We don't need Jupyter — just a shell with Node.js, pnpm, Python, ruff.
 """
 
 import sys
@@ -41,14 +38,12 @@ except ImportError:
 def define_template():
     """Define the fullstack-dev sandbox template.
 
-    Built from ubuntu:24.04 Docker image with:
-      - Node.js 24 LTS via NodeSource
-      - pnpm via corepack
-      - Python 3 + pip + ruff + pytest
-      - Common tools (curl, jq, git, gnupg, ca-certificates)
+    Built from ubuntu:24.04 with Node.js 24 LTS, pnpm, Python 3, ruff, pytest.
+    No Jupyter, no code-interpreter overhead.
 
-    No Jupyter, no code-interpreter overhead. Clean and fast.
-    Uses from_image() which is available in all SDK versions.
+    Note: Ubuntu 24.04 uses PEP 668 (externally managed environment) so
+    pip_install() fails without --break-system-packages. We use run_cmd()
+    with the flag instead.
     """
     template = (
         Template()
@@ -69,14 +64,18 @@ def define_template():
             "corepack enable",
             "corepack prepare pnpm@latest --activate",
         ], user="root")
-        # Python linting and test tools
-        .pip_install(["ruff", "pytest"])
+        # Python tools — must use --break-system-packages on Ubuntu 24.04 (PEP 668)
+        .run_cmd(
+            "pip3 install --break-system-packages ruff pytest",
+            user="root",
+        )
         # Verify installations
         .run_cmd([
             "node --version",
             "pnpm --version",
             "python3 --version",
             "ruff --version",
+            "pytest --version",
             "echo 'fullstack-dev template ready'",
         ])
     )
