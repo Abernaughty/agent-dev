@@ -1,6 +1,6 @@
 """Async event bus for real-time SSE streaming to the dashboard.
 
-Issue #35: SSE Event System — Real-Time Task Streaming
+Issue #35: SSE Event System -- Real-Time Task Streaming
 
 The EventBus is a singleton that LangGraph nodes publish events to.
 Connected SSE clients each get their own asyncio.Queue for fan-out.
@@ -14,7 +14,7 @@ Usage (publishing):
         data={"agent": "dev", "status": "coding", "task_id": "auth-rls"},
     ))
 
-Usage (subscribing — handled by the /stream endpoint):
+Usage (subscribing -- handled by the /stream endpoint):
     queue = event_bus.subscribe()
     try:
         while True:
@@ -48,6 +48,7 @@ class EventType(str, Enum):
     TASK_COMPLETE = "task_complete"
     MEMORY_ADDED = "memory_added"
     LOG_LINE = "log_line"
+    QA_ESCALATION = "qa_escalation"
 
 
 class SSEEvent(BaseModel):
@@ -133,7 +134,7 @@ class EventBus:
                 delivered += 1
             except asyncio.QueueFull:
                 logger.warning(
-                    "SSE client queue full — dropping event %s (counter=%d)",
+                    "SSE client queue full -- dropping event %s (counter=%d)",
                     event.type.value,
                     self._event_counter,
                 )
@@ -156,6 +157,6 @@ class EventBus:
         logger.info("EventBus cleared all subscribers")
 
 
-# ── Singleton ──
+# -- Singleton --
 
 event_bus = EventBus()
