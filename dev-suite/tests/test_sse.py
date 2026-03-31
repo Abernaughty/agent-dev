@@ -1,9 +1,10 @@
-"""Tests for Issue #35: SSE Event System — Real-Time Task Streaming.
+"""Tests for Issue #35: SSE Event System - Real-Time Task Streaming.
 
 Covers:
 - EventBus unit tests (subscribe, unsubscribe, publish, fan-out, queue full)
 - SSE /stream endpoint integration tests (auth, events, heartbeat, cleanup)
 - StateManager event emission on mutations
+
 """
 
 from __future__ import annotations
@@ -124,12 +125,12 @@ class TestEventBus:
         assert delivered == 0
 
     async def test_queue_full_drops_event_gracefully(self, bus: EventBus):
-        """When a client's queue is full, the event is dropped — not blocked."""
+        """When a client's queue is full, the event is dropped - not blocked."""
         queue = await bus.subscribe()
         # Fill the queue to capacity (max_queue_size=8)
         for i in range(8):
             await bus.publish(SSEEvent(type=EventType.LOG_LINE, data={"i": i}))
-        # Queue is now full — next publish should drop
+        # Queue is now full - next publish should drop
         delivered = await bus.publish(SSEEvent(type=EventType.LOG_LINE, data={"overflow": True}))
         assert delivered == 0
         assert queue.qsize() == 8
@@ -236,12 +237,12 @@ class TestStreamEndpoint:
             pass
 
     async def test_published_event_reaches_subscriber_via_bus(self):
-        """Verify the full data path: publish → EventBus → subscriber queue.
+        """Verify the full data path: publish -> EventBus -> subscriber queue.
 
         Note: Testing the actual HTTP SSE byte stream requires a real
         server (uvicorn), because httpx's ASGITransport does not stream
         response bytes incrementally. The EventBus fan-out is the core
-        mechanism — this test validates it directly.
+        mechanism - this test validates it directly.
 
         A live integration test (test with `--run-integration`) can be
         added once the dev server is running.
@@ -273,7 +274,7 @@ class TestStreamEndpoint:
 
     async def test_subscriber_cleanup_on_disconnect(self):
         """When a client disconnects, its queue should be removed."""
-        # Direct EventBus test — subscribe, then unsubscribe
+        # Direct EventBus test - subscribe, then unsubscribe
         initial = event_bus.subscriber_count
         queue = await event_bus.subscribe()
         assert event_bus.subscriber_count == initial + 1
@@ -282,7 +283,7 @@ class TestStreamEndpoint:
 
 
 # ============================================================
-# Health endpoint — sse_subscribers field
+# Health endpoint - sse_subscribers field
 # ============================================================
 
 
@@ -345,6 +346,18 @@ class TestStateManagerEmission:
             await event_bus.unsubscribe(queue)
 
     async def test_approve_memory_emits_memory_added(self):
+        """Seed a memory entry, approve it, verify SSE event fires."""
+        import time
+        from src.api.models import MemoryEntryResponse, MemoryStatus, MemoryTierEnum
+
+        # Seed a pending entry into state_manager so approve_memory finds it
+        state_manager._memory["mem-1"] = MemoryEntryResponse(
+            id="mem-1", content="Auth requires RLS on public tables",
+            tier=MemoryTierEnum.L0_DISCOVERED, module="auth",
+            source_agent="Architect", verified=False,
+            status=MemoryStatus.PENDING, created_at=time.time(),
+        )
+
         queue = await event_bus.subscribe()
         try:
             entry = await state_manager.approve_memory("mem-1")
@@ -356,8 +369,22 @@ class TestStateManagerEmission:
             assert event.data["status"] == "approved"
         finally:
             await event_bus.unsubscribe(queue)
+            state_manager._memory.pop("mem-1", None)
+            state_manager._audit_log.clear()
 
     async def test_reject_memory_emits_memory_added(self):
+        """Seed a memory entry, reject it, verify SSE event fires."""
+        import time
+        from src.api.models import MemoryEntryResponse, MemoryStatus, MemoryTierEnum
+
+        # Seed a pending entry into state_manager so reject_memory finds it
+        state_manager._memory["mem-3"] = MemoryEntryResponse(
+            id="mem-3", content="Rate limiter must wrap /api/* routes",
+            tier=MemoryTierEnum.L0_DISCOVERED, module="middleware",
+            source_agent="QA Agent", verified=False,
+            status=MemoryStatus.PENDING, created_at=time.time(),
+        )
+
         queue = await event_bus.subscribe()
         try:
             entry = await state_manager.reject_memory("mem-3")
@@ -369,6 +396,8 @@ class TestStateManagerEmission:
             assert event.data["status"] == "rejected"
         finally:
             await event_bus.unsubscribe(queue)
+            state_manager._memory.pop("mem-3", None)
+            state_manager._audit_log.clear()
 
     async def test_update_agent_status_emits_event(self):
         from src.api.models import AgentStatus

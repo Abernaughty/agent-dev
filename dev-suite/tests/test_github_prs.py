@@ -300,13 +300,14 @@ class TestStateManagerDelegation:
             result = await sm.get_live_prs()
             assert len(result) == 1 and result[0].number == 52
 
-    async def test_get_live_prs_fallback_no_token(self):
+    async def test_get_live_prs_no_token_returns_empty(self):
+        """Without GITHUB_TOKEN, get_live_prs returns an empty list (no mock fallback)."""
         from src.api.state import StateManager
         sm = StateManager()
         with patch("src.api.github_prs.github_pr_provider") as mock_provider:
             mock_provider.configured = False
             result = await sm.get_live_prs()
-            assert len(result) == 2
+            assert len(result) == 0
 
 
 class TestAPIEndpoints:
