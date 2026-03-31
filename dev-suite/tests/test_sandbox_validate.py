@@ -1,7 +1,7 @@
 """Tests for the sandbox_validate orchestrator node.
 
 These tests validate the sandbox_validate node behavior with mocked
-E2B runner \u2014 no real sandbox needed. Tests cover:
+E2B runner — no real sandbox needed. Tests cover:
   - Template selection from blueprint target_files
   - Validation command execution
   - Graceful skip when E2B_API_KEY is missing
@@ -146,7 +146,7 @@ class TestSandboxValidateNode:
         assert any("error" in t.lower() or "failed" in t.lower() for t in result["trace"])
 
     def test_failed_validation_still_continues(self):
-        """Sandbox validation failure should not block QA \u2014 it adds context."""
+        """Sandbox validation failure should not block QA — it adds context."""
         state = _make_state(["src/main.py"])
 
         with patch("src.orchestrator._run_sandbox_validation") as mock_run:
@@ -162,7 +162,7 @@ class TestSandboxValidateNode:
         # Node should still return the result even though tests failed
         assert result["sandbox_result"] is not None
         assert result["sandbox_result"].tests_failed == 2
-        # Status should not change \u2014 QA decides pass/fail
+        # Status should not change — QA decides pass/fail
         assert "status" not in result or result.get("status") == WorkflowStatus.REVIEWING
 
     def test_trace_includes_validation_plan(self):
@@ -193,23 +193,44 @@ class TestSandboxValidateGraphIntegration:
 
         graph = build_graph()
         compiled = graph.compile()
-        # LangGraph stores node names \u2014 check sandbox_validate exists
+        # LangGraph stores node names — check sandbox_validate exists
         node_names = set(compiled.get_graph().nodes.keys())
         assert "sandbox_validate" in node_names
 
-    def test_graph_edge_developer_to_sandbox(self):
-        """developer should connect to sandbox_validate."""
+    def test_graph_has_apply_code_node(self):
+        """The compiled graph should include apply_code."""
+        from src.orchestrator import build_graph
+
+        graph = build_graph()
+        compiled = graph.compile()
+        node_names = set(compiled.get_graph().nodes.keys())
+        assert "apply_code" in node_names
+
+    def test_graph_edge_developer_to_apply_code(self):
+        """developer should connect to apply_code (not directly to sandbox)."""
         from src.orchestrator import build_graph
 
         graph = build_graph()
         compiled = graph.compile()
         graph_data = compiled.get_graph()
-        # Check edges: developer -> sandbox_validate
         developer_targets = {
             e.target for e in graph_data.edges
             if e.source == "developer"
         }
-        assert "sandbox_validate" in developer_targets
+        assert "apply_code" in developer_targets
+
+    def test_graph_edge_apply_code_to_sandbox(self):
+        """apply_code should connect to sandbox_validate."""
+        from src.orchestrator import build_graph
+
+        graph = build_graph()
+        compiled = graph.compile()
+        graph_data = compiled.get_graph()
+        apply_code_targets = {
+            e.target for e in graph_data.edges
+            if e.source == "apply_code"
+        }
+        assert "sandbox_validate" in apply_code_targets
 
     def test_graph_edge_sandbox_to_qa(self):
         """sandbox_validate should connect to qa."""
