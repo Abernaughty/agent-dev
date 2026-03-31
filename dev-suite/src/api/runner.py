@@ -273,7 +273,7 @@ class TaskRunner:
                     await self._emit_log(f"[sandbox:locked] Validation passed (exit={exit_code})")
                 else:
                     action = f"Sandbox: {failed or '?'} test(s) failed"
-                    await self._emit_log(f"[sandbox:locked] Validation: {passed} passed, {failed} failed")
+                    await self._emit_log(f"[sandbox:locked] Validation: {passed or '?'} passed, {failed or '?'} failed")
                 task.timeline.append(TimelineEvent(
                     time=_now_str(), agent="qa", action=action, type="exec",
                 ))
