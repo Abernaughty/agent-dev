@@ -6,6 +6,25 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A Stateful AI Workforce — a LangGraph-orchestrated team of three AI agents (Architect, Lead Dev, QA) with a SvelteKit dashboard for real-time monitoring. Agents collaborate via structured JSON blueprints, execute code in E2B sandboxes, and persist knowledge through Chroma tiered memory.
 
+## Current State (Sprint 4)
+
+**Phase 2 Sprint 4** — Agent tool wiring sprint. Milestone: 8 open / 22 closed.
+
+### Critical Gap Being Addressed
+Agents are "brains in jars" — they produce text output but cannot interact with the filesystem, run tests, or apply code changes. The ToolProvider infrastructure (ABC, LocalToolProvider, MCPToolProvider, mcp_bridge) is fully built but never wired into the orchestrator's agent nodes. Sprint 4 bridges this gap.
+
+### Sprint 4 Issues (in order)
+1. **#79 (P1)** — Code application pipeline: parse Dev's `# --- FILE:` output, write to workspace, load into E2B sandbox
+2. **#80 (P1)** — Agent tool binding: `bind_tools()` on Dev/QA LLMs + tool execution loop in LangGraph
+3. **#81 (P2)** — Fix 7 skipped tests (sandbox creds, SSE fixtures, removed mock fallback)
+
+### Backlog
+- #58 (P2) — Multi-file task decomposition
+- #20 (P2) — Cost alerting thresholds
+- #21 (P3) — SecretsProvider ABC (Doppler)
+- #18 (P3) — Project Context MCP
+- #23 (P3) — CI/CD Pipeline MCP
+
 ## Commands
 
 ### Orchestrator (dev-suite)
@@ -132,7 +151,7 @@ agent-dev/
 ├── dev-suite/                  # Python orchestrator
 │   ├── src/
 │   │   ├── agents/             # Architect, Lead Dev, QA
-│   │   ├── api/                # FastAPI backend (main, auth, events, models, state)
+│   │   ├── api/                # FastAPI backend (main, auth, events, models, state, runner)
 │   │   ├── memory/             # Chroma store + seed data
 │   │   ├── sandbox/            # E2B runner + template routing
 │   │   ├── tools/              # MCP bridge + providers
@@ -143,14 +162,15 @@ agent-dev/
 │   │   └── fullstack-dev/      # Node.js + pnpm + SvelteKit
 │   │       ├── e2b.Dockerfile
 │   │       └── README.md
-│   ├── tests/                  # 12 test files
+│   ├── scripts/                # Build scripts (build_fullstack_template.py)
+│   ├── tests/                  # 12+ test files, 486+ tests
 │   ├── pyproject.toml
 │   ├── mcp-config.json
 │   └── .env.example
 ├── dashboard/                  # SvelteKit frontend
 │   ├── src/
-│   │   ├── lib/                # Stores, SSE client, context
-│   │   └── routes/             # Layout + page
+│   │   ├── lib/                # Stores, SSE client, context, components
+│   │   └── routes/             # Layout + page + API proxy routes
 │   ├── package.json
 │   ├── svelte.config.js
 │   └── .env.example
