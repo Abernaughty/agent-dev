@@ -370,6 +370,7 @@ class TestStateManagerEmission:
         finally:
             await event_bus.unsubscribe(queue)
             state_manager._memory.pop("mem-1", None)
+            state_manager._audit_log.clear()
 
     async def test_reject_memory_emits_memory_added(self):
         """Seed a memory entry, reject it, verify SSE event fires."""
@@ -396,6 +397,7 @@ class TestStateManagerEmission:
         finally:
             await event_bus.unsubscribe(queue)
             state_manager._memory.pop("mem-3", None)
+            state_manager._audit_log.clear()
 
     async def test_update_agent_status_emits_event(self):
         from src.api.models import AgentStatus
