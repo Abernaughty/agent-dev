@@ -49,6 +49,9 @@ NODE_TO_AGENT = {
     "qa": ("qa", AgentStatus.REVIEWING),
 }
 
+# Infrastructure nodes that get SSE events but aren't mapped to agents
+INFRA_NODES = {"apply_code", "sandbox_validate", "flush_memory"}
+
 # Map orchestrator WorkflowStatus to API TaskStatus
 WORKFLOW_TO_TASK_STATUS = {
     WorkflowStatus.PLANNING: TaskStatus.PLANNING,
@@ -150,6 +153,7 @@ class TaskRunner:
                 "error_message": "",
                 "memory_context": [],
                 "trace": [],
+                "parsed_files": [],
             }
 
             prev_node = None
@@ -199,6 +203,11 @@ class TaskRunner:
             prev_agent_id, _ = NODE_TO_AGENT[prev_node]
             await state_manager.update_agent_status(prev_agent_id, AgentStatus.IDLE)
 
+        # Handle infrastructure nodes (apply_code, sandbox_validate, flush_memory)
+        if node_name in INFRA_NODES:
+            await self._handle_infra_node(task_id, node_name, node_output, state_manager)
+            return
+
         if node_name not in NODE_TO_AGENT:
             return
 
@@ -228,6 +237,51 @@ class TaskRunner:
             await self._handle_developer(task_id, node_output, task, state_manager)
         elif node_name == "qa":
             await self._handle_qa(task_id, node_output, task, state_manager)
+
+    async def _handle_infra_node(self, task_id, node_name, node_output, state_manager):
+        """Handle infrastructure nodes that aren't tied to specific agents."""
+        task = state_manager.get_task(task_id)
+        if not task:
+            return
+
+        if node_name == "apply_code":
+            parsed_files = node_output.get("parsed_files", [])
+            if parsed_files:
+                n_files = len(parsed_files)
+                total_chars = sum(len(f.get("content", "")) for f in parsed_files)
+                action = f"Applied {n_files} file{'s' if n_files != 1 else ''} to workspace ({total_chars:,} chars)"
+                task.timeline.append(TimelineEvent(
+                    time=_now_str(), agent="dev", action=action, type="exec",
+                ))
+                await self._emit_progress(task_id, "code_applied", "dev", action)
+                await self._emit_log(f"[apply_code] Writing {n_files} files to workspace...")
+                for pf in parsed_files:
+                    await self._emit_log(f"[apply_code] + {pf.get('path', '?')}")
+            else:
+                await self._emit_log("[apply_code] No files to apply (skipped)")
+
+        elif node_name == "sandbox_validate":
+            sandbox_result = node_output.get("sandbox_result")
+            if sandbox_result is not None:
+                passed = sandbox_result.tests_passed
+                failed = sandbox_result.tests_failed
+                exit_code = sandbox_result.exit_code
+                if exit_code == 0 and (failed is None or failed == 0):
+                    action = f"Sandbox validation passed (exit code {exit_code})"
+                    if passed is not None:
+                        action = f"Sandbox: {passed} tests passed"
+                    await self._emit_log(f"[sandbox:locked] Validation passed (exit={exit_code})")
+                else:
+                    action = f"Sandbox: {failed or '?'} test(s) failed"
+                    await self._emit_log(f"[sandbox:locked] Validation: {passed} passed, {failed} failed")
+                task.timeline.append(TimelineEvent(
+                    time=_now_str(), agent="qa", action=action, type="exec",
+                ))
+                await self._emit_progress(task_id, "sandbox_validated", "qa", action)
+            else:
+                await self._emit_log("[sandbox] Validation skipped (no E2B key or no code files)")
+
+        # flush_memory doesn't need SSE events -- it's internal bookkeeping
 
     async def _handle_architect(self, task_id, output, task, state_manager):
         blueprint = output.get("blueprint")
