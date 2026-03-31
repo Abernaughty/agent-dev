@@ -43,6 +43,14 @@ class TestNormalizePath:
         with pytest.raises(CodeParserError, match="Absolute path"):
             _normalize_path("/etc/passwd")
 
+    def test_rejects_windows_absolute_path(self):
+        with pytest.raises(CodeParserError, match="Absolute path"):
+            _normalize_path("C:\\Users\\secret.txt")
+
+    def test_rejects_windows_absolute_path_forward_slash(self):
+        with pytest.raises(CodeParserError, match="Absolute path"):
+            _normalize_path("D:/secret.txt")
+
     def test_rejects_traversal_dotdot(self):
         with pytest.raises(CodeParserError, match="Path traversal"):
             _normalize_path("../../../etc/passwd")
@@ -263,7 +271,9 @@ class TestValidatePathsForWorkspace:
             ParsedFile(path="sneaky", content="overwrite"),
         ]
         result = validate_paths_for_workspace(files, tmp_path)
-        assert len(result) >= 1
+        # Only the safe file should remain; symlink escape is filtered
+        assert len(result) == 1
+        assert result[0].path == "src/main.py"
 
     def test_empty_list(self, tmp_path):
         """Empty input returns empty output."""
