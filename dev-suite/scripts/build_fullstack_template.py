@@ -19,17 +19,10 @@ Target versions (as of March 2026):
   - pnpm 10.33+ (via corepack)
   - Python 3.x + pip + ruff (Python linter)
 
-Why NOT code-interpreter-v1 as base:
-  The code-interpreter template includes a Jupyter server + FastAPI proxy
-  (port 49999) with an IJavaScript kernel compiled against Node.js 20.
-  Upgrading Node 20->24 breaks the Jupyter startup chain — the IJavaScript
-  kernel's native modules are ABI-incompatible with Node 24, so the
-  FastAPI health check never passes and the build times out.
-
-  We don't need Jupyter for this template. Our E2BRunner uses
-  subprocess.run() via run_code() for test commands. The fullstack
-  template just needs a shell with Node.js, pnpm, Python, and ruff.
-  We use Sandbox.commands.run() from the base e2b SDK instead.
+Built from ubuntu:24.04 Docker image (not code-interpreter-v1).
+The code-interpreter template's Jupyter/FastAPI stack (port 49999) is
+incompatible with Node.js 24 due to IJavaScript kernel ABI mismatch.
+We don't need Jupyter — just a shell with Node.js, pnpm, Python, ruff.
 """
 
 import sys
@@ -48,17 +41,18 @@ except ImportError:
 def define_template():
     """Define the fullstack-dev sandbox template.
 
-    Built from a clean Ubuntu base with:
+    Built from ubuntu:24.04 Docker image with:
       - Node.js 24 LTS via NodeSource
       - pnpm via corepack
-      - Python 3 + pip + ruff
+      - Python 3 + pip + ruff + pytest
       - Common tools (curl, jq, git, gnupg, ca-certificates)
 
     No Jupyter, no code-interpreter overhead. Clean and fast.
+    Uses from_image() which is available in all SDK versions.
     """
     template = (
         Template()
-        .from_ubuntu("24.04")
+        .from_image("ubuntu:24.04")
         # System packages
         .apt_install([
             "curl", "jq", "git", "gnupg", "ca-certificates",
@@ -75,7 +69,7 @@ def define_template():
             "corepack enable",
             "corepack prepare pnpm@latest --activate",
         ], user="root")
-        # Python linting tools
+        # Python linting and test tools
         .pip_install(["ruff", "pytest"])
         # Verify installations
         .run_cmd([
@@ -122,13 +116,7 @@ def build():
     print(f"  E2B_TEMPLATE_FULLSTACK={build_info.name}")
     print()
     print("Test with:")
-    print('  uv run python -c "')
-    print("from e2b import Sandbox")
-    print(f"sbx = Sandbox.create(template='{build_info.name}')")
-    print("print(sbx.commands.run('node --version').stdout)")
-    print("print(sbx.commands.run('pnpm --version').stdout)")
-    print("print(sbx.commands.run('python3 --version').stdout)")
-    print('sbx.kill()"')
+    print(f'  uv run python -c "from e2b import Sandbox; sbx = Sandbox.create(template=\'{build_info.name}\'); print(sbx.commands.run(\'node --version\').stdout); print(sbx.commands.run(\'pnpm --version\').stdout); sbx.kill()"')
     print()
 
 
