@@ -79,6 +79,8 @@ class FailureReport(BaseModel):
         If failure_type is provided, it takes precedence and syncs
         is_architectural. If only is_architectural is set (backward
         compat from older LLM output), failure_type is derived.
+        status="escalate" also implies ARCHITECTURAL even when
+        is_architectural was not explicitly set.
         """
         if self.failure_type is not None:
             # failure_type takes precedence
@@ -87,6 +89,10 @@ class FailureReport(BaseModel):
             )
         elif self.is_architectural:
             self.failure_type = FailureType.ARCHITECTURAL
+        elif self.status == "escalate":
+            # status=escalate implies architectural failure
+            self.failure_type = FailureType.ARCHITECTURAL
+            self.is_architectural = True
         elif self.status == "fail":
             self.failure_type = FailureType.CODE
         # status == "pass" leaves failure_type as None (no failure)
