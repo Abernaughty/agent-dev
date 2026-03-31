@@ -7,7 +7,7 @@ failure_type classification.
 
 from enum import Enum
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 
 class FailureType(str, Enum):
@@ -44,6 +44,19 @@ class FailureReport(BaseModel):
     is_architectural: bool  # If True, escalate to Architect
     recommendation: str
     failure_type: FailureType | None = None
+
+    @field_validator("failure_type", mode="before")
+    @classmethod
+    def normalize_failure_type(cls, v: object) -> object:
+        """Accept case-insensitive failure_type values from LLM output.
+
+        LLMs may return "ARCHITECTURAL", "Code", "Architectural", etc.
+        Normalize to lowercase before enum validation so the orchestrator
+        never crashes on a valid-but-miscased classification.
+        """
+        if isinstance(v, str):
+            return v.strip().lower()
+        return v
 
     @model_validator(mode="after")
     def sync_failure_type(self) -> "FailureReport":
