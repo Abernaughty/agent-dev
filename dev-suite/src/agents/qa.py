@@ -5,9 +5,12 @@ Can escalate architectural failures back to Architect via
 failure_type classification.
 """
 
+import logging
 from enum import Enum
 
 from pydantic import BaseModel, field_validator, model_validator
+
+logger = logging.getLogger(__name__)
 
 
 class FailureType(str, Enum):
@@ -50,12 +53,23 @@ class FailureReport(BaseModel):
     def normalize_failure_type(cls, v: object) -> object:
         """Accept case-insensitive failure_type values from LLM output.
 
-        LLMs may return "ARCHITECTURAL", "Code", "Architectural", etc.
-        Normalize to lowercase before enum validation so the orchestrator
-        never crashes on a valid-but-miscased classification.
+        LLMs may return "ARCHITECTURAL", "Code", or even typos like
+        "design_flaw". Normalize known values to lowercase; coerce
+        unknown strings to None so the model_validator can fall back
+        to is_architectural/status instead of crashing the workflow.
         """
         if isinstance(v, str):
-            return v.strip().lower()
+            normalized = v.strip().lower()
+            if normalized in ("code", "architectural"):
+                return normalized
+            # Unknown value -- log and fall back to None
+            if normalized:
+                logger.warning(
+                    "Unknown failure_type '%s' from LLM output, "
+                    "falling back to is_architectural/status",
+                    v,
+                )
+            return None
         return v
 
     @model_validator(mode="after")
