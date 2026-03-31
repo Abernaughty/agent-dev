@@ -2,6 +2,7 @@
 
 Tests cover:
 - FailureType enum and FailureReport model enhancements
+- Case-insensitive failure_type parsing from LLM output
 - Routing logic for code vs architectural failures
 - Architect re-planning with failure context
 - QA node classification behavior
@@ -140,6 +141,26 @@ class TestFailureReportEscalation:
             "recommendation": "fix type error",
         }
         r = FailureReport(**from_llm)
+        assert r.failure_type == FailureType.CODE
+
+    def test_case_insensitive_architectural(self):
+        """LLM returning 'ARCHITECTURAL' (uppercase) should work."""
+        r = self._make_report(failure_type="ARCHITECTURAL")
+        assert r.failure_type == FailureType.ARCHITECTURAL
+
+    def test_case_insensitive_code(self):
+        """LLM returning 'Code' (mixed case) should work."""
+        r = self._make_report(failure_type="Code")
+        assert r.failure_type == FailureType.CODE
+
+    def test_case_insensitive_with_whitespace(self):
+        """LLM returning '  architectural  ' (padded) should work."""
+        r = self._make_report(failure_type="  architectural  ")
+        assert r.failure_type == FailureType.ARCHITECTURAL
+
+    def test_case_insensitive_all_caps(self):
+        """LLM returning 'CODE' (all caps) should work."""
+        r = self._make_report(failure_type="CODE")
         assert r.failure_type == FailureType.CODE
 
 
