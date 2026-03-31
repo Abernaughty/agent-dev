@@ -20,7 +20,7 @@ from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel
 
 from .agents.architect import Blueprint
-from .agents.qa import FailureReport
+from .agents.qa import FailureReport, FailureType
 from .memory.factory import create_memory_store
 from .memory.protocol import MemoryQueryResult, MemoryStore
 from .memory.summarizer import summarize_writes_sync
@@ -271,7 +271,13 @@ Do not include any text before or after the JSON.{memory_block}"""
     if failure_report and failure_report.is_architectural:
         user_msg += "\n\nPREVIOUS ATTEMPT FAILED (architectural issue):\n"
         user_msg += f"Errors: {', '.join(failure_report.errors)}\n"
-        user_msg += f"Recommendation: {failure_report.recommendation}"
+        if failure_report.failed_files:
+            user_msg += f"Failed files: {', '.join(failure_report.failed_files)}\n"
+        user_msg += f"Recommendation: {failure_report.recommendation}\n"
+        user_msg += (
+            "\nGenerate a COMPLETELY NEW Blueprint. Do not patch the old one. "
+            "The previous target_files or approach was wrong."
+        )
 
     llm = _get_architect_llm()
     response = llm.invoke([
@@ -411,12 +417,24 @@ def qa_node(state: GraphState) -> dict:
         '  "tests_failed": number,\n'
         '  "errors": ["list of specific error descriptions"],\n'
         '  "failed_files": ["list of files with issues"],\n'
-        '  "is_architectural": true/false '
-        "(set true if the failure is a design/planning issue),\n"
+        '  "is_architectural": true/false,\n'
+        '  "failure_type": "code" or "architectural" or null (if pass),\n'
         '  "recommendation": "what to fix or why it should escalate"\n'
         "}\n\n"
-        '"escalate" means the Blueprint itself is wrong, not just the '
-        "implementation.\n"
+        "FAILURE CLASSIFICATION (critical for correct routing):\n\n"
+        'Set failure_type to "code" (status: "fail") when:\n'
+        "- Implementation has bugs, syntax errors, or type errors\n"
+        "- Tests fail due to logic errors in the code\n"
+        "- Code does not follow the Blueprint's constraints\n"
+        "- Missing error handling or edge cases\n"
+        "Action: Lead Dev will retry with the same Blueprint.\n\n"
+        'Set failure_type to "architectural" (status: "escalate") when:\n'
+        "- Blueprint targets the WRONG files (code is in the wrong place)\n"
+        "- A required dependency or import is missing from the Blueprint\n"
+        "- The design approach is fundamentally flawed\n"
+        "- Acceptance criteria are impossible to meet with current targets\n"
+        "- The task requires files not listed in target_files\n"
+        "Action: Architect will generate a completely NEW Blueprint.\n\n"
         "Be strict but fair. Only pass code that meets ALL acceptance "
         "criteria.\n"
         "Do not include any text before or after the JSON."
