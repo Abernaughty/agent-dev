@@ -11,10 +11,13 @@ Pure functions, no side effects, fully testable in isolation.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+
+logger = logging.getLogger(__name__)
 
 # Matches: # --- FILE: path/to/file.ext ---
 # Allows optional trailing whitespace and varying dash counts (3+)
@@ -58,8 +61,14 @@ def _normalize_path(raw_path: str) -> str:
     while cleaned.startswith("./"):
         cleaned = cleaned[2:]
 
-    # Reject absolute paths
+    # Reject Unix absolute paths
     if cleaned.startswith("/"):
+        raise CodeParserError(
+            f"Absolute path not allowed: '{raw_path}'"
+        )
+
+    # Reject Windows-style absolute paths (e.g., C:/ or D:\)
+    if len(cleaned) >= 2 and cleaned[1] == ":" and cleaned[0].isalpha():
         raise CodeParserError(
             f"Absolute path not allowed: '{raw_path}'"
         )
@@ -115,12 +124,19 @@ def parse_generated_code(
             return []
         return [ParsedFile(path=default_filename, content=content)]
 
-    # Extract files between markers
+    # Extract files between markers.
+    # Track insertion order alongside last-wins content (Python 3.7+ dict
+    # preserves insertion order, but we need first-seen order with last-wins
+    # content for duplicates).
     seen: dict[str, ParsedFile] = {}
+    first_seen_order: list[str] = []
 
     for i, match in enumerate(markers):
         raw_path = match.group(1)
         path = _normalize_path(raw_path)
+
+        if path not in seen:
+            first_seen_order.append(path)
 
         # Content starts after this marker's line
         content_start = match.end()
@@ -142,18 +158,7 @@ def parse_generated_code(
         # Last occurrence wins for duplicate paths
         seen[path] = ParsedFile(path=path, content=content)
 
-    # Return in order of first appearance, but with last-wins content
-    ordered_paths: list[str] = []
-    for match in markers:
-        raw_path = match.group(1)
-        try:
-            path = _normalize_path(raw_path)
-        except CodeParserError:
-            continue
-        if path not in ordered_paths:
-            ordered_paths.append(path)
-
-    return [seen[p] for p in ordered_paths if p in seen]
+    return [seen[p] for p in first_seen_order]
 
 
 def validate_paths_for_workspace(
@@ -162,8 +167,8 @@ def validate_paths_for_workspace(
 ) -> list[ParsedFile]:
     """Validate that all parsed file paths are within workspace bounds.
 
-    Uses the same containment check as LocalToolProvider to prevent
-    path traversal attacks.
+    Uses pathlib's relative_to() for proper containment checking to prevent
+    path traversal attacks, including sibling-directory false positives.
 
     Args:
         parsed_files: Files to validate.
@@ -182,11 +187,11 @@ def validate_paths_for_workspace(
 
     for pf in parsed_files:
         target = (resolved_root / pf.path).resolve()
-        if not str(target).startswith(str(resolved_root)):
-            # Log but don't crash -- skip the unsafe file
-            import logging
-
-            logging.getLogger(__name__).warning(
+        try:
+            target.relative_to(resolved_root)
+        except ValueError:
+            # Path escapes workspace -- log but don't crash
+            logger.warning(
                 "Skipping file with path escaping workspace: %s -> %s",
                 pf.path,
                 target,
