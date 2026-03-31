@@ -1,4 +1,4 @@
-"""LangGraph orchestrator — Architect -> Lead Dev -> QA loop.
+"""LangGraph orchestrator -- Architect -> Lead Dev -> QA loop.
 
 This is the main entry point for the agent workflow.
 Implements the state machine with retry logic, token budgets,
@@ -24,6 +24,12 @@ from .agents.qa import FailureReport
 from .memory.factory import create_memory_store
 from .memory.protocol import MemoryQueryResult, MemoryStore
 from .memory.summarizer import summarize_writes_sync
+from .sandbox.e2b_runner import E2BRunner, SandboxResult
+from .sandbox.validation_commands import (
+    ValidationPlan,
+    format_validation_summary,
+    get_validation_plan,
+)
 from .tracing import add_trace_event, create_trace_config
 
 load_dotenv()
@@ -79,10 +85,11 @@ class GraphState(TypedDict, total=False):
     memory_context: list[str]
     memory_writes: list[dict]
     trace: list[str]
+    sandbox_result: SandboxResult | None
 
 
 class AgentState(BaseModel):
-    """Pydantic model used at the boundary — for constructing the initial
+    """Pydantic model used at the boundary -- for constructing the initial
     state and wrapping the final result with validation and attribute access.
     """
 
@@ -97,6 +104,7 @@ class AgentState(BaseModel):
     memory_context: list[str] = []
     memory_writes: list[dict] = []
     trace: list[str] = []
+    sandbox_result: SandboxResult | None = None
 
 
 # -- LLM Initialization --
@@ -417,6 +425,29 @@ def qa_node(state: GraphState) -> dict:
     bp_json = blueprint.model_dump_json(indent=2)
     user_msg = f"Blueprint:\n{bp_json}\n\nGenerated Code:\n{generated_code}"
 
+    # Include sandbox validation results if available
+    sandbox_result = state.get("sandbox_result")
+    if sandbox_result is not None:
+        user_msg += "\n\nSandbox Validation Results:\n"
+        user_msg += f"  Exit code: {sandbox_result.exit_code}\n"
+        if sandbox_result.tests_passed is not None:
+            user_msg += f"  Tests passed: {sandbox_result.tests_passed}\n"
+        if sandbox_result.tests_failed is not None:
+            user_msg += f"  Tests failed: {sandbox_result.tests_failed}\n"
+        if sandbox_result.errors:
+            user_msg += f"  Errors: {', '.join(sandbox_result.errors)}\n"
+        if sandbox_result.output_summary:
+            user_msg += f"  Output:\n{sandbox_result.output_summary}\n"
+        user_msg += (
+            "\nUse these real test results to inform your review. "
+            "If sandbox tests passed, weigh that heavily in your verdict."
+        )
+    else:
+        user_msg += (
+            "\n\nNote: Sandbox validation was not available for this review. "
+            "Evaluate the code based on the Blueprint criteria only."
+        )
+
     llm = _get_qa_llm()
     response = llm.invoke([
         SystemMessage(content=system_prompt),
@@ -481,6 +512,110 @@ def qa_node(state: GraphState) -> dict:
         "trace": trace,
         "memory_writes": memory_writes,
     }
+
+
+# -- Sandbox Validation --
+
+def _run_sandbox_validation(
+    commands: list[str],
+    template: str | None,
+    generated_code: str,
+    timeout: int = 120,
+) -> SandboxResult | None:
+    """Execute validation commands in an E2B sandbox.
+
+    Returns None if E2B_API_KEY is not configured (graceful skip).
+    Raises on unexpected errors so the caller can log them.
+    """
+    api_key = os.getenv("E2B_API_KEY")
+    if not api_key:
+        return None
+
+    runner = E2BRunner(api_key=api_key, default_timeout=timeout)
+
+    # Build a compound command that runs all validations sequentially
+    # and captures all output. We join with && so early failures are visible
+    # but use || true in the individual commands (already present in
+    # PYTHON_COMMANDS / FRONTEND_COMMANDS) so we get all output.
+    compound_cmd = " && ".join(commands)
+
+    return runner.run_tests(
+        test_command=compound_cmd,
+        timeout=timeout,
+        template=template,
+    )
+
+
+def sandbox_validate_node(state: GraphState) -> dict:
+    """Run sandbox validation on generated code before QA review.
+
+    Selects the appropriate template and validation commands based on
+    the Blueprint's target_files, then executes them in an E2B sandbox.
+
+    Behavior:
+      - Optional: if E2B_API_KEY is not set, logs a warning and skips.
+      - Errors are caught and logged, never crash the workflow.
+      - SandboxResult is stored in state for QA to consume.
+    """
+    trace = list(state.get("trace", []))
+    trace.append("sandbox_validate: starting")
+
+    blueprint = state.get("blueprint")
+    if not blueprint:
+        trace.append("sandbox_validate: no blueprint -- skipping")
+        return {"sandbox_result": None, "trace": trace}
+
+    # Determine what to validate
+    plan = get_validation_plan(blueprint.target_files)
+    trace.append(f"sandbox_validate: {plan.description}")
+
+    if not plan.commands:
+        trace.append("sandbox_validate: no code validation needed -- skipping")
+        return {"sandbox_result": None, "trace": trace}
+
+    template_label = plan.template or "default"
+    trace.append(
+        f"sandbox_validate: template={template_label}, "
+        f"commands={len(plan.commands)}"
+    )
+
+    generated_code = state.get("generated_code", "")
+
+    try:
+        result = _run_sandbox_validation(
+            commands=plan.commands,
+            template=plan.template,
+            generated_code=generated_code,
+        )
+
+        if result is None:
+            # No API key -- warn loudly
+            logger.warning(
+                "[SANDBOX] E2B_API_KEY not configured -- sandbox validation "
+                "SKIPPED. QA will review without real test results. "
+                "Set E2B_API_KEY in .env to enable sandbox validation."
+            )
+            trace.append(
+                "sandbox_validate: WARNING -- E2B_API_KEY not configured, "
+                "sandbox validation skipped"
+            )
+            return {"sandbox_result": None, "trace": trace}
+
+        trace.append(
+            f"sandbox_validate: exit_code={result.exit_code}, "
+            f"passed={result.tests_passed}, failed={result.tests_failed}"
+        )
+        logger.info(
+            "[SANDBOX] Validation complete: exit=%d, passed=%s, failed=%s",
+            result.exit_code, result.tests_passed, result.tests_failed,
+        )
+
+        return {"sandbox_result": result, "trace": trace}
+
+    except Exception as e:
+        logger.warning("[SANDBOX] Validation failed with error: %s", e)
+        trace.append(f"sandbox_validate: error -- {type(e).__name__}: {e}")
+        return {"sandbox_result": None, "trace": trace}
 
 
 def flush_memory_node(state: GraphState) -> dict:
@@ -586,7 +721,7 @@ def build_graph() -> StateGraph:
     """Build the LangGraph state machine.
 
     Flow:
-        START -> architect -> developer -> qa -> (conditional)
+        START -> architect -> developer -> sandbox_validate -> qa -> (conditional)
             -> pass: flush_memory -> END
             -> fail: developer (retry)
             -> escalate: architect (re-plan)
@@ -596,12 +731,14 @@ def build_graph() -> StateGraph:
 
     graph.add_node("architect", architect_node)
     graph.add_node("developer", developer_node)
+    graph.add_node("sandbox_validate", sandbox_validate_node)
     graph.add_node("qa", qa_node)
     graph.add_node("flush_memory", flush_memory_node)
 
     graph.add_edge(START, "architect")
     graph.add_edge("architect", "developer")
-    graph.add_edge("developer", "qa")
+    graph.add_edge("developer", "sandbox_validate")
+    graph.add_edge("sandbox_validate", "qa")
     graph.add_conditional_edges("qa", route_after_qa)
     graph.add_edge("flush_memory", END)
 
@@ -655,6 +792,7 @@ def run_task(
         "memory_context": [],
         "memory_writes": [],
         "trace": [],
+        "sandbox_result": None,
     }
 
     invoke_config = {
