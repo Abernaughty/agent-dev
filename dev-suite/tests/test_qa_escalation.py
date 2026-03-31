@@ -2,7 +2,7 @@
 
 Tests cover:
 - FailureType enum and FailureReport model enhancements
-- Case-insensitive failure_type parsing from LLM output
+- Case-insensitive and unknown failure_type parsing from LLM output
 - Routing logic for code vs architectural failures
 - Architect re-planning with failure context
 - QA node classification behavior
@@ -163,6 +163,32 @@ class TestFailureReportEscalation:
         r = self._make_report(failure_type="CODE")
         assert r.failure_type == FailureType.CODE
 
+    def test_unknown_value_falls_back_gracefully(self):
+        """Unknown failure_type like 'design_flaw' falls back to is_architectural."""
+        r = self._make_report(
+            failure_type="design_flaw",
+            is_architectural=True,
+        )
+        # Unknown value coerced to None, model_validator derives from is_architectural
+        assert r.failure_type == FailureType.ARCHITECTURAL
+        assert r.is_architectural is True
+
+    def test_unknown_value_code_fallback(self):
+        """Unknown failure_type with is_architectural=False falls back to CODE."""
+        r = self._make_report(
+            failure_type="typo_value",
+            is_architectural=False,
+        )
+        assert r.failure_type == FailureType.CODE
+
+    def test_empty_string_falls_back(self):
+        """Empty string failure_type falls back to is_architectural/status."""
+        r = self._make_report(
+            failure_type="",
+            is_architectural=True,
+        )
+        assert r.failure_type == FailureType.ARCHITECTURAL
+
 
 # ---------------------------------------------------------------------------
 # Routing logic
@@ -244,7 +270,6 @@ class TestQANodeClassification:
     def test_qa_sets_escalated_for_architectural(self):
         """When QA reports is_architectural=True, status should be ESCALATED."""
         from src.orchestrator import WorkflowStatus
-        from src.agents.qa import FailureReport
 
         report = FailureReport(
             task_id="t1", status="escalate",
@@ -266,7 +291,6 @@ class TestQANodeClassification:
     def test_qa_sets_reviewing_for_code_failure(self):
         """When QA reports a code failure, status should be REVIEWING (retry)."""
         from src.orchestrator import WorkflowStatus
-        from src.agents.qa import FailureReport
 
         report = FailureReport(
             task_id="t2", status="fail",
@@ -296,8 +320,6 @@ class TestArchitectReplanContext:
 
     def test_architect_appends_failure_context(self):
         """architect_node should include failure info when is_architectural."""
-        from src.agents.qa import FailureReport
-
         failure = FailureReport(
             task_id="t1", status="escalate",
             tests_passed=0, tests_failed=2,
@@ -337,8 +359,6 @@ class TestRetryBudgetDuringEscalation:
 
     def test_retry_incremented_on_escalation(self):
         """QA failure (including escalation) should increment retry_count."""
-        from src.agents.qa import FailureReport
-
         report = FailureReport(
             task_id="t1", status="escalate",
             tests_passed=0, tests_failed=2,
@@ -354,8 +374,6 @@ class TestRetryBudgetDuringEscalation:
 
     def test_retry_not_incremented_on_pass(self):
         """Passing QA should not increment retry_count."""
-        from src.agents.qa import FailureReport
-
         report = FailureReport(
             task_id="t1", status="pass",
             tests_passed=5, tests_failed=0,
