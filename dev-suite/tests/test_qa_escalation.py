@@ -189,6 +189,17 @@ class TestFailureReportEscalation:
         )
         assert r.failure_type == FailureType.ARCHITECTURAL
 
+    def test_escalate_status_infers_architectural(self):
+        """status=escalate with unknown failure_type and is_architectural=False
+        should still infer ARCHITECTURAL from the escalate status."""
+        r = self._make_report(
+            status="escalate",
+            failure_type="design_flaw",
+            is_architectural=False,
+        )
+        assert r.failure_type == FailureType.ARCHITECTURAL
+        assert r.is_architectural is True
+
 
 # ---------------------------------------------------------------------------
 # Routing logic
