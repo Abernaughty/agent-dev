@@ -9,6 +9,7 @@ so the dashboard receives real-time updates when state changes.
 Issue #50: PR methods delegate to GitHubPRProvider for live data.
 Issue #51: Removed mock data seeding -- always starts with clean state.
 Issue #19: Added audit log for memory approve/reject actions.
+Issue #92: Added add_memory_entry() to bridge flush_memory -> dashboard.
 
 Usage:
     from src.api.state import state_manager
@@ -154,6 +155,79 @@ class StateManager:
             entry_module=entry.module,
             action=action,
         ))
+
+    async def add_memory_entry(
+        self,
+        content: str,
+        tier: str = "l1",
+        module: str = "global",
+        source_agent: str = "unknown",
+        confidence: float = 0.0,
+        sandbox_origin: str = "locked-down",
+        related_files: str = "",
+        task_id: str = "",
+    ) -> MemoryEntryResponse:
+        """Create a memory entry from flush_memory output and emit SSE event.
+
+        Issue #92: Bridges flush_memory (which writes to Chroma) into the
+        StateManager's in-memory store so GET /memory returns entries and
+        the dashboard receives memory_added SSE events.
+        """
+        entry_id = f"mem-{uuid.uuid4().hex[:8]}"
+
+        # Parse related_files: may be comma-separated string or already a list
+        if isinstance(related_files, str):
+            files_list = [f.strip() for f in related_files.split(",") if f.strip()] if related_files else []
+        else:
+            files_list = list(related_files)
+
+        # Map tier string to enum
+        tier_enum = MemoryTierEnum(tier) if tier in [t.value for t in MemoryTierEnum] else MemoryTierEnum.L1
+
+        # Calculate expiry for L0-Discovered (48h from now)
+        now_ts = time.time()
+        if tier_enum == MemoryTierEnum.L0_DISCOVERED:
+            expires_at = now_ts + (48 * 3600)
+            hours_remaining = 48.0
+        else:
+            expires_at = None
+            hours_remaining = None
+
+        entry = MemoryEntryResponse(
+            id=entry_id,
+            content=content,
+            tier=tier_enum,
+            module=module,
+            source_agent=source_agent,
+            verified=False,
+            status=MemoryStatus.PENDING,
+            created_at=now_ts,
+            expires_at=expires_at,
+            hours_remaining=hours_remaining,
+            confidence=confidence,
+            sandbox=sandbox_origin,
+            related_files=files_list,
+        )
+
+        self._memory[entry_id] = entry
+        logger.info("Memory entry added: %s (tier=%s, agent=%s)", entry_id, tier, source_agent)
+
+        # Emit SSE event with full entry data so the dashboard can upsert
+        await self._emit(EventType.MEMORY_ADDED, {
+            "id": entry_id,
+            "tier": tier_enum.value,
+            "agent": source_agent,
+            "content": content,
+            "status": "pending",
+            "module": module,
+            "confidence": confidence,
+            "sandbox": sandbox_origin,
+            "related_files": files_list,
+            "expires_at": expires_at,
+            "hours_remaining": hours_remaining,
+        })
+
+        return entry
 
     async def approve_memory(self, entry_id: str) -> MemoryEntryResponse | None:
         entry = self._memory.get(entry_id)

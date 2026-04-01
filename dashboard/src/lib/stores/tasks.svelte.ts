@@ -8,6 +8,8 @@
  *
  * Issue #37
  * Issue #85: Added handleToolCall() for TOOL_CALL SSE events
+ * Issue #92: handleProgress() now pushes timeline events + budget updates;
+ *            handleComplete() sets completed_at
  */
 
 import type { TaskSummary, TaskStatus, CreateTaskResponse, ToolCallEvent, TimelineEvent } from '$lib/types/api.js';
@@ -54,6 +56,21 @@ function replayBuffered(task: TaskSummary): TimelineEvent[] {
 	pendingToolCalls.delete(task.id);
 	return [...task.timeline, ...buffered];
 }
+
+/**
+ * Map SSE task_progress event names to timeline event types.
+ * Used by handleProgress() to create proper timeline entries.
+ * Issue #92: Enables agent activity logs + Architect activity.
+ */
+const EVENT_TO_TIMELINE_TYPE: Record<string, string> = {
+	blueprint_created: 'plan',
+	code_generated: 'code',
+	code_applied: 'exec',
+	sandbox_validated: 'exec',
+	qa_complete: 'exec',
+	task_started: 'plan',
+	task_retried: 'retry'
+};
 
 export const tasksStore = {
 	get list() {
@@ -172,23 +189,72 @@ export const tasksStore = {
 		}
 	},
 
-	/** Apply an SSE task_progress event. */
+	/**
+	 * Apply an SSE task_progress event.
+	 *
+	 * Issue #92: Now pushes timeline events AND updates budget.
+	 * Previously this was a no-op that just re-spread the array.
+	 */
 	handleProgress(data: {
 		task_id: string;
 		event: string;
 		agent: string | null;
 		detail: string;
+		tokens_used?: number;
+		retries_used?: number;
+		cost_used?: number;
+		token_budget?: number;
+		max_retries?: number;
+		cost_budget?: number;
 	}) {
 		const idx = tasks.findIndex((t) => t.id === data.task_id);
-		if (idx >= 0) {
-			tasks = [...tasks];
-		}
+		if (idx < 0) return;
+
+		const task = tasks[idx];
+
+		// Build a timeline event from the progress data
+		const timelineType = EVENT_TO_TIMELINE_TYPE[data.event] ?? 'exec';
+		const agentId = data.agent === 'developer' ? 'dev'
+			: data.agent === 'qa' ? 'qa'
+			: data.agent === 'architect' ? 'arch'
+			: data.agent ?? 'system';
+
+		// Only add timeline entry if we have meaningful detail
+		// Skip generic events like task_queued that don't add info
+		const skipEvents = new Set(['task_queued', 'task_started']);
+		const newTimeline = skipEvents.has(data.event)
+			? task.timeline
+			: [...task.timeline, {
+				time: nowTime(),
+				agent: agentId,
+				action: data.detail,
+				type: timelineType,
+				sandbox: 'locked'
+			}];
+
+		// Update budget if included in the SSE payload (Issue #92 fix 4)
+		const newBudget = { ...task.budget };
+		if (typeof data.tokens_used === 'number') newBudget.tokens_used = data.tokens_used;
+		if (typeof data.retries_used === 'number') newBudget.retries_used = data.retries_used;
+		if (typeof data.cost_used === 'number') newBudget.cost_used = data.cost_used;
+		if (typeof data.token_budget === 'number') newBudget.token_budget = data.token_budget;
+		if (typeof data.max_retries === 'number') newBudget.max_retries = data.max_retries;
+		if (typeof data.cost_budget === 'number') newBudget.cost_budget = data.cost_budget;
+
+		tasks = tasks.map((t, i) =>
+			i === idx ? { ...t, timeline: newTimeline, budget: newBudget } : t
+		);
 	},
 
-	/** Apply an SSE task_complete event. */
+	/**
+	 * Apply an SSE task_complete event.
+	 * Issue #92: Also sets completed_at for debrief status detection.
+	 */
 	handleComplete(data: { task_id: string; status: string; detail: string }) {
 		tasks = tasks.map((t) =>
-			t.id === data.task_id ? { ...t, status: data.status as TaskStatus } : t
+			t.id === data.task_id
+				? { ...t, status: data.status as TaskStatus, completed_at: new Date().toISOString() }
+				: t
 		);
 	},
 

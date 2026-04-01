@@ -40,6 +40,23 @@ from src.orchestrator import (
 # -- Fixtures --
 
 
+@pytest.fixture(autouse=True)
+def _no_tools():
+    """Disable MCP tools for all E2E tests.
+
+    init_tools_config() discovers mcp-config.json in dev-suite/ and loads
+    real tool objects. When tools are present, developer_node/qa_node use
+    bind_tools() + ainvoke() (async), but the LLM mocks use MagicMock
+    which can't be awaited. Patching to return no tools forces the sync
+    invoke() path that the mocks expect.
+    """
+    with patch(
+        "src.orchestrator.init_tools_config",
+        return_value={"configurable": {"tools": []}},
+    ):
+        yield
+
+
 SAMPLE_BLUEPRINT = Blueprint(
     task_id="e2e-test-001",
     target_files=["validate_email.py"],

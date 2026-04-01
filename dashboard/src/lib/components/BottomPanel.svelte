@@ -6,6 +6,7 @@
 
 	Issue #38: Data Integration — PR4
 	Issue #51: Removed mock mode — SSE-only log streaming
+	Issue #92: Fixed log_line field mismatch (message/level vs text/type)
 -->
 <script lang="ts">
 	import { onMount } from 'svelte';
@@ -42,13 +43,42 @@
 		error: 'var(--color-accent-red)'
 	};
 
+	/**
+	 * Map runner log levels to terminal color types.
+	 * The runner emits `level: "info"` but the terminal uses `type` for color lookup.
+	 * Also map warning/error levels appropriately.
+	 */
+	function resolveLogType(detail: Record<string, unknown>): string {
+		if (typeof detail.type === 'string' && detail.type in typeColors) return detail.type;
+		if (typeof detail.level === 'string') {
+			const level = detail.level as string;
+			if (level === 'warning' || level === 'warn') return 'warn';
+			if (level === 'error') return 'error';
+			if (level === 'success') return 'success';
+			return 'info';
+		}
+		return 'info';
+	}
+
+	/**
+	 * Extract display text from SSE log_line payload.
+	 * The runner sends { message, level } but earlier code expected { text, type }.
+	 * Support both formats for backwards compatibility.
+	 */
+	function resolveLogText(detail: Record<string, unknown>): string | null {
+		if (typeof detail.text === 'string') return detail.text;
+		if (typeof detail.message === 'string') return detail.message;
+		if (typeof detail.detail === 'string') return detail.detail;
+		return null;
+	}
+
 	onMount(() => {
 		function handleLogLine(e: Event) {
 			const detail = (e as CustomEvent).detail;
-			if (detail?.text) {
-				lines = [...lines, { type: detail.type || 'info', text: detail.text }];
-			} else if (detail?.detail) {
-				lines = [...lines, { type: detail.type || 'info', text: detail.detail }];
+			if (!detail) return;
+			const text = resolveLogText(detail);
+			if (text) {
+				lines = [...lines, { type: resolveLogType(detail), text }];
 			}
 		}
 
