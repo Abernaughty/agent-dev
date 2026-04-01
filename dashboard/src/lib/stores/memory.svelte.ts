@@ -220,7 +220,9 @@ export const memoryStore = {
 	 * creates it from the SSE payload. This bridges flush_memory writes
 	 * (which go to Chroma) into the dashboard's in-memory state.
 	 *
-	 * The SSE payload from the runner includes full MemoryEntryResponse fields.
+	 * CodeRabbit fix: Update path now merges approval metadata (verified,
+	 * expires_at, hours_remaining) so other connected dashboards see the
+	 * full state change, not just the status flip.
 	 */
 	handleSSE(data: {
 		id: string;
@@ -237,9 +239,19 @@ export const memoryStore = {
 	}) {
 		const idx = entries.findIndex((e) => e.id === data.id);
 		if (idx >= 0) {
-			// Update existing entry
+			// Update existing entry — merge approval metadata (CodeRabbit fix)
 			entries = entries.map((e) =>
-				e.id === data.id ? { ...e, status: data.status as MemoryStatus } : e
+				e.id === data.id
+					? {
+							...e,
+							status: data.status as MemoryStatus,
+							verified: data.status === 'approved' ? true : e.verified,
+							expires_at:
+								data.expires_at ?? (data.status === 'approved' ? null : e.expires_at),
+							hours_remaining:
+								data.hours_remaining ?? (data.status === 'approved' ? null : e.hours_remaining)
+						}
+					: e
 			);
 		} else {
 			// Upsert: create new entry from SSE payload (Issue #92)
