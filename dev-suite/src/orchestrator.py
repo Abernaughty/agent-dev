@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from enum import Enum
 from pathlib import Path
 from typing import Any, Literal, TypedDict
@@ -211,8 +212,30 @@ def _infer_module(target_files: list[str]) -> str:
 
 # -- Tool Binding (Issue #80) --
 
-DEV_TOOL_NAMES = {"filesystem_read", "filesystem_write", "filesystem_list", "github_read_diff", "github_create_pr"}
+# Fix 2: Removed github_create_pr -- non-idempotent write should not be in
+# an iterative tool loop. PR creation belongs in a post-QA-pass step.
+DEV_TOOL_NAMES = {"filesystem_read", "filesystem_write", "filesystem_list", "github_read_diff"}
 QA_TOOL_NAMES = {"filesystem_read", "filesystem_list", "github_read_diff"}
+
+# Fix 4: Secret pattern regexes for sanitizing tool call previews
+_SECRET_PATTERNS = [
+    re.compile(r'(?:sk|pk|api|key|token|secret|password|bearer)[_-]?\w{10,}', re.IGNORECASE),
+    re.compile(r'(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{30,}'),
+    re.compile(r'(?:eyJ)[A-Za-z0-9_-]{20,}'),
+    re.compile(r'(?:AKIA|ASIA)[A-Z0-9]{16}'),
+]
+
+
+def _sanitize_preview(text: str, max_len: int = 200) -> str:
+    """Truncate and redact known secret patterns from tool call previews."""
+    if not text:
+        return ""
+    sanitized = text
+    for pattern in _SECRET_PATTERNS:
+        sanitized = pattern.sub("[REDACTED]", sanitized)
+    if len(sanitized) > max_len:
+        sanitized = sanitized[:max_len] + "..."
+    return sanitized
 
 
 def _get_agent_tools(config, allowed_names=None):
@@ -228,6 +251,7 @@ def _get_agent_tools(config, allowed_names=None):
 
 
 async def _execute_tool_call(tool_call, tools):
+    """Execute a single tool call. Uses ainvoke/invoke public API (Fix 3)."""
     tool_name = tool_call.get("name", "")
     tool_args = tool_call.get("args", {})
     tool_id = tool_call.get("id", "unknown")
@@ -236,8 +260,10 @@ async def _execute_tool_call(tool_call, tools):
     if not tool:
         return ToolMessage(content=f"Error: Tool '{tool_name}' not found. Available: {list(tool_map.keys())}", tool_call_id=tool_id)
     try:
-        if hasattr(tool, "coroutine") and tool.coroutine:
-            result = await tool.coroutine(tool_args)
+        # Fix 3: Use public ainvoke/invoke API instead of tool.coroutine.
+        # ainvoke handles input validation, callbacks, and config propagation.
+        if hasattr(tool, "ainvoke"):
+            result = await tool.ainvoke(tool_args)
         else:
             result = tool.invoke(tool_args)
         return ToolMessage(content=str(result), tool_call_id=tool_id)
@@ -251,6 +277,12 @@ async def _run_tool_loop(llm_with_tools, messages, tools, max_turns=MAX_TOOL_TUR
         trace = []
     tool_calls_log = []
     current_messages = list(messages)
+    # Fix 5: Guard against max_turns <= 0 to prevent unbound response variable
+    if max_turns <= 0:
+        logger.warning("[%s] max_turns=%d, skipping tool loop", agent_name.upper(), max_turns)
+        trace.append(f"{agent_name}: tool loop skipped (max_turns={max_turns})")
+        last_msg = current_messages[-1] if current_messages else AIMessage(content="")
+        return last_msg, tokens_used, tool_calls_log
     for turn in range(max_turns):
         response = await llm_with_tools.ainvoke(current_messages)
         tokens_used += _extract_token_count(response)
@@ -264,14 +296,22 @@ async def _run_tool_loop(llm_with_tools, messages, tools, max_turns=MAX_TOOL_TUR
         for tc in tool_calls:
             tool_msg = await _execute_tool_call(tc, tools)
             current_messages.append(tool_msg)
-            tool_calls_log.append({"agent": agent_name, "turn": turn + 1, "tool": tc.get("name", "unknown"), "args_preview": str(tc.get("args", {}))[:200], "result_preview": str(tool_msg.content)[:200], "success": not tool_msg.content.startswith("Error")})
+            # Fix 4: Sanitize previews before persisting to tool_calls_log
+            tool_calls_log.append({"agent": agent_name, "turn": turn + 1, "tool": tc.get("name", "unknown"), "args_preview": _sanitize_preview(str(tc.get("args", {}))), "result_preview": _sanitize_preview(str(tool_msg.content)), "success": not tool_msg.content.startswith("Error")})
     trace.append(f"{agent_name}: tool loop hit max turns ({max_turns})")
     logger.warning("[%s] Hit max tool turns (%d)", agent_name.upper(), max_turns)
     return response, tokens_used, tool_calls_log
 
 
 def _run_async(coro):
-    """Run an async coroutine from sync context for the tool loop."""
+    """Run an async coroutine from sync context for the tool loop.
+
+    Design note (re: CodeRabbit #8): This is intentional. developer_node and
+    qa_node are sync functions that use _run_async() to bridge into the async
+    tool loop. run_task() uses workflow.invoke() (sync). Converting everything
+    to async would cascade changes to CLI, tests, and callers with no benefit
+    since LangGraph handles sync nodes with internal async bridges fine.
+    """
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
