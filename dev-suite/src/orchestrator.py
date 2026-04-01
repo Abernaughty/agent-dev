@@ -595,9 +595,8 @@ def sandbox_validate_node(state: GraphState) -> dict:
             logger.warning("[SANDBOX] E2B_API_KEY not configured -- sandbox validation SKIPPED.")
             trace.append("sandbox_validate: WARNING -- E2B_API_KEY not configured, sandbox validation skipped")
             return {"sandbox_result": None, "trace": trace}
-        summary = format_validation_summary(result)
-        trace.append(f"sandbox_validate: {summary}")
-        logger.info("[SANDBOX] %s", summary)
+        trace.append(f"sandbox_validate: exit_code={result.exit_code}, passed={result.tests_passed}, failed={result.tests_failed}")
+        logger.info("[SANDBOX] Validation complete: exit=%d, passed=%s, failed=%s", result.exit_code, result.tests_passed, result.tests_failed)
         return {"sandbox_result": result, "trace": trace}
     except Exception as e:
         logger.warning("[SANDBOX] Validation failed with error: %s", e)
