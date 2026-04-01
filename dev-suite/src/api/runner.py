@@ -1,6 +1,7 @@
 """Async task runner bridging the FastAPI API to the LangGraph orchestrator.
 
 Issue #48: StateManager <-> Orchestrator bridge
+Issue #80: Tool binding -- tools_config initialization, TOOL_CALL SSE events
 
 Uses LangGraph's astream() to iterate node completions and emit SSE events
 in real time. Runs entirely on the async event loop -- no threading needed.
@@ -28,6 +29,7 @@ from ..orchestrator import (
     GraphState,
     WorkflowStatus,
     build_graph,
+    init_tools_config,
     MAX_RETRIES,
     TOKEN_BUDGET,
 )
@@ -92,6 +94,8 @@ class TaskRunner:
 
     def __init__(self):
         self._tasks: dict[str, asyncio.Task] = {}
+        # Fix 6: Track per-task dev tool call baselines for per-pass counting
+        self._dev_tool_baselines: dict[str, int] = {}
 
     def submit(self, task_id: str, description: str) -> None:
         """Submit a task for background execution."""
@@ -122,6 +126,7 @@ class TaskRunner:
         if self._tasks:
             await asyncio.gather(*self._tasks.values(), return_exceptions=True)
         self._tasks.clear()
+        self._dev_tool_baselines.clear()
         logger.info("TaskRunner shutdown complete")
 
     @property
@@ -133,6 +138,8 @@ class TaskRunner:
         from .state import state_manager
 
         start_time = time.time()
+        # Fix 6: Initialize per-task dev tool baseline
+        self._dev_tool_baselines[task_id] = 0
 
         try:
             await self._emit_progress(task_id, "task_started", None, f"Task started: {description[:100]}")
@@ -141,6 +148,14 @@ class TaskRunner:
 
             graph = build_graph()
             workflow = graph.compile()
+
+            # Initialize tools config (issue #80)
+            tools_config = init_tools_config()
+            n_tools = len(tools_config.get("configurable", {}).get("tools", []))
+            if n_tools > 0:
+                await self._emit_log(f"[orchestrator] {n_tools} tools loaded for agents")
+            else:
+                await self._emit_log("[orchestrator] No tools configured (single-shot mode)")
 
             initial_state: GraphState = {
                 "task_description": description,
@@ -154,13 +169,35 @@ class TaskRunner:
                 "memory_context": [],
                 "trace": [],
                 "parsed_files": [],
+                "tool_calls_log": [],
+            }
+
+            stream_config = {
+                "recursion_limit": 25,
+                **tools_config,
             }
 
             prev_node = None
-            async for event in workflow.astream(initial_state, config={"recursion_limit": 25}):
+            prev_tool_count = 0
+            async for event in workflow.astream(initial_state, config=stream_config):
                 for node_name, node_output in event.items():
                     if node_name.startswith("__"):
                         continue
+
+                    # Emit tool_call SSE events for any new tool calls (issue #80)
+                    tool_calls_log = node_output.get("tool_calls_log", [])
+                    if len(tool_calls_log) > prev_tool_count:
+                        new_calls = tool_calls_log[prev_tool_count:]
+                        for tc in new_calls:
+                            await self._emit_tool_call(
+                                task_id,
+                                tc.get("agent", "unknown"),
+                                tc.get("tool", "unknown"),
+                                tc.get("success", True),
+                                tc.get("result_preview", ""),
+                            )
+                        prev_tool_count = len(tool_calls_log)
+
                     await self._handle_node_completion(
                         task_id, node_name, node_output, state_manager, prev_node,
                     )
@@ -181,9 +218,7 @@ class TaskRunner:
             if task:
                 task.status = TaskStatus.CANCELLED
                 task.completed_at = datetime.now(timezone.utc)
-            for agent_id in ("arch", "dev", "qa"):
-                await state_manager.update_agent_status(agent_id, AgentStatus.IDLE)
-            await self._emit_complete(task_id, "cancelled", "Task cancelled by user")
+            await self._emit_complete(task_id, "cancelled", "Task was cancelled")
 
         except Exception as e:
             logger.error("Task %s failed with exception: %s", task_id, e, exc_info=True)
@@ -196,6 +231,10 @@ class TaskRunner:
                 await state_manager.update_agent_status(agent_id, AgentStatus.IDLE)
             await self._emit_complete(task_id, "failed", f"Task failed: {e}")
             await self._emit_log(f"[orchestrator] ERROR: {e}")
+
+        finally:
+            # Fix 6: Clean up per-task baseline
+            self._dev_tool_baselines.pop(task_id, None)
 
     async def _handle_node_completion(self, task_id, node_name, node_output, state_manager, prev_node):
         """Process a completed node and emit appropriate SSE events."""
@@ -303,12 +342,23 @@ class TaskRunner:
     async def _handle_developer(self, task_id, output, task, state_manager):
         code = output.get("generated_code", "")
         task.generated_code = code
+
+        # Fix 6: Use per-pass baseline to count only new tool calls from this dev pass
+        tool_calls_log = output.get("tool_calls_log", [])
+        baseline = self._dev_tool_baselines.get(task_id, 0)
+        dev_tool_calls = [tc for tc in tool_calls_log[baseline:] if tc.get("agent") == "developer"]
+        self._dev_tool_baselines[task_id] = len(tool_calls_log)
+
         if code:
             action = f"Code generated ({len(code):,} chars)"
+            if dev_tool_calls:
+                action += f" using {len(dev_tool_calls)} tool call(s)"
             event_type = "code"
             retry = task.budget.retries_used
             if retry > 0:
                 action = f"Retry {retry}/{task.budget.max_retries} -- code regenerated ({len(code):,} chars)"
+                if dev_tool_calls:
+                    action += f" using {len(dev_tool_calls)} tool call(s)"
                 event_type = "retry"
             await self._emit_log("[sandbox:locked] E2B micro-VM started (dev-sandbox)")
         else:
@@ -361,6 +411,22 @@ class TaskRunner:
             await event_bus.publish(SSEEvent(type=EventType.LOG_LINE, data={"message": message, "level": "info"}))
         except Exception:
             logger.debug("Failed to emit log_line", exc_info=True)
+
+    async def _emit_tool_call(self, task_id, agent, tool_name, success, result_preview):
+        """Emit a TOOL_CALL SSE event for dashboard tool usage tracking (issue #80)."""
+        try:
+            await event_bus.publish(SSEEvent(
+                type=EventType.TOOL_CALL,
+                data={
+                    "task_id": task_id,
+                    "agent": agent,
+                    "tool": tool_name,
+                    "success": success,
+                    "result_preview": result_preview[:100] if result_preview else "",
+                },
+            ))
+        except Exception:
+            logger.debug("Failed to emit tool_call", exc_info=True)
 
 
 # -- Singleton --

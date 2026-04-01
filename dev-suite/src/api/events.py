@@ -1,6 +1,7 @@
 """Async event bus for real-time SSE streaming to the dashboard.
 
 Issue #35: SSE Event System -- Real-Time Task Streaming
+Issue #80: Added TOOL_CALL event type for agent tool usage tracking
 
 The EventBus is a singleton that LangGraph nodes publish events to.
 Connected SSE clients each get their own asyncio.Queue for fan-out.
@@ -49,6 +50,7 @@ class EventType(str, Enum):
     MEMORY_ADDED = "memory_added"
     LOG_LINE = "log_line"
     QA_ESCALATION = "qa_escalation"
+    TOOL_CALL = "tool_call"
 
 
 class SSEEvent(BaseModel):
