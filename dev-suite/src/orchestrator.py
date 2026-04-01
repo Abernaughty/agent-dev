@@ -639,11 +639,7 @@ def flush_memory_node(state: GraphState) -> dict:
     except Exception as e:
         trace.append(f"flush_memory: store write failed: {e}")
         logger.warning("[FLUSH] Memory store write failed: %s", e)
-<<<<<<< Updated upstream
-    return {"trace": trace, "memory_writes_flushed": consolidated}
-=======
     return {"trace": trace, "memory_writes_flushed": written_entries}
->>>>>>> Stashed changes
 
 
 def route_after_qa(state: GraphState) -> Literal["flush_memory", "developer", "architect", "__end__"]:
