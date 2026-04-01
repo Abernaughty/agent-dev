@@ -6,6 +6,7 @@
  *
  * Issue #37: SvelteKit API Routes & Providers
  * Issue #19: Added confidence, sandbox, related_files to MemoryEntry; AuditLogEntry
+ * Issue #85: Added tool_call SSE event type and ToolCallEvent interface
  */
 
 // -- Envelope --
@@ -174,7 +175,16 @@ export type SSEEventType =
 	| 'task_progress'
 	| 'task_complete'
 	| 'memory_added'
-	| 'log_line';
+	| 'log_line'
+	| 'tool_call';
+
+export interface ToolCallEvent {
+	task_id: string;
+	agent: string;
+	tool: string;
+	success: boolean;
+	result_preview: string;
+}
 
 export interface SSEEventData {
 	type: SSEEventType;

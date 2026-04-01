@@ -2,17 +2,58 @@
  * Tasks store — reactive task list.
  *
  * Initialised by fetching GET /api/tasks.
- * Updated in real-time from SSE `task_progress` and `task_complete` events.
+ * Updated in real-time from SSE `task_progress`, `task_complete`,
+ * and `tool_call` events.
  * Supports mutations: create, cancel, retry.
  *
  * Issue #37
+ * Issue #85: Added handleToolCall() for TOOL_CALL SSE events
  */
 
-import type { TaskSummary, TaskStatus, CreateTaskResponse } from '$lib/types/api.js';
+import type { TaskSummary, TaskStatus, CreateTaskResponse, ToolCallEvent, TimelineEvent } from '$lib/types/api.js';
 
 let tasks = $state<TaskSummary[]>([]);
 let loading = $state(false);
 let error = $state<string | null>(null);
+
+/**
+ * Buffer for tool call events that arrive before the task exists in memory
+ * or while a refresh() is in flight. Keyed by task_id.
+ * (CodeRabbit fix #2 — prevent reconnect hydration from erasing in-flight tool calls)
+ */
+const pendingToolCalls = new Map<string, TimelineEvent[]>();
+
+/** Format current time as HH:MM for timeline entries. */
+function nowTime(): string {
+	const d = new Date();
+	return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
+}
+
+/** Convert a ToolCallEvent into a TimelineEvent for the task timeline. */
+function toolCallToTimeline(data: ToolCallEvent): TimelineEvent {
+	const statusIcon = data.success ? '\u2713' : '\u2717';
+	const preview = data.result_preview
+		? `: ${data.result_preview.slice(0, 80)}${data.result_preview.length > 80 ? '...' : ''}`
+		: '';
+	return {
+		time: nowTime(),
+		agent: data.agent === 'developer' ? 'dev' : data.agent === 'qa' ? 'qa' : data.agent,
+		action: `${statusIcon} ${data.tool}${preview}`,
+		type: 'tool_call',
+		sandbox: 'locked'
+	};
+}
+
+/**
+ * Replay any buffered tool call timeline events into a task's timeline.
+ * Returns the merged timeline, or the original if no buffered events exist.
+ */
+function replayBuffered(task: TaskSummary): TimelineEvent[] {
+	const buffered = pendingToolCalls.get(task.id);
+	if (!buffered || buffered.length === 0) return task.timeline;
+	pendingToolCalls.delete(task.id);
+	return [...task.timeline, ...buffered];
+}
 
 export const tasksStore = {
 	get list() {
@@ -29,7 +70,11 @@ export const tasksStore = {
 		return tasks.filter((t) => active.includes(t.status));
 	},
 
-	/** Fetch tasks from the proxy route. */
+	/**
+	 * Fetch tasks from the proxy route.
+	 * After fetching, replays any buffered tool call events that arrived
+	 * while the fetch was in flight (CodeRabbit fix #2).
+	 */
 	async refresh() {
 		loading = true;
 		error = null;
@@ -37,7 +82,12 @@ export const tasksStore = {
 			const res = await fetch('/api/tasks');
 			const body = await res.json();
 			if (res.ok && body.data) {
-				tasks = body.data;
+				const fetched = body.data as TaskSummary[];
+				// Merge buffered tool call events into fetched tasks
+				tasks = fetched.map((t) => ({
+					...t,
+					timeline: replayBuffered(t)
+				}));
 			} else {
 				error = body.errors?.[0] ?? 'Failed to fetch tasks';
 			}
@@ -142,9 +192,37 @@ export const tasksStore = {
 		);
 	},
 
+	/**
+	 * Apply an SSE tool_call event (Issue #85).
+	 *
+	 * Appends tool calls as timeline events on the matching task.
+	 * If the task isn't in memory yet (e.g. during reconnect refresh),
+	 * buffers the event for replay once refresh() completes (CodeRabbit fix #2).
+	 */
+	handleToolCall(data: ToolCallEvent) {
+		const timelineEvent = toolCallToTimeline(data);
+
+		const idx = tasks.findIndex((t) => t.id === data.task_id);
+		if (idx < 0) {
+			// Task not in memory — buffer for replay after refresh()
+			const existing = pendingToolCalls.get(data.task_id) ?? [];
+			existing.push(timelineEvent);
+			pendingToolCalls.set(data.task_id, existing);
+			return;
+		}
+
+		const task = tasks[idx];
+		const newTimeline = [...task.timeline, timelineEvent];
+
+		tasks = tasks.map((t, i) =>
+			i === idx ? { ...t, timeline: newTimeline } : t
+		);
+	},
+
 	/** Reset to empty state. */
 	reset() {
 		tasks = [];
 		error = null;
+		pendingToolCalls.clear();
 	}
 };
