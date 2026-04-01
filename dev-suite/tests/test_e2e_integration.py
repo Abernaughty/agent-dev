@@ -25,6 +25,7 @@ from pathlib import Path
 
 import pytest
 
+import src.orchestrator as orchestrator
 from src.orchestrator import AgentState, WorkflowStatus, run_task
 
 
@@ -208,10 +209,19 @@ class TestE2EIntegration:
 
     @pytest.fixture(autouse=True)
     def _configure_env(self, workspace, mcp_config, monkeypatch):
-        """Point the orchestrator at the temp workspace with generous budgets."""
+        """Point the orchestrator at the temp workspace with generous budgets.
+
+        Note: TOKEN_BUDGET and MAX_RETRIES are module-level globals in
+        src.orchestrator, evaluated at import time via _safe_int(). Setting
+        os.environ alone won't affect them -- we must patch the module
+        globals directly.
+        """
         monkeypatch.setenv("WORKSPACE_ROOT", str(workspace))
         monkeypatch.setenv("TOKEN_BUDGET", "100000")
         monkeypatch.setenv("MAX_RETRIES", "3")
+        # Patch module globals directly (evaluated at import time)
+        monkeypatch.setattr(orchestrator, "TOKEN_BUDGET", 100000)
+        monkeypatch.setattr(orchestrator, "MAX_RETRIES", 3)
         # Store workspace on self for assertions
         self._workspace = workspace
         self._has_e2b = bool(os.getenv("E2B_API_KEY"))
@@ -284,6 +294,7 @@ class TestE2EIntegration:
         assert _has_node_in_trace(trace, "apply_code"), "Trace should show apply_code ran"
         assert _has_node_in_trace(trace, "sandbox_validate"), "Trace should show sandbox_validate ran"
         assert _has_node_in_trace(trace, "qa"), "Trace should show qa ran"
+        assert _has_node_in_trace(trace, "flush_memory"), "Trace should show flush_memory ran"
 
         # -- Memory layer engaged --
 
@@ -308,14 +319,25 @@ class TestE2EIntegration:
                 f"Developer should use filesystem tools, got: {dev_tool_names}"
             )
 
-        # -- Files written to workspace --
+        # -- Files written to workspace by apply_code --
 
-        if result.parsed_files:
-            for pf in result.parsed_files:
-                file_path = workspace / pf["path"]
-                assert file_path.exists(), (
-                    f"Parsed file should exist on disk: {pf['path']}"
-                )
+        assert result.parsed_files, "apply_code should parse at least one file"
+        workspace_root = workspace.resolve()
+        for pf in result.parsed_files:
+            file_path = (workspace / pf["path"]).resolve()
+            # Verify file stays within workspace (no path traversal)
+            assert file_path == workspace_root or workspace_root in file_path.parents, (
+                f"Parsed file escaped workspace: {pf['path']}"
+            )
+            assert file_path.exists(), (
+                f"Parsed file should exist on disk: {pf['path']}"
+            )
+            # Verify on-disk content matches what apply_code wrote
+            disk_content = file_path.read_text(encoding="utf-8").strip()
+            parsed_content = pf["content"].strip()
+            assert disk_content == parsed_content, (
+                f"Disk content should match parsed content for {pf['path']}"
+            )
 
         # -- Sandbox validation (conditional on E2B key) --
 
