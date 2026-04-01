@@ -379,14 +379,17 @@ class E2BRunner:
             timeout: Test timeout in seconds.
             template: Sandbox template name or ID (e.g., "fullstack" for Node.js tasks).
         """
-        # Build code that writes files then runs tests
+        # Build code that writes files then runs tests.
+        # File content is base64-encoded to avoid escaping issues with
+        # triple-quoted strings, embedded quotes, and multiline content.
         setup_code = ""
         if project_files:
-            setup_code += "import os\n"
+            import base64 as _b64
+            setup_code += "import os, base64\n"
             for fpath, content in project_files.items():
-                escaped = content.replace("\\", "\\\\").replace("'", "\\'")
+                b64 = _b64.b64encode(content.encode("utf-8")).decode("ascii")
                 setup_code += f"os.makedirs(os.path.dirname('{fpath}') or '.', exist_ok=True)\n"
-                setup_code += f"open('{fpath}', 'w').write('{escaped}')\n"
+                setup_code += f"open('{fpath}', 'w').write(base64.b64decode('{b64}').decode('utf-8'))\n"
 
         run_code = f"""
 import subprocess
