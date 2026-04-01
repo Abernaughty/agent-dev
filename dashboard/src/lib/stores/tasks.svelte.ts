@@ -2,17 +2,25 @@
  * Tasks store — reactive task list.
  *
  * Initialised by fetching GET /api/tasks.
- * Updated in real-time from SSE `task_progress` and `task_complete` events.
+ * Updated in real-time from SSE `task_progress`, `task_complete`,
+ * and `tool_call` events.
  * Supports mutations: create, cancel, retry.
  *
  * Issue #37
+ * Issue #85: Added handleToolCall() for TOOL_CALL SSE events
  */
 
-import type { TaskSummary, TaskStatus, CreateTaskResponse } from '$lib/types/api.js';
+import type { TaskSummary, TaskStatus, CreateTaskResponse, ToolCallEvent } from '$lib/types/api.js';
 
 let tasks = $state<TaskSummary[]>([]);
 let loading = $state(false);
 let error = $state<string | null>(null);
+
+/** Format current time as HH:MM for timeline entries. */
+function nowTime(): string {
+	const d = new Date();
+	return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
+}
 
 export const tasksStore = {
 	get list() {
@@ -139,6 +147,40 @@ export const tasksStore = {
 	handleComplete(data: { task_id: string; status: string; detail: string }) {
 		tasks = tasks.map((t) =>
 			t.id === data.task_id ? { ...t, status: data.status as TaskStatus } : t
+		);
+	},
+
+	/**
+	 * Apply an SSE tool_call event (Issue #85).
+	 *
+	 * Appends tool calls as timeline events on the matching task.
+	 * This keeps tool calls in chronological order alongside other
+	 * timeline events, so the TimelineView renders them naturally.
+	 */
+	handleToolCall(data: ToolCallEvent) {
+		const idx = tasks.findIndex((t) => t.id === data.task_id);
+		if (idx < 0) return;
+
+		const task = tasks[idx];
+		const statusIcon = data.success ? '\u2713' : '\u2717';
+		const preview = data.result_preview
+			? `: ${data.result_preview.slice(0, 80)}${data.result_preview.length > 80 ? '...' : ''}`
+			: '';
+		const action = `${statusIcon} ${data.tool}${preview}`;
+
+		const newTimeline = [
+			...task.timeline,
+			{
+				time: nowTime(),
+				agent: data.agent === 'developer' ? 'dev' : data.agent === 'qa' ? 'qa' : data.agent,
+				action,
+				type: 'tool_call',
+				sandbox: 'locked'
+			}
+		];
+
+		tasks = tasks.map((t, i) =>
+			i === idx ? { ...t, timeline: newTimeline } : t
 		);
 	},
 

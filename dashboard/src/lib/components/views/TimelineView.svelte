@@ -5,6 +5,7 @@
 	the most recent (or active) task.
 
 	Issue #38: Data Integration — PR3
+	Issue #85: Added tool_call event rendering
 -->
 <script lang="ts">
 	import { tasksStore } from '$lib/stores/tasks.svelte.js';
@@ -36,7 +37,8 @@
 		exec: { color: 'var(--color-accent-yellow)', label: 'EXEC' },
 		fail: { color: 'var(--color-accent-red)', label: 'FAIL' },
 		retry: { color: 'var(--color-accent-orange)', label: 'RETRY' },
-		success: { color: 'var(--color-accent-green)', label: 'DONE' }
+		success: { color: 'var(--color-accent-green)', label: 'DONE' },
+		tool_call: { color: 'var(--color-accent-blue, #60a5fa)', label: 'TOOL' }
 	};
 
 	function budgetPct(b: TaskBudget): number {
@@ -47,6 +49,11 @@
 		if (pct > 90) return 'var(--color-accent-red)';
 		if (pct > 75) return 'var(--color-accent-amber)';
 		return 'var(--color-accent-cyan)';
+	}
+
+	/** Check if an event is a tool_call for compact rendering. */
+	function isToolCall(event: TimelineEvent): boolean {
+		return event.type === 'tool_call';
 	}
 </script>
 
@@ -100,6 +107,7 @@
 			{@const style = eventStyles[event.type] ?? { color: 'var(--color-text-dim)', label: '?' }}
 			{@const isFail = event.type === 'fail'}
 			{@const isSuccess = event.type === 'success'}
+			{@const isTool = isToolCall(event)}
 			{@const isLast = i === task.timeline.length - 1}
 
 			<div class="relative flex gap-3 pb-0.5">
@@ -107,32 +115,56 @@
 					<div class="absolute bottom-0 left-[13px] top-7 w-px" style="background: var(--color-border);"></div>
 				{/if}
 
+				<!-- Agent avatar — smaller for tool calls -->
 				<div
-					class="z-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[10px] font-semibold"
+					class="z-1 flex shrink-0 items-center justify-center rounded-md font-semibold"
+					class:h-7={!isTool}
+					class:w-7={!isTool}
+					class:text-[10px]={!isTool}
+					class:h-5={isTool}
+					class:w-5={isTool}
+					class:text-[8px]={isTool}
+					class:mt-0.5={isTool}
+					class:ml-1={isTool}
 					style="background: {agent.color}18; border: 1px solid {agent.color}25; color: {agent.color};"
 				>
 					{agent.name.charAt(0)}
 				</div>
 
+				<!-- Event card — compact for tool calls -->
 				<div
-					class="mb-1.5 flex-1 rounded-md border p-1.5 px-3"
+					class="mb-1.5 flex-1 rounded-md border"
+					class:p-1.5={!isTool}
+					class:px-3={!isTool}
+					class:py-1={isTool}
+					class:px-2.5={isTool}
 					style="
 						background: {style.color}08;
 						border-color: {isFail ? style.color + '40' : 'var(--color-border)'};
-						border-left: {isFail ? '3px solid ' + style.color : isSuccess ? '3px solid ' + style.color : '1px solid var(--color-border)'};
+						border-left: {isFail ? '3px solid ' + style.color : isSuccess ? '3px solid ' + style.color : isTool ? '2px solid ' + style.color + '40' : '1px solid var(--color-border)'};
+						{isTool ? 'opacity: 0.85;' : ''}
 					"
 				>
-					<div class="mb-0.5 flex items-center justify-between">
+					<div class="flex items-center justify-between" class:mb-0.5={!isTool}>
 						<div class="flex items-center gap-1.5">
-							<span class="text-[10px]" style="color: {agent.color};">{agent.name}</span>
+							{#if !isTool}
+								<span class="text-[10px]" style="color: {agent.color};">{agent.name}</span>
+							{/if}
 							<span
-								class="rounded-sm px-1.5 py-px text-[8px] font-semibold"
+								class="rounded-sm px-1.5 py-px font-semibold"
+								class:text-[8px]={!isTool}
+								class:text-[7px]={isTool}
 								style="color: {style.color}; background: {style.color}18; letter-spacing: 0.5px;"
 							>{style.label}</span>
 						</div>
 						<span class="text-[9px]" style="color: var(--color-text-faint);">{event.time}</span>
 					</div>
-					<div class="text-[11px] leading-relaxed" style="color: {isFail ? '#f8a0a0' : isSuccess ? '#6ee7b7' : 'var(--color-text-muted)'};">
+					<div
+						class="leading-relaxed"
+						class:text-[11px]={!isTool}
+						class:text-[10px]={isTool}
+						style="color: {isFail ? '#f8a0a0' : isSuccess ? '#6ee7b7' : isTool ? 'var(--color-text-dim)' : 'var(--color-text-muted)'};"
+					>
 						{event.action}
 					</div>
 				</div>
@@ -153,7 +185,7 @@
 						{ label: 'Tokens Used', value: (task.budget.tokens_used).toLocaleString(), sub: `of ${task.budget.token_budget.toLocaleString()} budget`, icon: 'Tk' },
 						{ label: 'Cost', value: `$${task.budget.cost_used.toFixed(2)}`, sub: `of $${task.budget.cost_budget} budget`, icon: '$' },
 						{ label: 'Retries', value: String(task.budget.retries_used), sub: `of ${task.budget.max_retries} max`, icon: 'Rt' },
-						{ label: 'Events', value: String(task.timeline.length), sub: 'timeline entries', icon: 'Ev' }
+						{ label: 'Events', value: String(task.timeline.length), sub: `${task.timeline.filter(e => e.type === 'tool_call').length} tool calls`, icon: 'Ev' }
 					] as metric}
 						<div class="rounded-md border p-2.5" style="background: var(--color-bg-primary); border-color: var(--color-border);">
 							<div class="mb-1 flex items-center justify-between">

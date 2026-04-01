@@ -15,13 +15,14 @@
  *   });
  *
  * Issue #37
+ * Issue #85: Added tool_call event handling
  */
 
 import { connection } from '$lib/stores/connection.svelte.js';
 import { agentsStore } from '$lib/stores/agents.svelte.js';
 import { tasksStore } from '$lib/stores/tasks.svelte.js';
 import { memoryStore } from '$lib/stores/memory.svelte.js';
-import type { SSEEventType } from '$lib/types/api.js';
+import type { SSEEventType, ToolCallEvent } from '$lib/types/api.js';
 
 /** Backoff config */
 const INITIAL_DELAY_MS = 1000;
@@ -65,6 +66,10 @@ function dispatch(eventType: SSEEventType, payload: Record<string, unknown>) {
 			memoryStore.handleSSE(
 				payload as { id: string; tier: string; agent: string; content: string; status: string }
 			);
+			break;
+
+		case 'tool_call':
+			tasksStore.handleToolCall(payload as ToolCallEvent);
 			break;
 
 		case 'log_line':
@@ -140,7 +145,8 @@ function connect() {
 			'task_progress',
 			'task_complete',
 			'memory_added',
-			'log_line'
+			'log_line',
+			'tool_call'
 		];
 
 		for (const type of eventTypes) {
