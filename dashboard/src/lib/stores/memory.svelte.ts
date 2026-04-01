@@ -9,6 +9,7 @@
  * Audit log fetched from backend.
  *
  * Issue #37, #19
+ * Issue #92: handleSSE now upserts — creates new entries from flush_memory SSE events
  */
 
 import type { MemoryEntry, MemoryStatus, AuditLogEntry } from '$lib/types/api.js';
@@ -212,13 +213,52 @@ export const memoryStore = {
 		return { succeeded, failed };
 	},
 
-	/** Apply an SSE memory_added event. */
-	handleSSE(data: { id: string; tier: string; agent: string; content: string; status: string }) {
+	/**
+	 * Apply an SSE memory_added event.
+	 *
+	 * Issue #92: Now upserts — if the entry doesn't exist in the store,
+	 * creates it from the SSE payload. This bridges flush_memory writes
+	 * (which go to Chroma) into the dashboard's in-memory state.
+	 *
+	 * The SSE payload from the runner includes full MemoryEntryResponse fields.
+	 */
+	handleSSE(data: {
+		id: string;
+		tier: string;
+		agent: string;
+		content: string;
+		status: string;
+		module?: string;
+		confidence?: number;
+		sandbox?: string;
+		related_files?: string[];
+		expires_at?: number | null;
+		hours_remaining?: number | null;
+	}) {
 		const idx = entries.findIndex((e) => e.id === data.id);
 		if (idx >= 0) {
+			// Update existing entry
 			entries = entries.map((e) =>
 				e.id === data.id ? { ...e, status: data.status as MemoryStatus } : e
 			);
+		} else {
+			// Upsert: create new entry from SSE payload (Issue #92)
+			const newEntry: MemoryEntry = {
+				id: data.id,
+				content: data.content,
+				tier: data.tier as MemoryEntry['tier'],
+				module: data.module ?? 'global',
+				source_agent: data.agent,
+				verified: data.status === 'approved',
+				status: (data.status ?? 'pending') as MemoryStatus,
+				created_at: Date.now() / 1000,
+				expires_at: data.expires_at ?? null,
+				hours_remaining: data.hours_remaining ?? null,
+				confidence: data.confidence ?? 0,
+				sandbox: data.sandbox ?? 'locked-down',
+				related_files: data.related_files ?? []
+			};
+			entries = [...entries, newEntry];
 		}
 	},
 
