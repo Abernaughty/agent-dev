@@ -94,6 +94,8 @@ class TaskRunner:
 
     def __init__(self):
         self._tasks: dict[str, asyncio.Task] = {}
+        # Fix 6: Track per-task dev tool call baselines for per-pass counting
+        self._dev_tool_baselines: dict[str, int] = {}
 
     def submit(self, task_id: str, description: str) -> None:
         """Submit a task for background execution."""
@@ -124,6 +126,7 @@ class TaskRunner:
         if self._tasks:
             await asyncio.gather(*self._tasks.values(), return_exceptions=True)
         self._tasks.clear()
+        self._dev_tool_baselines.clear()
         logger.info("TaskRunner shutdown complete")
 
     @property
@@ -135,6 +138,8 @@ class TaskRunner:
         from .state import state_manager
 
         start_time = time.time()
+        # Fix 6: Initialize per-task dev tool baseline
+        self._dev_tool_baselines[task_id] = 0
 
         try:
             await self._emit_progress(task_id, "task_started", None, f"Task started: {description[:100]}")
@@ -226,6 +231,10 @@ class TaskRunner:
                 await state_manager.update_agent_status(agent_id, AgentStatus.IDLE)
             await self._emit_complete(task_id, "failed", f"Task failed: {e}")
             await self._emit_log(f"[orchestrator] ERROR: {e}")
+
+        finally:
+            # Fix 6: Clean up per-task baseline
+            self._dev_tool_baselines.pop(task_id, None)
 
     async def _handle_node_completion(self, task_id, node_name, node_output, state_manager, prev_node):
         """Process a completed node and emit appropriate SSE events."""
@@ -334,9 +343,11 @@ class TaskRunner:
         code = output.get("generated_code", "")
         task.generated_code = code
 
-        # Log tool usage summary (issue #80)
+        # Fix 6: Use per-pass baseline to count only new tool calls from this dev pass
         tool_calls_log = output.get("tool_calls_log", [])
-        dev_tool_calls = [tc for tc in tool_calls_log if tc.get("agent") == "developer"]
+        baseline = self._dev_tool_baselines.get(task_id, 0)
+        dev_tool_calls = [tc for tc in tool_calls_log[baseline:] if tc.get("agent") == "developer"]
+        self._dev_tool_baselines[task_id] = len(tool_calls_log)
 
         if code:
             action = f"Code generated ({len(code):,} chars)"
