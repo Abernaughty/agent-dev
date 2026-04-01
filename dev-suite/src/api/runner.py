@@ -256,7 +256,7 @@ class TaskRunner:
             new_task_status = WORKFLOW_TO_TASK_STATUS.get(workflow_status)
             if new_task_status:
                 task.status = new_task_status
-                if new_task_status in (TaskStatus.PASSED, TaskStatus.FAILED, TaskStatus.ESCALATED):
+                if new_task_status in (TaskStatus.PASSED, TaskStatus.FAILED):
                     task.completed_at = datetime.now(timezone.utc)
 
         tokens_used = node_output.get("tokens_used", task.budget.tokens_used)

@@ -615,9 +615,9 @@ def flush_memory_node(state: GraphState) -> dict:
         return {"trace": trace}
     consolidated = summarize_writes_sync(memory_writes)
     trace.append(f"flush_memory: summarizer {len(memory_writes)} -> {len(consolidated)} entries")
+    written_entries: list[dict] = []
     try:
         store = _get_memory_store()
-        written = 0
         for entry in consolidated:
             tier = entry.get("tier", "l1")
             content = entry.get("content", "")
@@ -633,13 +633,17 @@ def flush_memory_node(state: GraphState) -> dict:
                 store.add_l2(content, module=module, source_agent=source_agent, related_files=related_files, task_id=task_id)
             else:
                 store.add_l1(content, module=module, source_agent=source_agent, confidence=confidence, sandbox_origin=sandbox_origin, related_files=related_files, task_id=task_id)
-            written += 1
-        trace.append(f"flush_memory: wrote {written} entries to store")
-        logger.info("[FLUSH] Wrote %d memory entries", written)
+            written_entries.append(entry)
+        trace.append(f"flush_memory: wrote {len(written_entries)} entries to store")
+        logger.info("[FLUSH] Wrote %d memory entries", len(written_entries))
     except Exception as e:
         trace.append(f"flush_memory: store write failed: {e}")
         logger.warning("[FLUSH] Memory store write failed: %s", e)
+<<<<<<< Updated upstream
     return {"trace": trace, "memory_writes_flushed": consolidated}
+=======
+    return {"trace": trace, "memory_writes_flushed": written_entries}
+>>>>>>> Stashed changes
 
 
 def route_after_qa(state: GraphState) -> Literal["flush_memory", "developer", "architect", "__end__"]:
