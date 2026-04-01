@@ -28,6 +28,7 @@ from langchain_core.messages import (
     SystemMessage,
     ToolMessage,
 )
+from langchain_core.runnables.config import RunnableConfig
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel
@@ -374,7 +375,7 @@ Do not include any text before or after the JSON.{memory_block}"""
     return {"blueprint": blueprint, "status": WorkflowStatus.BUILDING, "tokens_used": tokens_used, "trace": trace, "memory_context": memory_context}
 
 
-def developer_node(state: GraphState, config: dict | None = None) -> dict:
+def developer_node(state: GraphState, config: RunnableConfig | None = None) -> dict:
     """Lead Dev: executes the Blueprint and generates code. Issue #80: tool binding support."""
     trace = list(state.get("trace", []))
     trace.append("developer: starting build")
@@ -489,7 +490,7 @@ def apply_code_node(state: GraphState) -> dict:
     return {"parsed_files": parsed_files_data, "trace": trace}
 
 
-def qa_node(state: GraphState, config: dict | None = None) -> dict:
+def qa_node(state: GraphState, config: RunnableConfig | None = None) -> dict:
     """QA: reviews the generated code. Issue #80: read-only tool access."""
     trace = list(state.get("trace", []))
     trace.append("qa: starting review")
