@@ -98,6 +98,7 @@ class GraphState(TypedDict, total=False):
     sandbox_result: SandboxResult | None
     parsed_files: list[dict]
     tool_calls_log: list[dict]
+    memory_writes_flushed: list[dict]
 
 
 class AgentState(BaseModel):
@@ -638,7 +639,7 @@ def flush_memory_node(state: GraphState) -> dict:
     except Exception as e:
         trace.append(f"flush_memory: store write failed: {e}")
         logger.warning("[FLUSH] Memory store write failed: %s", e)
-    return {"trace": trace}
+    return {"trace": trace, "memory_writes_flushed": consolidated}
 
 
 def route_after_qa(state: GraphState) -> Literal["flush_memory", "developer", "architect", "__end__"]:
