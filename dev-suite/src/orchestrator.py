@@ -695,7 +695,7 @@ def init_tools_config(workspace_root=None):
         logger.info("[TOOLS] Loaded %d tools from provider", len(tools))
         return {"configurable": {"tools": tools}}
     except Exception as e:
-        logger.warning("[TOOLS] Failed to initialize tools: %s", e)
+        logger.warning("[TOOLS] Failed to initialize tools: %s", e, exc_info=True)
         return {"configurable": {"tools": []}}
 
 
