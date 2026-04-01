@@ -12,6 +12,8 @@ Tests cover:
 - init_tools_config() factory
 - TOOL_CALL event type in events.py
 - GraphState tool_calls_log field
+- _sanitize_preview helper (Fix 4)
+- max_turns <= 0 guard (Fix 5)
 """
 
 import asyncio
@@ -22,21 +24,38 @@ import pytest
 
 
 class FakeTool:
+    """Mock tool that supports both ainvoke (async) and invoke (sync) APIs."""
+
     def __init__(self, name, result="ok", should_raise=False):
         self.name = name
         self._result = result
         self._should_raise = should_raise
-        self.coroutine = self._async_call
         self.invoke_count = 0
 
-    async def _async_call(self, args):
+    async def ainvoke(self, args):
+        """Async public API (preferred by _execute_tool_call)."""
         self.invoke_count += 1
         if self._should_raise:
             raise RuntimeError(f"Tool {self.name} failed")
         return self._result
 
     def invoke(self, args):
+        """Sync fallback API."""
         self.invoke_count += 1
+        if self._should_raise:
+            raise RuntimeError(f"Tool {self.name} failed")
+        return self._result
+
+
+class SyncOnlyFakeTool:
+    """Mock tool that only has invoke (no ainvoke) for testing sync fallback."""
+
+    def __init__(self, name, result="ok", should_raise=False):
+        self.name = name
+        self._result = result
+        self._should_raise = should_raise
+
+    def invoke(self, args):
         if self._should_raise:
             raise RuntimeError(f"Tool {self.name} failed")
         return self._result
@@ -73,9 +92,9 @@ class TestGetAgentTools:
 
     def test_filters_by_allowed_names(self):
         from src.orchestrator import _get_agent_tools
-        tools = [FakeTool("filesystem_read"), FakeTool("filesystem_write"), FakeTool("github_create_pr")]
-        result = _get_agent_tools(make_config(tools), {"filesystem_read", "github_create_pr"})
-        assert {t.name for t in result} == {"filesystem_read", "github_create_pr"}
+        tools = [FakeTool("filesystem_read"), FakeTool("filesystem_write"), FakeTool("github_read_diff")]
+        result = _get_agent_tools(make_config(tools), {"filesystem_read", "github_read_diff"})
+        assert {t.name for t in result} == {"filesystem_read", "github_read_diff"}
 
     def test_filters_returns_empty_when_no_match(self):
         from src.orchestrator import _get_agent_tools
@@ -90,6 +109,11 @@ class TestGetAgentTools:
         for name in QA_TOOL_NAMES:
             assert "write" not in name.lower()
             assert "create" not in name.lower()
+
+    def test_dev_has_no_pr_creation(self):
+        """Fix 2: github_create_pr removed from DEV_TOOL_NAMES."""
+        from src.orchestrator import DEV_TOOL_NAMES
+        assert "github_create_pr" not in DEV_TOOL_NAMES
 
 
 class TestExecuteToolCall:
@@ -114,16 +138,19 @@ class TestExecuteToolCall:
         assert "Error executing failing_tool" in result.content
 
     @pytest.mark.asyncio
-    async def test_prefers_async_coroutine(self):
+    async def test_prefers_async_ainvoke(self):
+        """Fix 3: _execute_tool_call uses ainvoke (public API) not tool.coroutine."""
         from src.orchestrator import _execute_tool_call
-        result = await _execute_tool_call({"name": "async_tool", "args": {}, "id": "call_4"}, [FakeTool("async_tool", result="async result")])
+        tool = FakeTool("async_tool", result="async result")
+        result = await _execute_tool_call({"name": "async_tool", "args": {}, "id": "call_4"}, [tool])
         assert result.content == "async result"
+        assert tool.invoke_count == 1
 
     @pytest.mark.asyncio
     async def test_falls_back_to_sync_invoke(self):
+        """Fix 3: Falls back to invoke() when ainvoke is not available."""
         from src.orchestrator import _execute_tool_call
-        tool = FakeTool("sync_tool", result="sync result")
-        tool.coroutine = None
+        tool = SyncOnlyFakeTool("sync_tool", result="sync result")
         result = await _execute_tool_call({"name": "sync_tool", "args": {}, "id": "call_5"}, [tool])
         assert result.content == "sync result"
 
@@ -181,6 +208,18 @@ class TestRunToolLoop:
         _, _, log = await _run_tool_loop(mock_llm, [], [FakeTool("bad_tool", should_raise=True)])
         assert len(log) == 1
         assert log[0]["success"] is False
+
+    @pytest.mark.asyncio
+    async def test_max_turns_zero_returns_immediately(self):
+        """Fix 5: max_turns <= 0 should not crash with unbound response."""
+        from src.orchestrator import _run_tool_loop
+        from langchain_core.messages import HumanMessage
+        mock_llm = AsyncMock()
+        msg = HumanMessage(content="test")
+        response, tokens, log = await _run_tool_loop(mock_llm, [msg], [], max_turns=0, tokens_used=100)
+        assert mock_llm.ainvoke.call_count == 0
+        assert tokens == 100
+        assert len(log) == 0
 
 
 class TestDeveloperNodeTools:
@@ -240,6 +279,7 @@ class TestDeveloperNodeTools:
         assert result["tool_calls_log"][0]["agent"] == "developer"
 
     def test_dev_tools_filtered_to_dev_set(self, base_state):
+        """Fix 2: DEV_TOOL_NAMES no longer includes github_create_pr."""
         from src.orchestrator import DEV_TOOL_NAMES, developer_node
         all_tools = [FakeTool(n) for n in ["filesystem_read", "filesystem_write", "filesystem_list", "github_read_diff", "github_create_pr", "unexpected_tool"]]
         mock_llm = MagicMock()
@@ -250,6 +290,7 @@ class TestDeveloperNodeTools:
             developer_node(base_state, make_config(all_tools))
         bound_names = {t.name for t in mock_llm.bind_tools.call_args[0][0]}
         assert bound_names == DEV_TOOL_NAMES
+        assert "github_create_pr" not in bound_names
 
 
 class TestQANodeTools:
@@ -301,6 +342,35 @@ class TestInitToolsConfig:
         with patch("src.tools.load_mcp_config") as mock_load, patch("src.tools.create_provider") as mock_create, patch("src.tools.get_tools", return_value=mock_tools):
             result = init_tools_config(workspace_root=tmp_path)
         assert len(result["configurable"]["tools"]) == 1
+
+
+class TestSanitizePreview:
+    """Fix 4: _sanitize_preview helper tests."""
+
+    def test_empty_string(self):
+        from src.orchestrator import _sanitize_preview
+        assert _sanitize_preview("") == ""
+
+    def test_normal_text_unchanged(self):
+        from src.orchestrator import _sanitize_preview
+        assert _sanitize_preview("normal tool output") == "normal tool output"
+
+    def test_truncates_long_text(self):
+        from src.orchestrator import _sanitize_preview
+        result = _sanitize_preview("x" * 500)
+        assert len(result) <= 204
+
+    def test_redacts_api_key_pattern(self):
+        from src.orchestrator import _sanitize_preview
+        assert "[REDACTED]" in _sanitize_preview("key is sk_test_abc123def456ghi789")
+
+    def test_redacts_github_token(self):
+        from src.orchestrator import _sanitize_preview
+        assert "[REDACTED]" in _sanitize_preview("token: ghp_abcdefghijklmnopqrstuvwxyz12345678")
+
+    def test_redacts_jwt_pattern(self):
+        from src.orchestrator import _sanitize_preview
+        assert "[REDACTED]" in _sanitize_preview("bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9")
 
 
 class TestToolCallEvent:
