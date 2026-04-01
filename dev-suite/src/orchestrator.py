@@ -11,6 +11,7 @@ LangChain's bind_tools() + iterative tool execution loop.
 Tools are passed via RunnableConfig["configurable"]["tools"].
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -53,18 +54,12 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 
-# -- Configuration --
-
 def _safe_int(env_key: str, default: int) -> int:
-    """Parse an integer from an env var, falling back to default on error."""
     raw = os.getenv(env_key, str(default))
     try:
         return int(raw)
     except (ValueError, TypeError):
-        logger.warning(
-            "%s=%r is not a valid integer, using default %d",
-            env_key, raw, default,
-        )
+        logger.warning("%s=%r is not a valid integer, using default %d", env_key, raw, default)
         return default
 
 MAX_RETRIES = _safe_int("MAX_RETRIES", 3)
@@ -72,18 +67,10 @@ TOKEN_BUDGET = _safe_int("TOKEN_BUDGET", 50000)
 MAX_TOOL_TURNS = _safe_int("MAX_TOOL_TURNS", 10)
 
 
-# -- Workspace --
-
 def _get_workspace_root() -> Path:
-    """Get the workspace root directory.
-
-    Reads WORKSPACE_ROOT env var, falling back to current working directory.
-    """
     raw = os.getenv("WORKSPACE_ROOT", ".")
     return Path(raw).resolve()
 
-
-# -- Workflow State --
 
 class WorkflowStatus(str, Enum):
     PLANNING = "planning"
@@ -95,13 +82,6 @@ class WorkflowStatus(str, Enum):
 
 
 class GraphState(TypedDict, total=False):
-    """State that flows through the LangGraph state machine.
-
-    D1 fix: Uses TypedDict (not Pydantic BaseModel) for reliable dict-merge
-    semantics in LangGraph. Fields present in a node's return dict replace
-    the existing value; fields absent are left unchanged.
-    """
-
     task_description: str
     blueprint: Blueprint | None
     generated_code: str
@@ -119,10 +99,6 @@ class GraphState(TypedDict, total=False):
 
 
 class AgentState(BaseModel):
-    """Pydantic model used at the boundary -- for constructing the initial
-    state and wrapping the final result with validation and attribute access.
-    """
-
     task_description: str = ""
     blueprint: Blueprint | None = None
     generated_code: str = ""
@@ -139,41 +115,19 @@ class AgentState(BaseModel):
     tool_calls_log: list[dict] = []
 
 
-# -- LLM Initialization --
-
 def _get_architect_llm():
-    """Gemini for the Architect agent (large context, planning only)."""
-    return ChatGoogleGenerativeAI(
-        model=os.getenv("ARCHITECT_MODEL", "gemini-3-flash-preview"),
-        google_api_key=os.getenv("GOOGLE_API_KEY"),
-        temperature=0.2,
-    )
+    return ChatGoogleGenerativeAI(model=os.getenv("ARCHITECT_MODEL", "gemini-3-flash-preview"), google_api_key=os.getenv("GOOGLE_API_KEY"), temperature=0.2)
 
 
 def _get_developer_llm():
-    """Claude for the Lead Dev agent (code execution)."""
-    return ChatAnthropic(
-        model=os.getenv("DEVELOPER_MODEL", "claude-sonnet-4-20250514"),
-        api_key=os.getenv("ANTHROPIC_API_KEY"),
-        temperature=0.1,
-        max_tokens=8192,
-    )
+    return ChatAnthropic(model=os.getenv("DEVELOPER_MODEL", "claude-sonnet-4-20250514"), api_key=os.getenv("ANTHROPIC_API_KEY"), temperature=0.1, max_tokens=8192)
 
 
 def _get_qa_llm():
-    """Claude for the QA agent (review and testing)."""
-    return ChatAnthropic(
-        model=os.getenv("QA_MODEL", "claude-sonnet-4-20250514"),
-        api_key=os.getenv("ANTHROPIC_API_KEY"),
-        temperature=0.0,
-        max_tokens=4096,
-    )
+    return ChatAnthropic(model=os.getenv("QA_MODEL", "claude-sonnet-4-20250514"), api_key=os.getenv("ANTHROPIC_API_KEY"), temperature=0.0, max_tokens=4096)
 
-
-# -- Helpers --
 
 def _extract_text_content(content: Any) -> str:
-    """Extract text from an LLM response's content field."""
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -190,7 +144,6 @@ def _extract_text_content(content: Any) -> str:
 
 
 def _extract_json(raw: str) -> dict:
-    """Extract a JSON object from LLM output text."""
     text = raw.strip()
     try:
         return json.loads(text)
@@ -213,14 +166,10 @@ def _extract_json(raw: str) -> dict:
             return json.loads(text[first_brace:last_brace + 1])
         except json.JSONDecodeError:
             pass
-    raise json.JSONDecodeError(
-        f"No valid JSON found in response ({len(text)} chars): {text[:200]}...",
-        text, 0,
-    )
+    raise json.JSONDecodeError(f"No valid JSON found in response ({len(text)} chars): {text[:200]}...", text, 0)
 
 
 def _extract_token_count(response: Any) -> int:
-    """Extract total token count from an LLM response."""
     meta = getattr(response, "usage_metadata", None)
     if not meta:
         return 0
@@ -236,12 +185,10 @@ def _extract_token_count(response: Any) -> int:
 
 
 def _get_memory_store() -> MemoryStore:
-    """Get the memory store via factory (respects MEMORY_BACKEND env var)."""
     return create_memory_store()
 
 
 def _fetch_memory_context(task_description: str) -> list[str]:
-    """Query memory for relevant context across all tiers."""
     try:
         store = _get_memory_store()
         results = store.query(task_description, n_results=10)
@@ -251,7 +198,6 @@ def _fetch_memory_context(task_description: str) -> list[str]:
 
 
 def _infer_module(target_files: list[str]) -> str:
-    """Infer module name from target file paths."""
     if not target_files:
         return "global"
     first_file = target_files[0]
@@ -265,18 +211,8 @@ def _infer_module(target_files: list[str]) -> str:
 
 # -- Tool Binding (Issue #80) --
 
-DEV_TOOL_NAMES = {
-    "filesystem_read",
-    "filesystem_write",
-    "filesystem_list",
-    "github_read_diff",
-    "github_create_pr",
-}
-QA_TOOL_NAMES = {
-    "filesystem_read",
-    "filesystem_list",
-    "github_read_diff",
-}
+DEV_TOOL_NAMES = {"filesystem_read", "filesystem_write", "filesystem_list", "github_read_diff", "github_create_pr"}
+QA_TOOL_NAMES = {"filesystem_read", "filesystem_list", "github_read_diff"}
 
 
 def _get_agent_tools(config, allowed_names=None):
@@ -298,10 +234,7 @@ async def _execute_tool_call(tool_call, tools):
     tool_map = {t.name: t for t in tools}
     tool = tool_map.get(tool_name)
     if not tool:
-        return ToolMessage(
-            content=f"Error: Tool '{tool_name}' not found. Available: {list(tool_map.keys())}",
-            tool_call_id=tool_id,
-        )
+        return ToolMessage(content=f"Error: Tool '{tool_name}' not found. Available: {list(tool_map.keys())}", tool_call_id=tool_id)
     try:
         if hasattr(tool, "coroutine") and tool.coroutine:
             result = await tool.coroutine(tool_args)
@@ -310,17 +243,10 @@ async def _execute_tool_call(tool_call, tools):
         return ToolMessage(content=str(result), tool_call_id=tool_id)
     except Exception as e:
         logger.warning("[TOOLS] Tool %s failed: %s", tool_name, e)
-        return ToolMessage(
-            content=f"Error executing {tool_name}: {type(e).__name__}: {e}",
-            tool_call_id=tool_id,
-        )
+        return ToolMessage(content=f"Error executing {tool_name}: {type(e).__name__}: {e}", tool_call_id=tool_id)
 
 
-async def _run_tool_loop(
-    llm_with_tools, messages, tools,
-    max_turns=MAX_TOOL_TURNS, tokens_used=0,
-    trace=None, agent_name="agent",
-):
+async def _run_tool_loop(llm_with_tools, messages, tools, max_turns=MAX_TOOL_TURNS, tokens_used=0, trace=None, agent_name="agent"):
     if trace is None:
         trace = []
     tool_calls_log = []
@@ -332,26 +258,30 @@ async def _run_tool_loop(
         if not tool_calls:
             trace.append(f"{agent_name}: tool loop done after {turn} tool turn(s)")
             return response, tokens_used, tool_calls_log
-        trace.append(
-            f"{agent_name}: turn {turn + 1} -- "
-            f"{len(tool_calls)} tool call(s): "
-            f"{', '.join(tc.get('name', '?') for tc in tool_calls)}"
-        )
+        trace.append(f"{agent_name}: turn {turn + 1} -- {len(tool_calls)} tool call(s): {', '.join(tc.get('name', '?') for tc in tool_calls)}")
         logger.info("[%s] Tool turn %d: %d calls", agent_name.upper(), turn + 1, len(tool_calls))
         current_messages.append(response)
         for tc in tool_calls:
             tool_msg = await _execute_tool_call(tc, tools)
             current_messages.append(tool_msg)
-            tool_calls_log.append({
-                "agent": agent_name, "turn": turn + 1,
-                "tool": tc.get("name", "unknown"),
-                "args_preview": str(tc.get("args", {}))[:200],
-                "result_preview": str(tool_msg.content)[:200],
-                "success": not tool_msg.content.startswith("Error"),
-            })
+            tool_calls_log.append({"agent": agent_name, "turn": turn + 1, "tool": tc.get("name", "unknown"), "args_preview": str(tc.get("args", {}))[:200], "result_preview": str(tool_msg.content)[:200], "success": not tool_msg.content.startswith("Error")})
     trace.append(f"{agent_name}: tool loop hit max turns ({max_turns})")
     logger.warning("[%s] Hit max tool turns (%d)", agent_name.upper(), max_turns)
     return response, tokens_used, tool_calls_log
+
+
+def _run_async(coro):
+    """Run an async coroutine from sync context for the tool loop."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop and loop.is_running():
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, coro).result()
+    else:
+        return asyncio.run(coro)
 
 
 # -- Node Functions --
@@ -361,8 +291,7 @@ def architect_node(state: GraphState) -> dict:
     trace.append("architect: starting planning")
     retry_count = state.get("retry_count", 0)
     tokens_used = state.get("tokens_used", 0)
-    logger.info("[ARCH] retry_count=%d, tokens_used=%d, status=%s",
-                retry_count, tokens_used, state.get("status", "unknown"))
+    logger.info("[ARCH] retry_count=%d, tokens_used=%d, status=%s", retry_count, tokens_used, state.get("status", "unknown"))
     memory_context = _fetch_memory_context(state.get("task_description", ""))
     memory_block = ""
     if memory_context:
@@ -405,7 +334,8 @@ Do not include any text before or after the JSON.{memory_block}"""
     return {"blueprint": blueprint, "status": WorkflowStatus.BUILDING, "tokens_used": tokens_used, "trace": trace, "memory_context": memory_context}
 
 
-async def developer_node(state: GraphState, config: dict | None = None) -> dict:
+def developer_node(state: GraphState, config: dict | None = None) -> dict:
+    """Lead Dev: executes the Blueprint and generates code. Issue #80: tool binding support."""
     trace = list(state.get("trace", []))
     trace.append("developer: starting build")
     memory_writes = list(state.get("memory_writes", []))
@@ -422,12 +352,10 @@ async def developer_node(state: GraphState, config: dict | None = None) -> dict:
     if has_tools:
         tool_names = [t.name for t in tools]
         trace.append(f"developer: {len(tools)} tools available: {', '.join(tool_names)}")
-        system_prompt = """You are the Lead Dev agent. You receive a structured Blueprint
-and implement it using the tools available to you.
+        system_prompt = """You are the Lead Dev agent. You receive a structured Blueprint and implement it using the tools available to you.
 
 WORKFLOW:
-1. First, use filesystem_read to examine the existing files listed in target_files
-   to understand the current code structure.
+1. Use filesystem_read to examine the existing files listed in target_files.
 2. Use filesystem_list to explore the project directory structure if needed.
 3. Implement the changes described in the Blueprint.
 4. Use filesystem_write to write each file.
@@ -437,11 +365,10 @@ IMPORTANT:
 - Use filesystem_write for EACH file you need to create or modify.
 - Follow the Blueprint exactly. Respect all constraints.
 - Write clean, well-documented code.
-- After completing all file writes, respond with a text summary (no more tool calls).
+- After completing all file writes, respond with a text summary.
 - Also include the complete code in your final response using the format:
   # --- FILE: path/to/file.py ---
-  (file contents)
-  This allows the code application pipeline to work as a safety net."""
+  (file contents)"""
     else:
         trace.append("developer: no tools available, using single-shot mode")
         system_prompt = """You are the Lead Dev agent. You receive a structured Blueprint
@@ -467,7 +394,7 @@ Write clean, well-documented code."""
     llm = _get_developer_llm()
     if has_tools:
         llm_with_tools = llm.bind_tools(tools)
-        response, tokens_used, new_tool_log = await _run_tool_loop(llm_with_tools, messages, tools, max_turns=MAX_TOOL_TURNS, tokens_used=tokens_used, trace=trace, agent_name="developer")
+        response, tokens_used, new_tool_log = _run_async(_run_tool_loop(llm_with_tools, messages, tools, max_turns=MAX_TOOL_TURNS, tokens_used=tokens_used, trace=trace, agent_name="developer"))
         tool_calls_log.extend(new_tool_log)
     else:
         response = llm.invoke(messages)
@@ -522,7 +449,8 @@ def apply_code_node(state: GraphState) -> dict:
     return {"parsed_files": parsed_files_data, "trace": trace}
 
 
-async def qa_node(state: GraphState, config: dict | None = None) -> dict:
+def qa_node(state: GraphState, config: dict | None = None) -> dict:
+    """QA: reviews the generated code. Issue #80: read-only tool access."""
     trace = list(state.get("trace", []))
     trace.append("qa: starting review")
     memory_writes = list(state.get("memory_writes", []))
@@ -542,7 +470,7 @@ async def qa_node(state: GraphState, config: dict | None = None) -> dict:
         trace.append(f"qa: {len(tools)} tools available: {', '.join(tool_names)}")
     system_prompt = "You are the QA agent. You review code against a Blueprint's acceptance criteria.\n\n"
     if has_tools:
-        system_prompt += "You have tools to read files from the workspace. Use filesystem_read to inspect the actual files that were written, and filesystem_list to check the project structure. This gives you ground truth beyond just the generated code text.\n\n"
+        system_prompt += "You have tools to read files from the workspace. Use filesystem_read to inspect the actual files that were written, and filesystem_list to check the project structure.\n\n"
     system_prompt += 'Respond with ONLY a valid JSON object matching this schema:\n{\n  "task_id": "string (from the Blueprint)",\n  "status": "pass" or "fail" or "escalate",\n  "tests_passed": number,\n  "tests_failed": number,\n  "errors": ["list of specific error descriptions"],\n  "failed_files": ["list of files with issues"],\n  "is_architectural": true/false,\n  "failure_type": "code" or "architectural" or null (if pass),\n  "recommendation": "what to fix or why it should escalate"\n}\n\nFAILURE CLASSIFICATION (critical for correct routing):\n\nSet failure_type to "code" (status: "fail") when:\n- Implementation has bugs, syntax errors, or type errors\n- Tests fail due to logic errors in the code\n- Code does not follow the Blueprint\'s constraints\n- Missing error handling or edge cases\nAction: Lead Dev will retry with the same Blueprint.\n\nSet failure_type to "architectural" (status: "escalate") when:\n- Blueprint targets the WRONG files (code is in the wrong place)\n- A required dependency or import is missing from the Blueprint\n- The design approach is fundamentally flawed\n- Acceptance criteria are impossible to meet with current targets\n- The task requires files not listed in target_files\nAction: Architect will generate a completely NEW Blueprint.\n\nBe strict but fair. Only pass code that meets ALL acceptance criteria.\nDo not include any text before or after the JSON.'
     bp_json = blueprint.model_dump_json(indent=2)
     user_msg = f"Blueprint:\n{bp_json}\n\nGenerated Code:\n{generated_code}"
@@ -565,7 +493,7 @@ async def qa_node(state: GraphState, config: dict | None = None) -> dict:
     llm = _get_qa_llm()
     if has_tools:
         llm_with_tools = llm.bind_tools(tools)
-        response, tokens_used, new_tool_log = await _run_tool_loop(llm_with_tools, messages, tools, max_turns=5, tokens_used=tokens_used, trace=trace, agent_name="qa")
+        response, tokens_used, new_tool_log = _run_async(_run_tool_loop(llm_with_tools, messages, tools, max_turns=5, tokens_used=tokens_used, trace=trace, agent_name="qa"))
         tool_calls_log.extend(new_tool_log)
     else:
         response = llm.invoke(messages)
@@ -619,11 +547,13 @@ def sandbox_validate_node(state: GraphState) -> dict:
     trace.append(f"sandbox_validate: template={template_label}, commands={len(plan.commands)}")
     generated_code = state.get("generated_code", "")
     parsed_files = state.get("parsed_files", [])
+    if parsed_files:
+        trace.append(f"sandbox_validate: loading {len(parsed_files)} files into sandbox")
     try:
-        result = _run_sandbox_validation(commands=plan.commands, template=plan.template, generated_code=generated_code, parsed_files=parsed_files, timeout=plan.timeout)
+        result = _run_sandbox_validation(commands=plan.commands, template=plan.template, generated_code=generated_code, parsed_files=parsed_files if parsed_files else None)
         if result is None:
-            trace.append("sandbox_validate: skipped (no E2B_API_KEY)")
-            logger.info("[SANDBOX] Skipped -- E2B_API_KEY not configured")
+            logger.warning("[SANDBOX] E2B_API_KEY not configured -- sandbox validation SKIPPED.")
+            trace.append("sandbox_validate: WARNING -- E2B_API_KEY not configured, sandbox validation skipped")
             return {"sandbox_result": None, "trace": trace}
         summary = format_validation_summary(result)
         trace.append(f"sandbox_validate: {summary}")
@@ -677,23 +607,16 @@ def route_after_qa(state: GraphState) -> Literal["flush_memory", "developer", "a
     tokens_used = state.get("tokens_used", 0)
     logger.info("[ROUTER] status=%s, retry_count=%d, tokens_used=%d, max_retries=%d, token_budget=%d", status, retry_count, tokens_used, MAX_RETRIES, TOKEN_BUDGET)
     if status == WorkflowStatus.PASSED:
-        logger.info("[ROUTER] -> flush_memory (passed)")
         return "flush_memory"
     if status == WorkflowStatus.FAILED:
-        logger.info("[ROUTER] -> END (failed: %s)", state.get("error_message", ""))
         return END
     if retry_count >= MAX_RETRIES:
-        logger.info("[ROUTER] -> flush_memory (max retries, saving what we have)")
         return "flush_memory"
     if tokens_used >= TOKEN_BUDGET:
-        logger.info("[ROUTER] -> flush_memory (token budget, saving what we have)")
         return "flush_memory"
     if status == WorkflowStatus.ESCALATED:
-        logger.info("[ROUTER] -> architect (escalation)")
         return "architect"
-    else:
-        logger.info("[ROUTER] -> developer (retry)")
-        return "developer"
+    return "developer"
 
 
 def build_graph() -> StateGraph:
@@ -715,8 +638,7 @@ def build_graph() -> StateGraph:
 
 
 def create_workflow():
-    graph = build_graph()
-    return graph.compile()
+    return build_graph().compile()
 
 
 def init_tools_config(workspace_root=None):
