@@ -40,6 +40,21 @@ function getBackoffDelay(): number {
 }
 
 /**
+ * Type guard for ToolCallEvent payloads (CodeRabbit fix #1).
+ * Validates all required fields are present with correct types
+ * before passing to the store handler.
+ */
+function isToolCallEvent(payload: Record<string, unknown>): payload is ToolCallEvent {
+	return (
+		typeof payload.task_id === 'string' &&
+		typeof payload.agent === 'string' &&
+		typeof payload.tool === 'string' &&
+		typeof payload.success === 'boolean' &&
+		typeof payload.result_preview === 'string'
+	);
+}
+
+/**
  * Route an SSE event to the appropriate store handler.
  */
 function dispatch(eventType: SSEEventType, payload: Record<string, unknown>) {
@@ -69,7 +84,9 @@ function dispatch(eventType: SSEEventType, payload: Record<string, unknown>) {
 			break;
 
 		case 'tool_call':
-			tasksStore.handleToolCall(payload as ToolCallEvent);
+			if (isToolCallEvent(payload)) {
+				tasksStore.handleToolCall(payload);
+			}
 			break;
 
 		case 'log_line':
