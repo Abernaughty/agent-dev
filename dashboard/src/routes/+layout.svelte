@@ -1,6 +1,7 @@
 <script lang="ts">
 	import '../app.css';
 	import { onMount } from 'svelte';
+	import MenuBar from '$lib/components/MenuBar.svelte';
 	import ActivityBar from '$lib/components/ActivityBar.svelte';
 	import SidebarPanel from '$lib/components/SidebarPanel.svelte';
 	import BottomPanel from '$lib/components/BottomPanel.svelte';
@@ -35,6 +36,8 @@
 </svelte:head>
 
 <div class="flex h-screen flex-col overflow-hidden" style="background: var(--color-bg-primary);">
+	<MenuBar />
+
 	<div class="flex flex-1 overflow-hidden">
 		<ActivityBar
 			activePanel={dash.activePanel}
