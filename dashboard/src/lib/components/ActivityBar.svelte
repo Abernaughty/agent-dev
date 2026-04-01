@@ -11,10 +11,10 @@
 	let { activePanel, onSelect, pendingMemory = 0, pendingPR = 0 }: Props = $props();
 
 	const items: { id: PanelId; label: string; badge: number }[] = $derived([
+		{ id: 'chat', label: 'Ch', badge: 0 },
 		{ id: 'agents', label: 'Ag', badge: 0 },
 		{ id: 'memory', label: 'Mm', badge: pendingMemory },
-		{ id: 'prs', label: 'PR', badge: pendingPR },
-		{ id: 'chat', label: 'Ch', badge: 0 }
+		{ id: 'prs', label: 'PR', badge: pendingPR }
 	]);
 </script>
 
