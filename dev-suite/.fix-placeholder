@@ -1,0 +1,2 @@
+--- This commit patches only the init_tools_config function.
+--- See the orchestrator.py change below.
