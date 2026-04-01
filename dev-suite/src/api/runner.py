@@ -2,6 +2,7 @@
 
 Issue #48: StateManager <-> Orchestrator bridge
 Issue #80: Tool binding -- tools_config initialization, TOOL_CALL SSE events
+Issue #92: Budget data in SSE events, flush_memory -> StateManager bridge
 
 Uses LangGraph's astream() to iterate node completions and emit SSE events
 in real time. Runs entirely on the async event loop -- no threading needed.
@@ -138,7 +139,6 @@ class TaskRunner:
         from .state import state_manager
 
         start_time = time.time()
-        # Fix 6: Initialize per-task dev tool baseline
         self._dev_tool_baselines[task_id] = 0
 
         try:
@@ -149,7 +149,6 @@ class TaskRunner:
             graph = build_graph()
             workflow = graph.compile()
 
-            # Initialize tools config (issue #80)
             tools_config = init_tools_config()
             n_tools = len(tools_config.get("configurable", {}).get("tools", []))
             if n_tools > 0:
@@ -184,7 +183,6 @@ class TaskRunner:
                     if node_name.startswith("__"):
                         continue
 
-                    # Emit tool_call SSE events for any new tool calls (issue #80)
                     tool_calls_log = node_output.get("tool_calls_log", [])
                     if len(tool_calls_log) > prev_tool_count:
                         new_calls = tool_calls_log[prev_tool_count:]
@@ -233,7 +231,6 @@ class TaskRunner:
             await self._emit_log(f"[orchestrator] ERROR: {e}")
 
         finally:
-            # Fix 6: Clean up per-task baseline
             self._dev_tool_baselines.pop(task_id, None)
 
     async def _handle_node_completion(self, task_id, node_name, node_output, state_manager, prev_node):
@@ -242,7 +239,6 @@ class TaskRunner:
             prev_agent_id, _ = NODE_TO_AGENT[prev_node]
             await state_manager.update_agent_status(prev_agent_id, AgentStatus.IDLE)
 
-        # Handle infrastructure nodes (apply_code, sandbox_validate, flush_memory)
         if node_name in INFRA_NODES:
             await self._handle_infra_node(task_id, node_name, node_output, state_manager)
             return
@@ -320,7 +316,26 @@ class TaskRunner:
             else:
                 await self._emit_log("[sandbox] Validation skipped (no E2B key or no code files)")
 
-        # flush_memory doesn't need SSE events -- it's internal bookkeeping
+        elif node_name == "flush_memory":
+            # Issue #92: Bridge flush_memory writes into StateManager for dashboard display.
+            flushed = node_output.get("memory_writes_flushed", [])
+            if flushed:
+                n_entries = len(flushed)
+                await self._emit_log(f"[memory] {n_entries} entries flushed to memory store")
+                for entry_data in flushed:
+                    await state_manager.add_memory_entry(
+                        content=entry_data.get("content", ""),
+                        tier=entry_data.get("tier", "l1"),
+                        module=entry_data.get("module", "global"),
+                        source_agent=entry_data.get("source_agent", "unknown"),
+                        confidence=entry_data.get("confidence", 0.0),
+                        sandbox_origin=entry_data.get("sandbox_origin", "locked-down"),
+                        related_files=entry_data.get("related_files", ""),
+                        task_id=task_id,
+                    )
+                await self._emit_log(f"[memory] {n_entries} entries pending approval")
+            else:
+                await self._emit_log("[memory] No memory entries to flush")
 
     async def _handle_architect(self, task_id, output, task, state_manager):
         blueprint = output.get("blueprint")
@@ -337,13 +352,12 @@ class TaskRunner:
             event_type = "fail"
             await self._emit_log(f"[orchestrator] Architect FAILED: {error[:120]}")
         task.timeline.append(TimelineEvent(time=_now_str(), agent="arch", action=action, type=event_type))
-        await self._emit_progress(task_id, "blueprint_created", "arch", action)
+        await self._emit_progress(task_id, "blueprint_created", "arch", action, task=task)
 
     async def _handle_developer(self, task_id, output, task, state_manager):
         code = output.get("generated_code", "")
         task.generated_code = code
 
-        # Fix 6: Use per-pass baseline to count only new tool calls from this dev pass
         tool_calls_log = output.get("tool_calls_log", [])
         baseline = self._dev_tool_baselines.get(task_id, 0)
         dev_tool_calls = [tc for tc in tool_calls_log[baseline:] if tc.get("agent") == "developer"]
@@ -365,7 +379,7 @@ class TaskRunner:
             action = "Code generation failed"
             event_type = "fail"
         task.timeline.append(TimelineEvent(time=_now_str(), agent="dev", action=action, type=event_type))
-        await self._emit_progress(task_id, "code_generated", "dev", action)
+        await self._emit_progress(task_id, "code_generated", "dev", action, task=task)
         await state_manager.update_agent_status("dev", AgentStatus.IDLE, task_id)
 
     async def _handle_qa(self, task_id, output, task, state_manager):
@@ -391,12 +405,30 @@ class TaskRunner:
             action = "QA review completed"
             event_type = "exec"
         task.timeline.append(TimelineEvent(time=_now_str(), agent="qa", action=action, type=event_type))
-        await self._emit_progress(task_id, "qa_complete", "qa", action)
+        await self._emit_progress(task_id, "qa_complete", "qa", action, task=task)
         await state_manager.update_agent_status("qa", AgentStatus.IDLE, task_id)
 
-    async def _emit_progress(self, task_id, event, agent, detail):
+    async def _emit_progress(self, task_id, event, agent, detail, task=None):
+        """Emit a task_progress SSE event.
+
+        Issue #92: Now includes budget data when a task reference is available,
+        so the dashboard can update budget displays in real time.
+        """
         try:
-            await event_bus.publish(SSEEvent(type=EventType.TASK_PROGRESS, data={"task_id": task_id, "event": event, "agent": agent, "detail": detail}))
+            payload = {
+                "task_id": task_id,
+                "event": event,
+                "agent": agent,
+                "detail": detail,
+            }
+            if task is not None:
+                payload["tokens_used"] = task.budget.tokens_used
+                payload["retries_used"] = task.budget.retries_used
+                payload["cost_used"] = task.budget.cost_used
+                payload["token_budget"] = task.budget.token_budget
+                payload["max_retries"] = task.budget.max_retries
+                payload["cost_budget"] = task.budget.cost_budget
+            await event_bus.publish(SSEEvent(type=EventType.TASK_PROGRESS, data=payload))
         except Exception:
             logger.debug("Failed to emit task_progress", exc_info=True)
 
