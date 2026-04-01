@@ -1,17 +1,20 @@
 """End-to-end pipeline validation tests (Step 7).
 
-These tests verify the full Architect → Lead Dev → QA pipeline
+These tests verify the full Architect -> Lead Dev -> QA pipeline
 by mocking LLM responses with realistic payloads. They validate:
 
-1. Happy path: Blueprint → code → QA pass → PASSED
-2. Retry path: QA fail → retry developer → QA pass
-3. Escalation path: QA escalate → re-plan architect → developer → QA pass
-4. Budget exhaustion: tokens_used >= TOKEN_BUDGET → END
-5. Max retries: retry_count >= MAX_RETRIES → END
+1. Happy path: Blueprint -> code -> QA pass -> PASSED
+2. Retry path: QA fail -> retry developer -> QA pass
+3. Escalation path: QA escalate -> re-plan architect -> developer -> QA pass
+4. Budget exhaustion: tokens_used >= TOKEN_BUDGET -> END
+5. Max retries: retry_count >= MAX_RETRIES -> END
 6. Memory integration: Chroma context is fetched and included
 7. Tracing integration: TracingConfig wired through correctly
 
-No API keys needed — all LLM calls are mocked.
+No API keys needed -- all LLM calls are mocked.
+
+Issue #80: developer_node and qa_node are now async. Node-level tests
+updated with @pytest.mark.asyncio and await.
 """
 
 import json
@@ -37,7 +40,7 @@ from src.orchestrator import (
 )
 
 
-# ── Fixtures ──
+# -- Fixtures --
 
 
 SAMPLE_BLUEPRINT = Blueprint(
@@ -114,11 +117,11 @@ def _make_llm_response(content: str, total_tokens: int = 500) -> MagicMock:
     return resp
 
 
-# ── Happy Path Tests ──
+# -- Happy Path Tests --
 
 
 class TestE2EHappyPath:
-    """Full pipeline: Architect → Lead Dev → QA → PASSED."""
+    """Full pipeline: Architect -> Lead Dev -> QA -> PASSED."""
 
     @patch("src.orchestrator._fetch_memory_context")
     @patch("src.orchestrator._get_qa_llm")
@@ -173,11 +176,11 @@ class TestE2EHappyPath:
         assert "CosmosDB" in system_msg
 
 
-# ── Retry Path Tests ──
+# -- Retry Path Tests --
 
 
 class TestE2ERetryPath:
-    """QA fails → retry developer → eventually passes."""
+    """QA fails -> retry developer -> eventually passes."""
 
     @patch("src.orchestrator._fetch_memory_context")
     @patch("src.orchestrator._get_qa_llm")
@@ -227,11 +230,11 @@ class TestE2ERetryPath:
         assert "Missing edge case for empty string" in retry_msg
 
 
-# ── Escalation Path Tests ──
+# -- Escalation Path Tests --
 
 
 class TestE2EEscalation:
-    """QA escalates architectural failure → re-plans with Architect."""
+    """QA escalates architectural failure -> re-plans with Architect."""
 
     @patch("src.orchestrator._fetch_memory_context")
     @patch("src.orchestrator._get_qa_llm")
@@ -240,7 +243,7 @@ class TestE2EEscalation:
     def test_escalation_to_architect(
         self, mock_arch_llm, mock_dev_llm, mock_qa_llm, mock_memory
     ):
-        """QA escalates → Architect re-plans → Developer retries → QA passes."""
+        """QA escalates -> Architect re-plans -> Developer retries -> QA passes."""
         mock_memory.return_value = []
         arch_response = _make_llm_response(SAMPLE_BLUEPRINT.model_dump_json(), total_tokens=800)
         mock_arch_llm.return_value.invoke.return_value = arch_response
@@ -283,7 +286,7 @@ class TestE2EEscalation:
         assert "architectural" in replan_msg.lower() or "parsing library" in replan_msg
 
 
-# ── Budget & Limit Tests ──
+# -- Budget & Limit Tests --
 
 
 class TestE2EBudgetLimits:
@@ -333,7 +336,7 @@ class TestE2EBudgetLimits:
         assert result.tokens_used >= 1000
 
 
-# ── Node-Level Tests ──
+# -- Node-Level Tests --
 
 
 class TestE2ENodeFunctions:
@@ -357,8 +360,9 @@ class TestE2ENodeFunctions:
         assert result["tokens_used"] == 500
         assert len(result["memory_context"]) == 1
 
+    @pytest.mark.asyncio
     @patch("src.orchestrator._get_developer_llm")
-    def test_developer_node_generates_code(self, mock_llm):
+    async def test_developer_node_generates_code(self, mock_llm):
         """developer_node should generate code from the Blueprint."""
         mock_llm.return_value.invoke.return_value = _make_llm_response(
             SAMPLE_CODE, total_tokens=1200
@@ -372,14 +376,15 @@ class TestE2ENodeFunctions:
             "tokens_used": 0,
             "retry_count": 0,
         }
-        result = developer_node(state)
+        result = await developer_node(state)
 
         assert result["status"] == WorkflowStatus.REVIEWING
         assert "validate_email" in result["generated_code"]
         assert result["tokens_used"] == 1200
 
+    @pytest.mark.asyncio
     @patch("src.orchestrator._get_qa_llm")
-    def test_qa_node_returns_pass(self, mock_llm):
+    async def test_qa_node_returns_pass(self, mock_llm):
         """qa_node should parse a 'pass' verdict correctly."""
         mock_llm.return_value.invoke.return_value = _make_llm_response(
             SAMPLE_QA_PASS.model_dump_json(), total_tokens=400
@@ -394,14 +399,15 @@ class TestE2ENodeFunctions:
             "tokens_used": 0,
             "retry_count": 0,
         }
-        result = qa_node(state)
+        result = await qa_node(state)
 
         assert result["status"] == WorkflowStatus.PASSED
         assert result["failure_report"].status == "pass"
         assert result["failure_report"].tests_passed == 4
 
+    @pytest.mark.asyncio
     @patch("src.orchestrator._get_qa_llm")
-    def test_qa_node_returns_fail(self, mock_llm):
+    async def test_qa_node_returns_fail(self, mock_llm):
         """qa_node should parse a 'fail' verdict and increment retry count."""
         mock_llm.return_value.invoke.return_value = _make_llm_response(
             SAMPLE_QA_FAIL.model_dump_json(), total_tokens=400
@@ -416,14 +422,15 @@ class TestE2ENodeFunctions:
             "trace": [],
             "tokens_used": 0,
         }
-        result = qa_node(state)
+        result = await qa_node(state)
 
         assert result["status"] == WorkflowStatus.REVIEWING
         assert result["failure_report"].status == "fail"
         assert result["retry_count"] == 1
 
+    @pytest.mark.asyncio
     @patch("src.orchestrator._get_qa_llm")
-    def test_qa_node_returns_escalate(self, mock_llm):
+    async def test_qa_node_returns_escalate(self, mock_llm):
         """qa_node should detect architectural failures and set ESCALATED status."""
         mock_llm.return_value.invoke.return_value = _make_llm_response(
             SAMPLE_QA_ESCALATE.model_dump_json(), total_tokens=400
@@ -438,7 +445,7 @@ class TestE2ENodeFunctions:
             "trace": [],
             "tokens_used": 0,
         }
-        result = qa_node(state)
+        result = await qa_node(state)
 
         assert result["status"] == WorkflowStatus.ESCALATED
         assert result["failure_report"].is_architectural is True
@@ -458,7 +465,7 @@ class TestE2ENodeFunctions:
         assert result["blueprint"].task_id == "e2e-test-001"
 
 
-# ── Memory Integration Tests ──
+# -- Memory Integration Tests --
 
 
 class TestE2EMemoryIntegration:
@@ -492,7 +499,7 @@ class TestE2EMemoryIntegration:
         assert len(context) >= 1
 
 
-# ── Tracing Integration Tests ──
+# -- Tracing Integration Tests --
 
 
 class TestE2ETracingIntegration:
