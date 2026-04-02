@@ -598,7 +598,7 @@ def sandbox_validate_node(state: GraphState) -> dict:
 
     if plan.strategy == ValidationStrategy.SKIP:
         trace.append("sandbox_validate: no code validation needed -- skipping")
-        return {"sandbox_result": SandboxResult(exit_code=0, validation_skipped=True, output_summary="Validation skipped: non-code files"), "trace": trace}
+        return {"sandbox_result": None, "trace": trace}
 
     parsed_files = state.get("parsed_files", [])
     if parsed_files:
@@ -625,12 +625,12 @@ def sandbox_validate_node(state: GraphState) -> dict:
             )
         else:
             trace.append(f"sandbox_validate: unhandled strategy {plan.strategy.value} -- skipping")
-            return {"sandbox_result": SandboxResult(exit_code=0, validation_skipped=True), "trace": trace}
+            return {"sandbox_result": None, "trace": trace}
 
         if result is None:
             logger.warning("[SANDBOX] E2B_API_KEY not configured -- sandbox validation SKIPPED.")
             trace.append("sandbox_validate: WARNING -- E2B_API_KEY not configured, sandbox validation skipped")
-            return {"sandbox_result": SandboxResult(exit_code=0, validation_skipped=True, output_summary="E2B_API_KEY not configured"), "trace": trace}
+            return {"sandbox_result": None, "trace": trace}
 
         if result.warnings:
             for w in result.warnings:

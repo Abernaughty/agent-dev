@@ -118,8 +118,7 @@ class TestSandboxValidateStrategy:
 
         result = sandbox_validate_node(state)
 
-        assert result["sandbox_result"] is not None
-        assert result["sandbox_result"].validation_skipped is True
+        assert result["sandbox_result"] is None
         assert result["sandbox_result"].exit_code == 0
 
 
@@ -186,8 +185,7 @@ class TestSandboxValidateNode:
             mock_run.return_value = None
             result = sandbox_validate_node(state)
 
-        assert result["sandbox_result"] is not None
-        assert result["sandbox_result"].validation_skipped is True
+        assert result["sandbox_result"] is None
 
     def test_no_blueprint_skips(self):
         """Should skip validation when there's no blueprint."""
