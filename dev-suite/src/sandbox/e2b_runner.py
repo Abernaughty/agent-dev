@@ -8,20 +8,28 @@ Role-specific profiles:
   - Permissive: Research (open egress, zero secrets)
 
 Template support:
-  - Default: bare Python (e2b-code-interpreter base image)
+  - Default: bare Python (base e2b sandbox)
   - Fullstack: Python + Node.js 22 + pnpm + SvelteKit toolchain
   - Templates configured via E2B_TEMPLATE_DEFAULT / E2B_TEMPLATE_FULLSTACK env vars
 
 Issue #95: Added validation_skipped/warnings fields to SandboxResult,
 sequential run_tests() execution, and run_script() for simple scripts.
+
+Issue #96: Migrated from e2b_code_interpreter (Jupyter kernel on port 49999)
+to base e2b SDK (commands.run). Eliminates kernel timeout errors entirely.
+Uses sbx.files.write() for project files and sbx.commands.run() for
+shell execution. No more base64 encoding or subprocess wrappers.
 """
 
+import logging
 import os
 import re
 from enum import Enum
 
-from e2b_code_interpreter import Sandbox
+from e2b import Sandbox
 from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
 
 
 # -- Sandbox Profiles --
@@ -151,30 +159,6 @@ def _extract_errors(output: str) -> list[str]:
     return errors[:10]  # Hard cap
 
 
-def _extract_execution_error(error_obj) -> str:
-    """Extract error string from E2B execution.error object.
-
-    The error object may be a string, have .name/.value/.traceback attrs,
-    or be some other structure. We handle all cases.
-    """
-    if error_obj is None:
-        return ""
-    if isinstance(error_obj, str):
-        return error_obj
-
-    # E2B ExecutionError typically has .name, .value, .traceback
-    parts = []
-    if hasattr(error_obj, "name"):
-        parts.append(str(error_obj.name))
-    if hasattr(error_obj, "value"):
-        parts.append(str(error_obj.value))
-    if parts:
-        return ": ".join(parts)
-
-    # Fallback
-    return str(error_obj)
-
-
 # -- Template Configuration --
 
 def _get_template_id(template: str | None) -> str | None:
@@ -220,14 +204,33 @@ def select_template_for_files(target_files: list[str]) -> str | None:
     return "fullstack" if has_frontend else None
 
 
+# -- File Upload Helper --
+
+def _write_project_files(sbx: Sandbox, project_files: dict[str, str]) -> None:
+    """Write project files into the sandbox using files.write().
+
+    No more base64 encoding or run_code() file creation wrappers.
+    Creates parent directories as needed.
+    """
+    created_dirs: set[str] = set()
+    for fpath, content in project_files.items():
+        parent = os.path.dirname(fpath)
+        if parent and parent not in created_dirs:
+            sbx.commands.run(f"mkdir -p '{parent}'")
+            created_dirs.add(parent)
+        sbx.files.write(fpath, content)
+
+
 # -- Runner --
 
 class E2BRunner:
     """Execute code in E2B sandboxes with structured output.
 
+    Uses the base e2b SDK with commands.run() for shell execution.
+    No Jupyter kernel dependency (port 49999 eliminated).
+
     Usage:
         runner = E2BRunner()
-        result = runner.run("print('hello')")
         result = runner.run_script("hello.py", project_files={"hello.py": "print('hi')"})
         result = runner.run_tests(commands=["pytest tests/"], project_files={...})
     """
@@ -237,84 +240,49 @@ class E2BRunner:
             os.environ["E2B_API_KEY"] = api_key
         self._default_timeout = default_timeout
 
-    def run(
+    def _create_sandbox(
         self,
-        code: str,
-        profile: SandboxProfile = SandboxProfile.LOCKED,
-        env_vars: dict[str, str] | None = None,
-        timeout: int | None = None,
         template: str | None = None,
-    ) -> SandboxResult:
-        """Execute code in a sandbox and return structured results."""
-        timeout = timeout or self._default_timeout
+        env_vars: dict[str, str] | None = None,
+    ) -> Sandbox:
+        """Create a sandbox with optional template and env vars.
 
-        if profile == SandboxProfile.PERMISSIVE:
-            env_vars = None
-
+        Env vars are injected at sandbox creation time via the `envs` param,
+        which is more secure than setting them via shell commands.
+        """
+        create_kwargs: dict = {}
         template_id = _get_template_id(template)
+        if template_id:
+            create_kwargs["template"] = template_id
+        if env_vars:
+            create_kwargs["envs"] = env_vars
+        return Sandbox(**create_kwargs)
 
-        try:
-            create_kwargs = {}
-            if template_id:
-                create_kwargs["template"] = template_id
+    def _build_result(
+        self,
+        stdout: str,
+        stderr: str,
+        exit_code: int,
+        timed_out: bool = False,
+    ) -> SandboxResult:
+        """Build a SandboxResult from command output."""
+        combined = stdout + "\n" + stderr if stderr else stdout
 
-            with Sandbox.create(**create_kwargs) as sbx:
-                if env_vars:
-                    env_setup = "\n".join(
-                        f"import os; os.environ['{k}'] = '{v}'" for k, v in env_vars.items()
-                    )
-                    sbx.run_code(env_setup)
+        test_info = _parse_test_output(combined)
+        errors = _extract_errors(combined) if exit_code != 0 else []
+        safe_summary = _scan_for_secrets(combined)
 
-                execution = sbx.run_code(code)
+        if len(safe_summary) > 2000:
+            safe_summary = safe_summary[:2000] + "\n... [truncated]"
 
-                raw_stdout = ""
-                raw_stderr = ""
-                for log in execution.logs.stdout:
-                    raw_stdout += log + "\n"
-                for log in execution.logs.stderr:
-                    raw_stderr += log + "\n"
-
-                combined = raw_stdout + raw_stderr
-
-                test_info = _parse_test_output(combined)
-
-                errors = _extract_errors(combined)
-                if execution.error:
-                    exec_err = _extract_execution_error(execution.error)
-                    if exec_err and exec_err not in errors:
-                        errors.insert(0, exec_err)
-
-                safe_summary = _scan_for_secrets(combined)
-
-                if not safe_summary.strip() and execution.error:
-                    exec_err = _extract_execution_error(execution.error)
-                    safe_summary = _scan_for_secrets(exec_err)
-
-                if len(safe_summary) > 2000:
-                    safe_summary = safe_summary[:2000] + "\n... [truncated]"
-
-                return SandboxResult(
-                    exit_code=0 if not execution.error else 1,
-                    tests_passed=test_info["tests_passed"],
-                    tests_failed=test_info["tests_failed"],
-                    errors=errors if execution.error else [],
-                    output_summary=safe_summary.strip(),
-                    timed_out=False,
-                )
-
-        except TimeoutError:
-            return SandboxResult(
-                exit_code=1,
-                errors=["Execution timed out"],
-                output_summary=f"Sandbox timed out after {timeout}s",
-                timed_out=True,
-            )
-        except Exception as e:
-            return SandboxResult(
-                exit_code=1,
-                errors=[str(e)],
-                output_summary=f"Sandbox error: {type(e).__name__}: {e}",
-            )
+        return SandboxResult(
+            exit_code=exit_code,
+            tests_passed=test_info["tests_passed"],
+            tests_failed=test_info["tests_failed"],
+            errors=errors,
+            output_summary=safe_summary.strip(),
+            timed_out=timed_out,
+        )
 
     def run_tests(
         self,
@@ -326,101 +294,79 @@ class E2BRunner:
     ) -> SandboxResult:
         """Run validation commands sequentially in the sandbox.
 
-        Each command runs independently -- a missing tool (e.g., ruff)
-        does not prevent subsequent commands (e.g., pytest) from running.
-        Results are aggregated across all commands.
+        Each command runs independently via commands.run() -- no more
+        subprocess wrapper or __RESULTS__ JSON trailer. Exit codes
+        are captured directly from each command result.
+
+        A missing tool (e.g., ruff) does not prevent subsequent commands
+        (e.g., pytest) from running. Results are aggregated.
         """
-        import base64 as _b64
-        import json as _json
+        try:
+            with self._create_sandbox(template=template, env_vars=env_vars) as sbx:
+                if project_files:
+                    _write_project_files(sbx, project_files)
 
-        setup_lines = []
-        if project_files:
-            setup_lines.append("import os, base64")
-            for fpath, content in project_files.items():
-                b64 = _b64.b64encode(content.encode("utf-8")).decode("ascii")
-                setup_lines.append(f"os.makedirs(os.path.dirname('{fpath}') or '.', exist_ok=True)")
-                setup_lines.append(f"open('{fpath}', 'w').write(base64.b64decode('{b64}').decode('utf-8'))")
+                all_stdout = []
+                all_stderr = []
+                aggregate_exit_code = 0
+                warnings = []
 
-        commands_json = _json.dumps(commands)
-        run_code = f"""
-import subprocess, json
+                for cmd in commands:
+                    try:
+                        result = sbx.commands.run(cmd, timeout=timeout)
+                        stdout = result.stdout or ""
+                        stderr = result.stderr or ""
+                        rc = result.exit_code
 
-commands = {commands_json}
-results = []
-for cmd in commands:
-    try:
-        r = subprocess.run(
-            cmd, shell=True, capture_output=True, text=True, timeout={timeout},
-        )
-        results.append({{"cmd": cmd, "rc": r.returncode, "out": r.stdout, "err": r.stderr}})
-    except subprocess.TimeoutExpired:
-        results.append({{"cmd": cmd, "rc": -1, "out": "", "err": "TIMEOUT"}})
+                        all_stdout.append(stdout)
+                        if stderr:
+                            all_stderr.append(stderr)
 
-for r in results:
-    print(r["out"])
-    if r["err"] and r["err"] != "TIMEOUT":
-        print(r["err"])
+                        if rc == 127:
+                            warnings.append(f"Command not found: {cmd[:60]}")
+                        if rc != 0 and aggregate_exit_code == 0:
+                            aggregate_exit_code = rc
 
-print("__RESULTS__" + json.dumps([{{"cmd": r["cmd"], "rc": r["rc"]}} for r in results]))
-"""
+                    except Exception as cmd_err:
+                        err_msg = f"Command failed: {cmd[:60]} -- {type(cmd_err).__name__}: {cmd_err}"
+                        all_stderr.append(err_msg)
+                        if aggregate_exit_code == 0:
+                            aggregate_exit_code = 1
+                        logger.warning("[SANDBOX] %s", err_msg)
 
-        setup_code = "\n".join(setup_lines) + "\n" if setup_lines else ""
-        full_code = setup_code + run_code
+                combined_stdout = "\n".join(all_stdout)
+                combined_stderr = "\n".join(all_stderr)
 
-        # CR fix: scale outer timeout to account for sequential commands
-        num_commands = max(len(commands), 1)
-        overall_timeout = timeout * num_commands + 30
+                base_result = self._build_result(
+                    combined_stdout, combined_stderr, aggregate_exit_code,
+                )
 
-        result = self.run(
-            full_code,
-            profile=SandboxProfile.LOCKED,
-            env_vars=env_vars,
-            timeout=overall_timeout,
-            template=template,
-        )
+                return SandboxResult(
+                    exit_code=base_result.exit_code,
+                    tests_passed=base_result.tests_passed,
+                    tests_failed=base_result.tests_failed,
+                    errors=base_result.errors,
+                    output_summary=base_result.output_summary,
+                    files_modified=base_result.files_modified,
+                    timed_out=False,
+                    validation_skipped=False,
+                    warnings=warnings,
+                )
 
-        warnings = list(result.warnings)
-        summary = result.output_summary
-
-        # CR fix: aggregate exit_code from __RESULTS__ trailer instead of
-        # using the wrapper process exit code. A child command failure (e.g.,
-        # ruff finding lint errors) must propagate even if the wrapper exits 0.
-        aggregate_exit_code = result.exit_code
-
-        if "[WARN]" in summary:
-            for line in summary.split("\n"):
-                if "[WARN]" in line:
-                    warnings.append(line.strip())
-
-        if "__RESULTS__" in summary:
-            try:
-                json_part = summary.split("__RESULTS__")[-1].strip()
-                cmd_results = _json.loads(json_part)
-                # Aggregate: first non-zero rc, or 0 if all passed
-                for cr in cmd_results:
-                    rc = cr.get("rc", 0)
-                    if rc == 127:
-                        warnings.append(f"Command not found: {cr['cmd'][:60]}")
-                    # CR fix: use `if` not `elif` so rc=127 both warns
-                    # AND fails the aggregate. A missing tool (pnpm, tsc)
-                    # should not silently pass validation.
-                    if rc != 0 and aggregate_exit_code == 0:
-                        aggregate_exit_code = rc
-                summary = summary.split("__RESULTS__")[0].strip()
-            except (ValueError, IndexError):
-                pass
-
-        return SandboxResult(
-            exit_code=aggregate_exit_code,
-            tests_passed=result.tests_passed,
-            tests_failed=result.tests_failed,
-            errors=result.errors,
-            output_summary=summary,
-            files_modified=result.files_modified,
-            timed_out=result.timed_out,
-            validation_skipped=False,
-            warnings=warnings,
-        )
+        except TimeoutError:
+            return SandboxResult(
+                exit_code=1,
+                errors=["Sandbox execution timed out"],
+                output_summary=f"Sandbox timed out after {timeout}s",
+                timed_out=True,
+            )
+        except Exception as e:
+            logger.warning("[SANDBOX] run_tests error: %s", e)
+            return SandboxResult(
+                exit_code=1,
+                errors=[str(e)],
+                output_summary=f"Sandbox error: {type(e).__name__}: {e}",
+            )
 
     def run_script(
         self,
@@ -432,64 +378,55 @@ print("__RESULTS__" + json.dumps([{{"cmd": r["cmd"], "rc": r["rc"]}} for r in re
     ) -> SandboxResult:
         """Execute a script and check exit code + stdout.
 
-        For simple scripts that don't have a test suite.
+        Uses commands.run("python3 <script>") directly -- no subprocess
+        wrapper, no __EXIT_CODE__ trailer parsing.
         """
-        import base64 as _b64
+        try:
+            with self._create_sandbox(template=template, env_vars=env_vars) as sbx:
+                if project_files:
+                    _write_project_files(sbx, project_files)
 
-        setup_lines = []
-        if project_files:
-            setup_lines.append("import os, base64")
-            for fpath, content in project_files.items():
-                b64 = _b64.b64encode(content.encode("utf-8")).decode("ascii")
-                setup_lines.append(f"os.makedirs(os.path.dirname('{fpath}') or '.', exist_ok=True)")
-                setup_lines.append(f"open('{fpath}', 'w').write(base64.b64decode('{b64}').decode('utf-8'))")
+                result = sbx.commands.run(
+                    f"python3 {script_file}",
+                    timeout=timeout,
+                )
 
-        run_code = f"""
-import subprocess
-result = subprocess.run(
-    ["python", {script_file!r}],
-    capture_output=True,
-    text=True,
-    timeout={timeout},
-)
-print(result.stdout)
-if result.stderr:
-    print(result.stderr)
-print(f"__EXIT_CODE__{{result.returncode}}")
-"""
+                stdout = result.stdout or ""
+                stderr = result.stderr or ""
+                exit_code = result.exit_code
 
-        setup_code = "\n".join(setup_lines) + "\n" if setup_lines else ""
-        full_code = setup_code + run_code
+                base_result = self._build_result(stdout, stderr, exit_code)
 
-        result = self.run(
-            full_code,
-            profile=SandboxProfile.LOCKED,
-            env_vars=env_vars,
-            timeout=timeout + 10,
-            template=template,
-        )
+                passed = 1 if exit_code == 0 else 0
+                failed = 0 if passed else 1
 
-        summary = result.output_summary
-        script_exit = 0
-        if "__EXIT_CODE__" in summary:
-            try:
-                code_str = summary.split("__EXIT_CODE__")[-1].strip()
-                script_exit = int(code_str)
-                summary = summary.split("__EXIT_CODE__")[0].strip()
-            except (ValueError, IndexError):
-                pass
+                return SandboxResult(
+                    exit_code=exit_code,
+                    tests_passed=passed,
+                    tests_failed=failed,
+                    errors=base_result.errors,
+                    output_summary=base_result.output_summary,
+                    files_modified=base_result.files_modified,
+                    timed_out=False,
+                    validation_skipped=False,
+                    warnings=[],
+                )
 
-        passed = 1 if script_exit == 0 and not result.errors else 0
-        failed = 0 if passed else 1
-
-        return SandboxResult(
-            exit_code=script_exit if not result.errors else 1,
-            tests_passed=passed,
-            tests_failed=failed,
-            errors=result.errors,
-            output_summary=summary,
-            files_modified=result.files_modified,
-            timed_out=result.timed_out,
-            validation_skipped=False,
-            warnings=[],
-        )
+        except TimeoutError:
+            return SandboxResult(
+                exit_code=1,
+                tests_passed=0,
+                tests_failed=1,
+                errors=[f"Script execution timed out after {timeout}s"],
+                output_summary=f"Sandbox timed out running {script_file}",
+                timed_out=True,
+            )
+        except Exception as e:
+            logger.warning("[SANDBOX] run_script error: %s", e)
+            return SandboxResult(
+                exit_code=1,
+                tests_passed=0,
+                tests_failed=1,
+                errors=[str(e)],
+                output_summary=f"Sandbox error: {type(e).__name__}: {e}",
+            )
