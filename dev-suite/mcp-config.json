@@ -1,5 +1,5 @@
 {
-  "$schema": "MCP server configuration — version pinning + subprocess spawning",
+  "_comment": "MCP server configuration — version pinning + subprocess spawning",
   "last_reviewed": "2026-04-01",
   "servers": {
     "filesystem": {
