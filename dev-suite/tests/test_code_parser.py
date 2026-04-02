@@ -1,7 +1,7 @@
 """Tests for code_parser utility.
 
 Covers: multi-file parsing, single-file fallback, edge cases,
-path validation, and security boundaries.
+path validation, security boundaries, and markdown fence stripping.
 """
 
 import os
@@ -13,6 +13,7 @@ from src.tools.code_parser import (
     CodeParserError,
     ParsedFile,
     _normalize_path,
+    _strip_markdown_fences,
     parse_generated_code,
     validate_paths_for_workspace,
 )
@@ -66,6 +67,72 @@ class TestNormalizePath:
     def test_rejects_whitespace_only(self):
         with pytest.raises(CodeParserError, match="Empty file path"):
             _normalize_path("   ")
+
+
+# -- _strip_markdown_fences tests --
+
+
+class TestStripMarkdownFences:
+    """Markdown fence stripping from extracted file content."""
+
+    def test_strips_python_fence(self):
+        content = "```python\ndef hello():\n    print('hi')\n```"
+        result = _strip_markdown_fences(content, "test.py")
+        assert result == "def hello():\n    print('hi')"
+
+    def test_strips_bare_fence(self):
+        content = "```\nsome content\n```"
+        result = _strip_markdown_fences(content, "test.txt")
+        assert result == "some content"
+
+    def test_strips_js_fence(self):
+        content = "```javascript\nconsole.log('hi')\n```"
+        result = _strip_markdown_fences(content, "test.js")
+        assert result == "console.log('hi')"
+
+    def test_strips_sql_fence(self):
+        content = "```sql\nSELECT * FROM users;\n```"
+        result = _strip_markdown_fences(content, "test.sql")
+        assert result == "SELECT * FROM users;"
+
+    def test_no_fence_unchanged(self):
+        content = "def hello():\n    print('hi')"
+        result = _strip_markdown_fences(content, "test.py")
+        assert result == content
+
+    def test_preserves_interior_backticks(self):
+        """Interior triple backticks (e.g., in a README) are NOT stripped."""
+        content = (
+            "```python\n"
+            "# This generates markdown\n"
+            "output = '```python\\nprint(1)\\n```'\n"
+            "```"
+        )
+        result = _strip_markdown_fences(content, "gen.py")
+        assert result == (
+            "# This generates markdown\n"
+            "output = '```python\\nprint(1)\\n```'"
+        )
+
+    def test_only_leading_fence(self):
+        """Leading fence without trailing -- still strip the leading one."""
+        content = "```python\ndef hello():\n    pass"
+        result = _strip_markdown_fences(content, "test.py")
+        assert result == "def hello():\n    pass"
+
+    def test_only_trailing_fence(self):
+        """Trailing fence without leading -- still strip the trailing one."""
+        content = "def hello():\n    pass\n```"
+        result = _strip_markdown_fences(content, "test.py")
+        assert result == "def hello():\n    pass"
+
+    def test_empty_content(self):
+        assert _strip_markdown_fences("", "test.py") == ""
+
+    def test_fence_with_trailing_whitespace(self):
+        content = "```python   \ndef hello():\n    pass\n```  "
+        result = _strip_markdown_fences(content, "test.py")
+        assert result == "def hello():\n    pass"
 
 
 # -- parse_generated_code tests --
@@ -237,6 +304,119 @@ class TestParseGeneratedCode:
         result = parse_generated_code(code)
         assert len(result) == 1
         assert "x_999 = 999" in result[0].content
+
+    # -- Markdown fence stripping integration tests --
+
+    def test_strips_python_fence_in_marker_block(self):
+        """Fence after FILE marker is stripped (the #101 bug)."""
+        code = (
+            "# --- FILE: triforce.py ---\n"
+            "```python\n"
+            "#!/usr/bin/env python3\n"
+            "print('triforce')\n"
+            "```\n"
+        )
+        result = parse_generated_code(code)
+        assert len(result) == 1
+        assert result[0].path == "triforce.py"
+        assert result[0].content.startswith("#!/usr/bin/env python3")
+        assert "```" not in result[0].content
+
+    def test_strips_bare_fence_in_marker_block(self):
+        """Bare ``` fences (no language tag) are also stripped."""
+        code = (
+            "# --- FILE: output.txt ---\n"
+            "```\n"
+            "hello world\n"
+            "```\n"
+        )
+        result = parse_generated_code(code)
+        assert result[0].content == "hello world"
+
+    def test_clean_code_unaffected_by_fence_stripping(self):
+        """Code without fences is not modified by the new logic."""
+        code = (
+            "# --- FILE: main.py ---\n"
+            "#!/usr/bin/env python3\n"
+            "print('hello')\n"
+        )
+        result = parse_generated_code(code)
+        assert result[0].content == "#!/usr/bin/env python3\nprint('hello')"
+
+    def test_multi_file_with_mixed_fences(self):
+        """Some files have fences, some don't."""
+        code = (
+            "# --- FILE: a.py ---\n"
+            "```python\n"
+            "x = 1\n"
+            "```\n"
+            "# --- FILE: b.py ---\n"
+            "y = 2\n"
+            "# --- FILE: c.js ---\n"
+            "```javascript\n"
+            "const z = 3;\n"
+            "```\n"
+        )
+        result = parse_generated_code(code)
+        assert len(result) == 3
+        assert result[0].content == "x = 1"
+        assert "```" not in result[0].content
+        assert result[1].content == "y = 2"
+        assert result[2].content == "const z = 3;"
+        assert "```" not in result[2].content
+
+    def test_regression_triforce_trace(self):
+        """Regression test: exact pattern from trace-2779973899882ec73c9b4eb161ae53f5.
+
+        The Dev agent generated code with a FILE marker followed by ```python
+        fence, which caused SyntaxError in E2B sandbox on all 3 retries.
+        """
+        code = (
+            "I've created the triforce.py file.\n\n"
+            "# --- FILE: triforce.py ---\n"
+            "```python\n"
+            "#!/usr/bin/env python3\n"
+            '"""Triforce ASCII Art Generator"""\n'
+            "\n"
+            "def print_triforce():\n"
+            '    print("    /\\\\    ")\n'
+            '    print("   /  \\\\   ")\n'
+            '    print("  /____\\\\  ")\n'
+            '    print(" /\\\\  /\\\\  ")\n'
+            '    print("/____\\\\/____\\\\")\n'
+            "\n"
+            'if __name__ == "__main__":\n'
+            "    print_triforce()\n"
+            "```\n"
+        )
+        result = parse_generated_code(code)
+        assert len(result) == 1
+        assert result[0].path == "triforce.py"
+        # Must NOT start with ```python
+        assert not result[0].content.startswith("```")
+        # Must start with the shebang
+        assert result[0].content.startswith("#!/usr/bin/env python3")
+        # Must NOT contain any fences
+        assert "```" not in result[0].content
+        # Must be valid Python (no SyntaxError)
+        compile(result[0].content, "triforce.py", "exec")
+
+    def test_interior_backticks_preserved(self):
+        """Triple backticks inside file content (not first/last line) survive."""
+        code = (
+            "# --- FILE: README.md ---\n"
+            "# My Project\n"
+            "\n"
+            "```python\n"
+            "print('example')\n"
+            "```\n"
+            "\n"
+            "More docs here.\n"
+        )
+        result = parse_generated_code(code)
+        # The first ``` is on line 3 (not line 1) so it should NOT be stripped
+        assert "```python" in result[0].content
+        assert "```" in result[0].content
 
 
 # -- validate_paths_for_workspace tests --
