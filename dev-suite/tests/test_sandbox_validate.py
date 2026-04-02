@@ -5,7 +5,6 @@ E2B runner -- no real sandbox needed. Tests cover:
   - Strategy-based dispatch (TEST_SUITE, SCRIPT_EXEC, SKIP)
   - Template selection from blueprint target_files
   - Graceful skip when E2B_API_KEY is missing
-  - validation_skipped flag propagation
   - SandboxResult stored in graph state
   - Warnings surfaced in trace
 
@@ -113,13 +112,13 @@ class TestSandboxValidateStrategy:
         assert call_kwargs["template"] == "fullstack"
 
     def test_skip_for_non_code_files(self):
-        """Non-code files should get SKIP strategy with validation_skipped=True."""
+        """Non-code files should return None (no sandbox run)."""
         state = _make_state(["schema.sql", "config.yaml"])
 
         result = sandbox_validate_node(state)
 
         assert result["sandbox_result"] is None
-        assert result["sandbox_result"].exit_code == 0
+        assert any("skip" in t.lower() for t in result["trace"])
 
 
 class TestSandboxValidateNode:
@@ -178,7 +177,7 @@ class TestSandboxValidateNode:
         assert call_kwargs["template"] == "fullstack"
 
     def test_graceful_skip_no_api_key(self):
-        """Should return validation_skipped when E2B_API_KEY is missing."""
+        """Should return None when E2B_API_KEY is missing."""
         state = _make_state(["src/main.py", "tests/test_main.py"])
 
         with patch("src.orchestrator._run_sandbox_tests") as mock_run:
