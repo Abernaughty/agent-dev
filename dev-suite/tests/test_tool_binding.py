@@ -18,6 +18,7 @@ Tests cover:
 
 import asyncio
 import json
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -327,21 +328,46 @@ class TestQANodeTools:
 
 class TestInitToolsConfig:
     def test_returns_empty_when_no_config_file(self, tmp_path):
+        """When _get_mcp_config_path points to a nonexistent file, tools are empty."""
         from src.orchestrator import init_tools_config
-        assert init_tools_config(workspace_root=tmp_path) == {"configurable": {"tools": []}}
+        fake_config = tmp_path / "mcp-config.json"
+        with patch("src.orchestrator._get_mcp_config_path", return_value=fake_config):
+            assert init_tools_config(workspace_root=tmp_path) == {"configurable": {"tools": []}}
 
     def test_returns_empty_on_exception(self, tmp_path):
+        """When mcp-config.json exists but is invalid, tools are empty."""
         from src.orchestrator import init_tools_config
-        (tmp_path / "mcp-config.json").write_text("not valid json")
-        assert init_tools_config(workspace_root=tmp_path) == {"configurable": {"tools": []}}
+        bad_config = tmp_path / "mcp-config.json"
+        bad_config.write_text("not valid json")
+        with patch("src.orchestrator._get_mcp_config_path", return_value=bad_config):
+            assert init_tools_config(workspace_root=tmp_path) == {"configurable": {"tools": []}}
 
     def test_loads_tools_from_valid_config(self, tmp_path):
         from src.orchestrator import init_tools_config
-        (tmp_path / "mcp-config.json").write_text(json.dumps({"servers": {"filesystem": {"version": "1.0"}}, "last_reviewed": "2026-03-01"}))
+        config_file = tmp_path / "mcp-config.json"
+        config_file.write_text(json.dumps({"servers": {"filesystem": {"version": "1.0"}}, "last_reviewed": "2026-03-01"}))
         mock_tools = [FakeTool("filesystem_read")]
-        with patch("src.tools.load_mcp_config") as mock_load, patch("src.tools.create_provider") as mock_create, patch("src.tools.get_tools", return_value=mock_tools):
+        with patch("src.orchestrator._get_mcp_config_path", return_value=config_file), \
+             patch("src.tools.load_mcp_config") as mock_load, \
+             patch("src.tools.create_provider") as mock_create, \
+             patch("src.tools.get_tools", return_value=mock_tools):
             result = init_tools_config(workspace_root=tmp_path)
         assert len(result["configurable"]["tools"]) == 1
+
+    def test_mcp_config_path_from_env(self, tmp_path, monkeypatch):
+        """MCP_CONFIG_PATH env var overrides the __file__-based fallback."""
+        from src.orchestrator import _get_mcp_config_path
+        custom_path = tmp_path / "custom-mcp.json"
+        monkeypatch.setenv("MCP_CONFIG_PATH", str(custom_path))
+        assert _get_mcp_config_path() == custom_path.resolve()
+
+    def test_mcp_config_path_default_fallback(self, monkeypatch):
+        """Without MCP_CONFIG_PATH env var, falls back to dev-suite/mcp-config.json."""
+        from src.orchestrator import _get_mcp_config_path
+        monkeypatch.delenv("MCP_CONFIG_PATH", raising=False)
+        result = _get_mcp_config_path()
+        assert result.name == "mcp-config.json"
+        assert "dev-suite" in str(result)
 
 
 class TestSanitizePreview:
