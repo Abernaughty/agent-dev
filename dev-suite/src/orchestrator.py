@@ -747,10 +747,18 @@ def _get_mcp_config_path() -> Path:
 
     WORKSPACE_ROOT is intentionally NOT used here -- it points to the
     agent output directory (e.g. ../workspace), not the project source.
+
+    Relative MCP_CONFIG_PATH values are anchored to the project root
+    (dev-suite/), not the process CWD, for deterministic resolution.
+    Supports ~ expansion for home directory paths.
     """
     explicit = os.getenv("MCP_CONFIG_PATH")
     if explicit:
-        return Path(explicit).resolve()
+        p = Path(explicit).expanduser()
+        if not p.is_absolute():
+            # Anchor relative paths to dev-suite/ (same root as default fallback)
+            p = Path(__file__).resolve().parent.parent / p
+        return p.resolve()
     # __file__ is dev-suite/src/orchestrator.py -> parent.parent = dev-suite/
     return Path(__file__).resolve().parent.parent / "mcp-config.json"
 
