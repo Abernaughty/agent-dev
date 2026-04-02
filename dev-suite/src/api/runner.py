@@ -3,6 +3,8 @@
 Issue #48: StateManager <-> Orchestrator bridge
 Issue #80: Tool binding -- tools_config initialization, TOOL_CALL SSE events
 Issue #92: Budget data in SSE events, flush_memory -> StateManager bridge
+Issue #97: Langfuse tracing -- wires create_trace_config + callbacks +
+           propagation_context into the astream loop, mirroring CLI parity.
 
 Uses LangGraph's astream() to iterate node completions and emit SSE events
 in real time. Runs entirely on the async event loop -- no threading needed.
@@ -34,6 +36,7 @@ from ..orchestrator import (
     MAX_RETRIES,
     TOKEN_BUDGET,
 )
+from ..tracing import add_trace_event, create_trace_config
 from .events import EventType, SSEEvent, event_bus
 from .models import (
     AgentStatus,
@@ -135,11 +138,32 @@ class TaskRunner:
         return len(self._tasks)
 
     async def _run_task(self, task_id: str, description: str) -> None:
-        """Run the orchestrator via astream() and emit SSE events."""
+        """Run the orchestrator via astream() and emit SSE events.
+
+        Issue #97: Now creates a TracingConfig and passes Langfuse
+        callbacks into the astream config, wrapped in propagation_context()
+        for session/tag/metadata grouping. Mirrors the CLI run_task() pattern.
+        """
         from .state import state_manager
 
         start_time = time.time()
         self._dev_tool_baselines[task_id] = 0
+
+        # Issue #97: Initialize Langfuse tracing for this task run.
+        # create_trace_config handles missing credentials gracefully
+        # (returns enabled=False) so tracing never crashes a task.
+        trace_config = create_trace_config(
+            enabled=True,
+            task_description=description,
+            session_id=task_id,
+            tags=["orchestrator", "api-runner"],
+            metadata={
+                "source": "dashboard",
+                "task_id": task_id,
+                "max_retries": str(MAX_RETRIES),
+                "token_budget": str(TOKEN_BUDGET),
+            },
+        )
 
         try:
             await self._emit_progress(task_id, "task_started", None, f"Task started: {description[:100]}")
@@ -176,30 +200,51 @@ class TaskRunner:
                 **tools_config,
             }
 
+            # Issue #97: Merge Langfuse callbacks into the stream config
+            # so LangChain/LangGraph LLM calls are automatically traced.
+            if trace_config.callbacks:
+                stream_config["callbacks"] = trace_config.callbacks
+
             prev_node = None
             prev_tool_count = 0
-            async for event in workflow.astream(initial_state, config=stream_config):
-                for node_name, node_output in event.items():
-                    if node_name.startswith("__"):
-                        continue
 
-                    tool_calls_log = node_output.get("tool_calls_log", [])
-                    if len(tool_calls_log) > prev_tool_count:
-                        new_calls = tool_calls_log[prev_tool_count:]
-                        for tc in new_calls:
-                            await self._emit_tool_call(
-                                task_id,
-                                tc.get("agent", "unknown"),
-                                tc.get("tool", "unknown"),
-                                tc.get("success", True),
-                                tc.get("result_preview", ""),
-                            )
-                        prev_tool_count = len(tool_calls_log)
+            # Issue #97: Wrap the entire astream loop in propagation_context()
+            # so Langfuse traces get session_id, tags, and metadata attached.
+            # propagation_context() is a sync contextmanager that sets
+            # contextvars -- safe to use in async code within a single task.
+            with trace_config.propagation_context():
+                add_trace_event(
+                    trace_config, "orchestrator_start",
+                    metadata={
+                        "task_preview": description[:200],
+                        "max_retries": str(MAX_RETRIES),
+                        "token_budget": str(TOKEN_BUDGET),
+                        "tools_available": str(n_tools),
+                    },
+                )
 
-                    await self._handle_node_completion(
-                        task_id, node_name, node_output, state_manager, prev_node,
-                    )
-                    prev_node = node_name
+                async for event in workflow.astream(initial_state, config=stream_config):
+                    for node_name, node_output in event.items():
+                        if node_name.startswith("__"):
+                            continue
+
+                        tool_calls_log = node_output.get("tool_calls_log", [])
+                        if len(tool_calls_log) > prev_tool_count:
+                            new_calls = tool_calls_log[prev_tool_count:]
+                            for tc in new_calls:
+                                await self._emit_tool_call(
+                                    task_id,
+                                    tc.get("agent", "unknown"),
+                                    tc.get("tool", "unknown"),
+                                    tc.get("success", True),
+                                    tc.get("result_preview", ""),
+                                )
+                            prev_tool_count = len(tool_calls_log)
+
+                        await self._handle_node_completion(
+                            task_id, node_name, node_output, state_manager, prev_node,
+                        )
+                        prev_node = node_name
 
             task = state_manager.get_task(task_id)
             if task:
@@ -209,6 +254,18 @@ class TaskRunner:
                     await state_manager.update_agent_status(agent_id, AgentStatus.IDLE)
                 await self._emit_complete(task_id, final_status.value, f"Task completed in {elapsed:.1f}s -- {final_status.value}")
                 await self._emit_log(f"[orchestrator] Task {task_id} finished: {final_status.value} ({elapsed:.1f}s, {task.budget.tokens_used} tokens, ${task.budget.cost_used:.2f})")
+
+                # Issue #97: Record completion in Langfuse trace
+                add_trace_event(
+                    trace_config, "orchestrator_complete",
+                    metadata={
+                        "status": final_status.value,
+                        "tokens_used": str(task.budget.tokens_used),
+                        "retries_used": str(task.budget.retries_used),
+                        "cost_used": str(task.budget.cost_used),
+                        "elapsed_seconds": f"{elapsed:.1f}",
+                    },
+                )
 
         except asyncio.CancelledError:
             logger.info("Task %s was cancelled", task_id)
@@ -232,6 +289,9 @@ class TaskRunner:
 
         finally:
             self._dev_tool_baselines.pop(task_id, None)
+            # Issue #97: Flush Langfuse client to ensure all trace data
+            # is shipped, even on cancel/error paths.
+            trace_config.flush()
 
     async def _handle_node_completion(self, task_id, node_name, node_output, state_manager, prev_node):
         """Process a completed node and emit appropriate SSE events."""
