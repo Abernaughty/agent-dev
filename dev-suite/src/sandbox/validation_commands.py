@@ -198,11 +198,14 @@ def get_validation_plan(target_files: list[str]) -> ValidationPlan:
 
     # Pick strategy and commands
     if has_frontend and has_python:
-        # Full-stack: always TEST_SUITE
+        # Full-stack: frontend checks + Python (lint always, pytest only if tests exist)
+        # CR fix: unconditionally using FULLSTACK_COMMANDS reintroduces pytest
+        # even when no test files are present, causing "no tests collected" failures.
+        python_cmds = PYTHON_COMMANDS if _has_test_files(target_files) else PYTHON_LINT_COMMANDS
         return ValidationPlan(
             strategy=ValidationStrategy.TEST_SUITE,
             template=template,
-            commands=list(FULLSTACK_COMMANDS),
+            commands=list(FRONTEND_COMMANDS + python_cmds),
             description=(
                 f"Full-stack validation: {len(target_files)} files "
                 f"(frontend + Python) using fullstack template"

@@ -401,7 +401,10 @@ print("__RESULTS__" + json.dumps([{{"cmd": r["cmd"], "rc": r["rc"]}} for r in re
                     rc = cr.get("rc", 0)
                     if rc == 127:
                         warnings.append(f"Command not found: {cr['cmd'][:60]}")
-                    elif rc != 0 and aggregate_exit_code == 0:
+                    # CR fix: use `if` not `elif` so rc=127 both warns
+                    # AND fails the aggregate. A missing tool (pnpm, tsc)
+                    # should not silently pass validation.
+                    if rc != 0 and aggregate_exit_code == 0:
                         aggregate_exit_code = rc
                 summary = summary.split("__RESULTS__")[0].strip()
             except (ValueError, IndexError):

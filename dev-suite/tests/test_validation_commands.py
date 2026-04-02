@@ -126,6 +126,7 @@ class TestGetValidationPlan:
         files = [
             "dev-suite/src/api/main.py",
             "dashboard/src/lib/Widget.svelte",
+            "tests/test_api.py",
         ]
         plan = get_validation_plan(files)
         assert plan.strategy == ValidationStrategy.TEST_SUITE
@@ -134,11 +135,20 @@ class TestGetValidationPlan:
         assert "Full-stack" in plan.description
 
     def test_mixed_python_and_typescript(self):
-        files = ["src/server.py", "dashboard/src/routes/+page.ts"]
+        files = ["src/server.py", "dashboard/src/routes/+page.ts", "tests/test_server.py"]
         plan = get_validation_plan(files)
         assert plan.strategy == ValidationStrategy.TEST_SUITE
         assert plan.template == "fullstack"
         assert plan.commands == FULLSTACK_COMMANDS
+
+    def test_mixed_frontend_and_python_no_tests(self):
+        """CR fix: mixed without tests should use frontend + lint only (no pytest)."""
+        files = ["src/api.py", "dashboard/src/App.svelte"]
+        plan = get_validation_plan(files)
+        assert plan.strategy == ValidationStrategy.TEST_SUITE
+        assert plan.template == "fullstack"
+        assert plan.commands == FRONTEND_COMMANDS + PYTHON_LINT_COMMANDS
+        assert "Full-stack" in plan.description
 
     # -- Non-code files (SKIP) --
 
