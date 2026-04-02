@@ -26,6 +26,11 @@ _FILE_MARKER_RE = re.compile(
     re.MULTILINE,
 )
 
+# Matches a markdown fence line: ```python, ```c++, ```objective-c, ```, etc.
+# Supports info strings with non-word chars (hyphens, pluses).
+# Only anchored at line boundaries -- used to strip leading/trailing fences.
+_FENCE_RE = re.compile(r"^\s*```(?:[^`\s][^`]*)?\s*$")
+
 
 @dataclass(frozen=True)
 class ParsedFile:
@@ -89,6 +94,42 @@ def _normalize_path(raw_path: str) -> str:
     return cleaned
 
 
+def _strip_markdown_fences(content: str, path: str) -> str:
+    """Strip leading/trailing markdown fence lines from extracted file content.
+
+    LLMs frequently wrap code blocks in ```lang ... ``` fences even inside
+    FILE-marker sections.  Only the *first* and *last* lines are checked so
+    that interior backtick usage (e.g. in a README template) is preserved.
+
+    Args:
+        content: Raw file content extracted between FILE markers.
+        path: File path (used only for logging).
+
+    Returns:
+        Content with leading/trailing fences removed, if any were present.
+    """
+    if not content:
+        return content
+
+    lines = content.split("\n")
+    stripped = False
+
+    # Strip leading fence (```python, ```js, ```, etc.)
+    if lines and _FENCE_RE.match(lines[0]):
+        lines = lines[1:]
+        stripped = True
+
+    # Strip trailing fence (```)
+    if lines and _FENCE_RE.match(lines[-1]):
+        lines = lines[:-1]
+        stripped = True
+
+    if stripped:
+        logger.info("code_parser: stripped markdown fences from %s", path)
+
+    return "\n".join(lines)
+
+
 def parse_generated_code(
     generated_code: str,
     *,
@@ -120,6 +161,8 @@ def parse_generated_code(
     if not markers:
         # No markers -- treat entire output as single file
         content = generated_code.strip()
+        content = _strip_markdown_fences(content, default_filename)
+        content = content.strip("\n").rstrip()
         if not content:
             return []
         return [ParsedFile(path=default_filename, content=content)]
@@ -150,6 +193,12 @@ def parse_generated_code(
         content = generated_code[content_start:content_end]
 
         # Strip leading blank line (common after marker) and trailing whitespace
+        content = content.strip("\n").rstrip()
+
+        # Strip markdown fences that LLMs wrap around code blocks
+        content = _strip_markdown_fences(content, path)
+
+        # Re-strip after fence removal (fence removal may expose blank lines)
         content = content.strip("\n").rstrip()
 
         # If content is empty after stripping, we still record the file
