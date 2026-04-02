@@ -2,11 +2,12 @@
 
 These tests validate the sandbox_validate node behavior with mocked
 E2B runner -- no real sandbox needed. Tests cover:
-  - Strategy-based dispatch (TEST_SUITE, SCRIPT_EXEC, SKIP)
+  - Strategy-based dispatch (TEST_SUITE, SCRIPT_EXEC, SKIP, LINT_ONLY)
   - Template selection from blueprint target_files
   - Graceful skip when E2B_API_KEY is missing
   - SandboxResult stored in graph state
   - Warnings surfaced in trace
+  - Empty parsed_files guard
 
 Issue #95: Updated for ValidationStrategy dispatch.
 """
@@ -25,7 +26,12 @@ from src.sandbox.e2b_runner import SandboxResult
 
 
 def _make_state(target_files: list[str], **overrides) -> GraphState:
-    """Helper to create a GraphState with a blueprint."""
+    """Helper to create a GraphState with a blueprint.
+
+    By default, populates parsed_files from target_files so the
+    empty-files guard doesn't skip sandbox dispatch. Tests that
+    need empty parsed_files should pass parsed_files=[] explicitly.
+    """
     bp = Blueprint(
         task_id="test-task",
         target_files=target_files,
@@ -33,6 +39,11 @@ def _make_state(target_files: list[str], **overrides) -> GraphState:
         constraints=["constraint1"],
         acceptance_criteria=["criterion1"],
     )
+    # Default: populate parsed_files with dummy content for each target file
+    default_parsed = [
+        {"path": f, "content": f"# stub content for {f}"}
+        for f in target_files
+    ]
     state: GraphState = {
         "task_description": "test task",
         "blueprint": bp,
@@ -45,7 +56,7 @@ def _make_state(target_files: list[str], **overrides) -> GraphState:
         "memory_context": [],
         "memory_writes": [],
         "trace": [],
-        "parsed_files": [],
+        "parsed_files": default_parsed,
         "tool_calls_log": [],
     }
     state.update(overrides)
@@ -119,6 +130,37 @@ class TestSandboxValidateStrategy:
 
         assert result["sandbox_result"] is None
         assert any("skip" in t.lower() for t in result["trace"])
+
+    def test_empty_parsed_files_skips_sandbox(self):
+        """CR fix: empty parsed_files should skip sandbox dispatch."""
+        state = _make_state(
+            ["src/main.py", "tests/test_main.py"],
+            parsed_files=[],
+        )
+
+        result = sandbox_validate_node(state)
+
+        assert result["sandbox_result"] is None
+        assert any("no parsed files" in t.lower() for t in result["trace"])
+
+    def test_lint_only_for_pyi_stubs(self):
+        """CR fix: .pyi-only files should dispatch via LINT_ONLY -> _run_sandbox_tests."""
+        state = _make_state(["src/types.pyi"])
+
+        with patch("src.orchestrator._run_sandbox_tests") as mock_tests:
+            mock_tests.return_value = SandboxResult(
+                exit_code=0,
+                tests_passed=None,
+                tests_failed=None,
+                output_summary="ruff check passed",
+            )
+            result = sandbox_validate_node(state)
+
+        assert result["sandbox_result"] is not None
+        assert result["sandbox_result"].exit_code == 0
+        mock_tests.assert_called_once()
+        trace_text = " ".join(result.get("trace", []))
+        assert "lint_only" in trace_text.lower() or "command(s) sequentially" in trace_text.lower()
 
 
 class TestSandboxValidateNode:
