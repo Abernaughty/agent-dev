@@ -11,6 +11,9 @@ Template support:
   - Default: bare Python (e2b-code-interpreter base image)
   - Fullstack: Python + Node.js 22 + pnpm + SvelteKit toolchain
   - Templates configured via E2B_TEMPLATE_DEFAULT / E2B_TEMPLATE_FULLSTACK env vars
+
+Issue #95: Added validation_skipped/warnings fields to SandboxResult,
+sequential run_tests() execution, and run_script() for simple scripts.
 """
 
 import os
@@ -47,6 +50,8 @@ class SandboxResult(BaseModel):
     output_summary: str = ""
     files_modified: list[str] = []
     timed_out: bool = False
+    validation_skipped: bool = False
+    warnings: list[str] = []
 
 
 # -- Secret Patterns for Scanning --
@@ -173,16 +178,7 @@ def _extract_execution_error(error_obj) -> str:
 # -- Template Configuration --
 
 def _get_template_id(template: str | None) -> str | None:
-    """Resolve a template name to an E2B template ID.
-
-    Template names map to environment variables:
-      - "fullstack" -> E2B_TEMPLATE_FULLSTACK
-      - "default"   -> E2B_TEMPLATE_DEFAULT
-      - None        -> E2B_TEMPLATE_DEFAULT (if set), else bare E2B default
-
-    If the value looks like a raw template ID (no env var mapping),
-    it's used directly.
-    """
+    """Resolve a template name to an E2B template ID."""
     if template is None:
         return os.getenv("E2B_TEMPLATE_DEFAULT") or None
 
@@ -210,12 +206,7 @@ PYTHON_EXTENSIONS = {".py", ".pyi"}
 
 
 def select_template_for_files(target_files: list[str]) -> str | None:
-    """Select the appropriate sandbox template based on target file types.
-
-    Returns:
-        Template name ("fullstack" or None for default Python).
-        Returns None if no files are provided or all files are Python-only.
-    """
+    """Select the appropriate sandbox template based on target file types."""
     if not target_files:
         return None
 
@@ -234,24 +225,14 @@ def select_template_for_files(target_files: list[str]) -> str | None:
 class E2BRunner:
     """Execute code in E2B sandboxes with structured output.
 
-    The API key is read from the E2B_API_KEY environment variable.
-    Make sure it's set in your .env file or shell environment.
-
-    Correct usage per E2B SDK v2 (from official docs):
-        Sandbox.create() is the factory method - never call Sandbox() directly.
-
     Usage:
         runner = E2BRunner()
         result = runner.run("print('hello')")
-        print(result.output_summary)
-
-        # With a custom template:
-        result = runner.run("console.log('hi')", template="fullstack")
+        result = runner.run_script("hello.py", project_files={"hello.py": "print('hi')"})
+        result = runner.run_tests(commands=["pytest tests/"], project_files={...})
     """
 
     def __init__(self, api_key: str | None = None, default_timeout: int = 30):
-        # E2B SDK reads from E2B_API_KEY env var automatically.
-        # If an explicit key is passed, set it in the environment.
         if api_key:
             os.environ["E2B_API_KEY"] = api_key
         self._default_timeout = default_timeout
@@ -264,49 +245,28 @@ class E2BRunner:
         timeout: int | None = None,
         template: str | None = None,
     ) -> SandboxResult:
-        """Execute code in a sandbox and return structured results.
-
-        Args:
-            code: Python code to execute.
-            profile: Security profile (LOCKED or PERMISSIVE).
-            env_vars: Environment variables to inject (secrets for LOCKED only).
-            timeout: Execution timeout in seconds.
-            template: Sandbox template name or ID.
-                      "fullstack" -> E2B_TEMPLATE_FULLSTACK env var.
-                      None -> E2B_TEMPLATE_DEFAULT or bare E2B default.
-                      Any other string -> used as raw template ID.
-
-        Returns:
-            SandboxResult with structured output. Never raw stdout/stderr.
-        """
+        """Execute code in a sandbox and return structured results."""
         timeout = timeout or self._default_timeout
 
-        # Enforce: PERMISSIVE profile gets zero secrets
         if profile == SandboxProfile.PERMISSIVE:
             env_vars = None
 
-        # Resolve template name to ID
         template_id = _get_template_id(template)
 
         try:
-            # E2B v2 SDK: Sandbox.create() is the public factory method.
-            # Using it as a context manager auto-kills the sandbox on exit.
             create_kwargs = {}
             if template_id:
                 create_kwargs["template"] = template_id
 
             with Sandbox.create(**create_kwargs) as sbx:
-                # Inject env vars if provided
                 if env_vars:
                     env_setup = "\n".join(
                         f"import os; os.environ['{k}'] = '{v}'" for k, v in env_vars.items()
                     )
                     sbx.run_code(env_setup)
 
-                # Execute the actual code
                 execution = sbx.run_code(code)
 
-                # Collect raw output
                 raw_stdout = ""
                 raw_stderr = ""
                 for log in execution.logs.stdout:
@@ -316,26 +276,20 @@ class E2BRunner:
 
                 combined = raw_stdout + raw_stderr
 
-                # Layer 1: Structured output wrapper
                 test_info = _parse_test_output(combined)
 
-                # Extract errors from both stdout/stderr AND execution.error
                 errors = _extract_errors(combined)
                 if execution.error:
                     exec_err = _extract_execution_error(execution.error)
                     if exec_err and exec_err not in errors:
                         errors.insert(0, exec_err)
 
-                # Layer 2: Secret scanning
                 safe_summary = _scan_for_secrets(combined)
 
-                # If stdout/stderr was empty but we have an execution error,
-                # include the error in the summary
                 if not safe_summary.strip() and execution.error:
                     exec_err = _extract_execution_error(execution.error)
                     safe_summary = _scan_for_secrets(exec_err)
 
-                # Truncate summary to prevent context bloat
                 if len(safe_summary) > 2000:
                     safe_summary = safe_summary[:2000] + "\n... [truncated]"
 
@@ -364,38 +318,136 @@ class E2BRunner:
 
     def run_tests(
         self,
-        test_command: str,
+        commands: list[str],
         project_files: dict[str, str] | None = None,
         env_vars: dict[str, str] | None = None,
         timeout: int = 60,
         template: str | None = None,
     ) -> SandboxResult:
-        """Run a test suite in the sandbox.
+        """Run validation commands sequentially in the sandbox.
 
-        Args:
-            test_command: Shell command to run tests (e.g., 'pytest tests/ -v').
-            project_files: Dict of {filepath: content} to write before testing.
-            env_vars: Secrets to inject.
-            timeout: Test timeout in seconds.
-            template: Sandbox template name or ID (e.g., "fullstack" for Node.js tasks).
+        Each command runs independently -- a missing tool (e.g., ruff)
+        does not prevent subsequent commands (e.g., pytest) from running.
+        Results are aggregated across all commands.
         """
-        # Build code that writes files then runs tests.
-        # File content is base64-encoded to avoid escaping issues with
-        # triple-quoted strings, embedded quotes, and multiline content.
-        setup_code = ""
+        import base64 as _b64
+        import json as _json
+
+        setup_lines = []
         if project_files:
-            import base64 as _b64
-            setup_code += "import os, base64\n"
+            setup_lines.append("import os, base64")
             for fpath, content in project_files.items():
                 b64 = _b64.b64encode(content.encode("utf-8")).decode("ascii")
-                setup_code += f"os.makedirs(os.path.dirname('{fpath}') or '.', exist_ok=True)\n"
-                setup_code += f"open('{fpath}', 'w').write(base64.b64decode('{b64}').decode('utf-8'))\n"
+                setup_lines.append(f"os.makedirs(os.path.dirname('{fpath}') or '.', exist_ok=True)")
+                setup_lines.append(f"open('{fpath}', 'w').write(base64.b64decode('{b64}').decode('utf-8'))")
+
+        commands_json = _json.dumps(commands)
+        run_code = f"""
+import subprocess, json
+
+commands = {commands_json}
+results = []
+for cmd in commands:
+    try:
+        r = subprocess.run(
+            cmd, shell=True, capture_output=True, text=True, timeout={timeout},
+        )
+        results.append({{"cmd": cmd, "rc": r.returncode, "out": r.stdout, "err": r.stderr}})
+    except subprocess.TimeoutExpired:
+        results.append({{"cmd": cmd, "rc": -1, "out": "", "err": "TIMEOUT"}})
+
+for r in results:
+    print(r["out"])
+    if r["err"] and r["err"] != "TIMEOUT":
+        print(r["err"])
+
+print("__RESULTS__" + json.dumps([{{"cmd": r["cmd"], "rc": r["rc"]}} for r in results]))
+"""
+
+        setup_code = "\n".join(setup_lines) + "\n" if setup_lines else ""
+        full_code = setup_code + run_code
+
+        # CR fix: scale outer timeout to account for sequential commands
+        num_commands = max(len(commands), 1)
+        overall_timeout = timeout * num_commands + 30
+
+        result = self.run(
+            full_code,
+            profile=SandboxProfile.LOCKED,
+            env_vars=env_vars,
+            timeout=overall_timeout,
+            template=template,
+        )
+
+        warnings = list(result.warnings)
+        summary = result.output_summary
+
+        # CR fix: aggregate exit_code from __RESULTS__ trailer instead of
+        # using the wrapper process exit code. A child command failure (e.g.,
+        # ruff finding lint errors) must propagate even if the wrapper exits 0.
+        aggregate_exit_code = result.exit_code
+
+        if "[WARN]" in summary:
+            for line in summary.split("\n"):
+                if "[WARN]" in line:
+                    warnings.append(line.strip())
+
+        if "__RESULTS__" in summary:
+            try:
+                json_part = summary.split("__RESULTS__")[-1].strip()
+                cmd_results = _json.loads(json_part)
+                # Aggregate: first non-zero rc, or 0 if all passed
+                for cr in cmd_results:
+                    rc = cr.get("rc", 0)
+                    if rc == 127:
+                        warnings.append(f"Command not found: {cr['cmd'][:60]}")
+                    # CR fix: use `if` not `elif` so rc=127 both warns
+                    # AND fails the aggregate. A missing tool (pnpm, tsc)
+                    # should not silently pass validation.
+                    if rc != 0 and aggregate_exit_code == 0:
+                        aggregate_exit_code = rc
+                summary = summary.split("__RESULTS__")[0].strip()
+            except (ValueError, IndexError):
+                pass
+
+        return SandboxResult(
+            exit_code=aggregate_exit_code,
+            tests_passed=result.tests_passed,
+            tests_failed=result.tests_failed,
+            errors=result.errors,
+            output_summary=summary,
+            files_modified=result.files_modified,
+            timed_out=result.timed_out,
+            validation_skipped=False,
+            warnings=warnings,
+        )
+
+    def run_script(
+        self,
+        script_file: str,
+        project_files: dict[str, str] | None = None,
+        env_vars: dict[str, str] | None = None,
+        timeout: int = 30,
+        template: str | None = None,
+    ) -> SandboxResult:
+        """Execute a script and check exit code + stdout.
+
+        For simple scripts that don't have a test suite.
+        """
+        import base64 as _b64
+
+        setup_lines = []
+        if project_files:
+            setup_lines.append("import os, base64")
+            for fpath, content in project_files.items():
+                b64 = _b64.b64encode(content.encode("utf-8")).decode("ascii")
+                setup_lines.append(f"os.makedirs(os.path.dirname('{fpath}') or '.', exist_ok=True)")
+                setup_lines.append(f"open('{fpath}', 'w').write(base64.b64decode('{b64}').decode('utf-8'))")
 
         run_code = f"""
 import subprocess
 result = subprocess.run(
-    {test_command!r},
-    shell=True,
+    ["python", {script_file!r}],
     capture_output=True,
     text=True,
     timeout={timeout},
@@ -403,13 +455,41 @@ result = subprocess.run(
 print(result.stdout)
 if result.stderr:
     print(result.stderr)
+print(f"__EXIT_CODE__{{result.returncode}}")
 """
 
+        setup_code = "\n".join(setup_lines) + "\n" if setup_lines else ""
         full_code = setup_code + run_code
-        return self.run(
+
+        result = self.run(
             full_code,
             profile=SandboxProfile.LOCKED,
             env_vars=env_vars,
             timeout=timeout + 10,
             template=template,
+        )
+
+        summary = result.output_summary
+        script_exit = 0
+        if "__EXIT_CODE__" in summary:
+            try:
+                code_str = summary.split("__EXIT_CODE__")[-1].strip()
+                script_exit = int(code_str)
+                summary = summary.split("__EXIT_CODE__")[0].strip()
+            except (ValueError, IndexError):
+                pass
+
+        passed = 1 if script_exit == 0 and not result.errors else 0
+        failed = 0 if passed else 1
+
+        return SandboxResult(
+            exit_code=script_exit if not result.errors else 1,
+            tests_passed=passed,
+            tests_failed=failed,
+            errors=result.errors,
+            output_summary=summary,
+            files_modified=result.files_modified,
+            timed_out=result.timed_out,
+            validation_skipped=False,
+            warnings=[],
         )

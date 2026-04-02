@@ -41,6 +41,7 @@ from .memory.summarizer import summarize_writes_sync
 from .sandbox.e2b_runner import E2BRunner, SandboxResult
 from .sandbox.validation_commands import (
     ValidationPlan,
+    ValidationStrategy,
     format_validation_summary,
     get_validation_plan,
 )
@@ -561,7 +562,8 @@ def qa_node(state: GraphState, config: RunnableConfig | None = None) -> dict:
     return {"failure_report": failure_report, "status": status, "tokens_used": tokens_used, "retry_count": new_retry_count, "trace": trace, "memory_writes": memory_writes, "tool_calls_log": tool_calls_log}
 
 
-def _run_sandbox_validation(commands, template, generated_code, parsed_files=None, timeout=120):
+def _run_sandbox_tests(commands, template, parsed_files=None, timeout=120):
+    """Run TEST_SUITE validation: sequential commands in sandbox."""
     api_key = os.getenv("E2B_API_KEY")
     if not api_key:
         return None
@@ -569,8 +571,19 @@ def _run_sandbox_validation(commands, template, generated_code, parsed_files=Non
     project_files = None
     if parsed_files:
         project_files = {pf["path"]: pf["content"] for pf in parsed_files}
-    compound_cmd = " && ".join(commands)
-    return runner.run_tests(test_command=compound_cmd, project_files=project_files, timeout=timeout, template=template)
+    return runner.run_tests(commands=commands, project_files=project_files, timeout=timeout, template=template)
+
+
+def _run_sandbox_script(script_file, template, parsed_files=None, timeout=30):
+    """Run SCRIPT_EXEC validation: execute a single script."""
+    api_key = os.getenv("E2B_API_KEY")
+    if not api_key:
+        return None
+    runner = E2BRunner(api_key=api_key, default_timeout=timeout)
+    project_files = None
+    if parsed_files:
+        project_files = {pf["path"]: pf["content"] for pf in parsed_files}
+    return runner.run_script(script_file=script_file, project_files=project_files, timeout=timeout, template=template)
 
 
 def sandbox_validate_node(state: GraphState) -> dict:
@@ -582,21 +595,64 @@ def sandbox_validate_node(state: GraphState) -> dict:
         return {"sandbox_result": None, "trace": trace}
     plan = get_validation_plan(blueprint.target_files)
     trace.append(f"sandbox_validate: {plan.description}")
-    if not plan.commands:
+
+    if plan.strategy == ValidationStrategy.SKIP:
         trace.append("sandbox_validate: no code validation needed -- skipping")
         return {"sandbox_result": None, "trace": trace}
-    template_label = plan.template or "default"
-    trace.append(f"sandbox_validate: template={template_label}, commands={len(plan.commands)}")
-    generated_code = state.get("generated_code", "")
+
     parsed_files = state.get("parsed_files", [])
-    if parsed_files:
-        trace.append(f"sandbox_validate: loading {len(parsed_files)} files into sandbox")
+
+    # CR fix: guard against empty parsed_files before dispatching to sandbox.
+    # apply_code_node can leave parsed_files=[] on parse/path-validation failures.
+    # Running SCRIPT_EXEC/TEST_SUITE/LINT_ONLY with no files causes spurious errors.
+    if plan.strategy in {
+        ValidationStrategy.SCRIPT_EXEC,
+        ValidationStrategy.TEST_SUITE,
+        ValidationStrategy.LINT_ONLY,
+    }:
+        if not parsed_files:
+            trace.append("sandbox_validate: no parsed files available -- skipping")
+            return {"sandbox_result": None, "trace": trace}
+
+    trace.append(f"sandbox_validate: loading {len(parsed_files)} files into sandbox")
+
+    template_label = plan.template or "default"
+    trace.append(f"sandbox_validate: strategy={plan.strategy.value}, template={template_label}")
+
     try:
-        result = _run_sandbox_validation(commands=plan.commands, template=plan.template, generated_code=generated_code, parsed_files=parsed_files if parsed_files else None)
+        result = None
+        if plan.strategy == ValidationStrategy.SCRIPT_EXEC:
+            trace.append(f"sandbox_validate: executing script {plan.script_file}")
+            result = _run_sandbox_script(
+                script_file=plan.script_file,
+                template=plan.template,
+                parsed_files=parsed_files if parsed_files else None,
+            )
+        # CR fix: fold LINT_ONLY into TEST_SUITE -- both run commands
+        # sequentially via _run_sandbox_tests(). LINT_ONLY was falling
+        # through to the skip branch instead of executing plan.commands.
+        elif plan.strategy in {ValidationStrategy.TEST_SUITE, ValidationStrategy.LINT_ONLY}:
+            trace.append(
+                f"sandbox_validate: running {len(plan.commands)} command(s) sequentially"
+            )
+            result = _run_sandbox_tests(
+                commands=plan.commands,
+                template=plan.template,
+                parsed_files=parsed_files if parsed_files else None,
+            )
+        else:
+            trace.append(f"sandbox_validate: unhandled strategy {plan.strategy.value} -- skipping")
+            return {"sandbox_result": None, "trace": trace}
+
         if result is None:
             logger.warning("[SANDBOX] E2B_API_KEY not configured -- sandbox validation SKIPPED.")
             trace.append("sandbox_validate: WARNING -- E2B_API_KEY not configured, sandbox validation skipped")
             return {"sandbox_result": None, "trace": trace}
+
+        if result.warnings:
+            for w in result.warnings:
+                trace.append(f"sandbox_validate: WARNING -- {w}")
+
         trace.append(f"sandbox_validate: exit_code={result.exit_code}, passed={result.tests_passed}, failed={result.tests_failed}")
         logger.info("[SANDBOX] Validation complete: exit=%d, passed=%s, failed=%s", result.exit_code, result.tests_passed, result.tests_failed)
         return {"sandbox_result": result, "trace": trace}
