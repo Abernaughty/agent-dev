@@ -3,16 +3,9 @@
 </script>
 
 <div
-	class="flex h-[30px] shrink-0 items-center border-b px-3 gap-4 select-none"
+	class="relative flex h-[30px] shrink-0 items-center border-b px-3 select-none"
 	style="background: var(--color-bg-activity); border-color: var(--color-border); font-family: var(--font-mono);"
 >
-	<span
-		class="text-[11px] font-semibold tracking-wide"
-		style="color: var(--color-accent-cyan);"
-	>
-		dev-suite
-	</span>
-
 	<div class="flex items-center gap-3">
 		{#each menuItems as item}
 			<span
@@ -24,5 +17,10 @@
 		{/each}
 	</div>
 
-	<div class="flex-1"></div>
+	<span
+		class="absolute left-1/2 -translate-x-1/2 text-[11px] font-semibold tracking-wide"
+		style="color: var(--color-accent-cyan);"
+	>
+		dev-suite
+	</span>
 </div>
