@@ -129,6 +129,18 @@ class TestStripMarkdownFences:
     def test_empty_content(self):
         assert _strip_markdown_fences("", "test.py") == ""
 
+    def test_strips_cpp_fence(self):
+        """Fences with non-word info strings like c++ are stripped."""
+        content = "```c++\n#include <iostream>\nint main() { return 0; }\n```"
+        result = _strip_markdown_fences(content, "test.cpp")
+        assert result == "#include <iostream>\nint main() { return 0; }"
+
+    def test_strips_objective_c_fence(self):
+        """Fences with hyphenated info strings like objective-c are stripped."""
+        content = "```objective-c\n@implementation Foo\n@end\n```"
+        result = _strip_markdown_fences(content, "test.m")
+        assert result == "@implementation Foo\n@end"
+
     def test_fence_with_trailing_whitespace(self):
         content = "```python   \ndef hello():\n    pass\n```  "
         result = _strip_markdown_fences(content, "test.py")
@@ -400,6 +412,21 @@ class TestParseGeneratedCode:
         assert "```" not in result[0].content
         # Must be valid Python (no SyntaxError)
         compile(result[0].content, "triforce.py", "exec")
+
+    def test_no_markers_with_fences_stripped(self):
+        """Marker-less output wrapped in fences is cleaned."""
+        code = (
+            "```python\n"
+            "def hello():\n"
+            "    print('hi')\n"
+            "```"
+        )
+        result = parse_generated_code(code)
+        assert len(result) == 1
+        assert result[0].path == "output.py"
+        assert not result[0].content.startswith("```")
+        assert "def hello():" in result[0].content
+        assert "```" not in result[0].content
 
     def test_interior_backticks_preserved(self):
         """Triple backticks inside file content (not first/last line) survive."""

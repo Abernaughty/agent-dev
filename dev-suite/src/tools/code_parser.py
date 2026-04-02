@@ -26,9 +26,10 @@ _FILE_MARKER_RE = re.compile(
     re.MULTILINE,
 )
 
-# Matches a markdown fence line: ```python, ```js, ```, etc.
+# Matches a markdown fence line: ```python, ```c++, ```objective-c, ```, etc.
+# Supports info strings with non-word chars (hyphens, pluses).
 # Only anchored at line boundaries -- used to strip leading/trailing fences.
-_FENCE_RE = re.compile(r"^```\w*\s*$")
+_FENCE_RE = re.compile(r"^\s*```(?:[^`\s][^`]*)?\s*$")
 
 
 @dataclass(frozen=True)
@@ -160,6 +161,8 @@ def parse_generated_code(
     if not markers:
         # No markers -- treat entire output as single file
         content = generated_code.strip()
+        content = _strip_markdown_fences(content, default_filename)
+        content = content.strip("\n").rstrip()
         if not content:
             return []
         return [ParsedFile(path=default_filename, content=content)]
