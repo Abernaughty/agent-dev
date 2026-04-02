@@ -11,6 +11,7 @@ from src.sandbox.validation_commands import (
     FRONTEND_COMMANDS,
     FULLSTACK_COMMANDS,
     PYTHON_COMMANDS,
+    PYTHON_LINT_COMMANDS,
     ValidationPlan,
     ValidationStrategy,
     format_validation_summary,
@@ -63,10 +64,21 @@ class TestGetValidationPlan:
         assert plan.strategy == ValidationStrategy.SCRIPT_EXEC
         assert plan.script_file == "src/main.py"
 
-    def test_pyi_only_no_tests(self):
+    # -- .pyi stub files (LINT_ONLY -- not executable) --
+
+    def test_pyi_only_gets_lint_only(self):
+        """CR fix: .pyi stubs are not executable -- route to LINT_ONLY."""
         plan = get_validation_plan(["src/types.pyi"])
+        assert plan.strategy == ValidationStrategy.LINT_ONLY
+        assert plan.script_file is None
+        assert plan.commands == PYTHON_LINT_COMMANDS
+        assert "Lint-only" in plan.description
+
+    def test_pyi_with_py_gets_script_exec(self):
+        """When .pyi and .py coexist without tests, .py is the script."""
+        plan = get_validation_plan(["src/types.pyi", "src/main.py"])
         assert plan.strategy == ValidationStrategy.SCRIPT_EXEC
-        assert plan.script_file == "src/types.pyi"
+        assert plan.script_file == "src/main.py"
 
     # -- Frontend files (TEST_SUITE) --
 
@@ -181,11 +193,18 @@ class TestGetValidationPlan:
 
     # -- Script file selection --
 
-    def test_script_file_prefers_non_test(self):
-        """_get_primary_script should prefer non-test files."""
+    def test_test_file_presence_triggers_test_suite(self):
+        """CR fix: renamed -- presence of test file triggers TEST_SUITE, not SCRIPT_EXEC."""
         files = ["src/main.py", "test_main.py"]
         plan = get_validation_plan(files)
         assert plan.strategy == ValidationStrategy.TEST_SUITE
+
+    def test_script_file_selects_first_py_file(self):
+        """CR fix: when multiple non-test .py files exist, script_file is the first one."""
+        files = ["src/secondary.py", "src/main.py"]
+        plan = get_validation_plan(files)
+        assert plan.strategy == ValidationStrategy.SCRIPT_EXEC
+        assert plan.script_file == "src/secondary.py"
 
     def test_script_file_single_file(self):
         plan = get_validation_plan(["utils.py"])

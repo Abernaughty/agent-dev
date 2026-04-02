@@ -367,16 +367,26 @@ print("__RESULTS__" + json.dumps([{{"cmd": r["cmd"], "rc": r["rc"]}} for r in re
         setup_code = "\n".join(setup_lines) + "\n" if setup_lines else ""
         full_code = setup_code + run_code
 
+        # CR fix: scale outer timeout to account for sequential commands
+        num_commands = max(len(commands), 1)
+        overall_timeout = timeout * num_commands + 30
+
         result = self.run(
             full_code,
             profile=SandboxProfile.LOCKED,
             env_vars=env_vars,
-            timeout=timeout + 30,
+            timeout=overall_timeout,
             template=template,
         )
 
         warnings = list(result.warnings)
         summary = result.output_summary
+
+        # CR fix: aggregate exit_code from __RESULTS__ trailer instead of
+        # using the wrapper process exit code. A child command failure (e.g.,
+        # ruff finding lint errors) must propagate even if the wrapper exits 0.
+        aggregate_exit_code = result.exit_code
+
         if "[WARN]" in summary:
             for line in summary.split("\n"):
                 if "[WARN]" in line:
@@ -386,15 +396,19 @@ print("__RESULTS__" + json.dumps([{{"cmd": r["cmd"], "rc": r["rc"]}} for r in re
             try:
                 json_part = summary.split("__RESULTS__")[-1].strip()
                 cmd_results = _json.loads(json_part)
+                # Aggregate: first non-zero rc, or 0 if all passed
                 for cr in cmd_results:
-                    if cr.get("rc") == 127:
+                    rc = cr.get("rc", 0)
+                    if rc == 127:
                         warnings.append(f"Command not found: {cr['cmd'][:60]}")
+                    elif rc != 0 and aggregate_exit_code == 0:
+                        aggregate_exit_code = rc
                 summary = summary.split("__RESULTS__")[0].strip()
             except (ValueError, IndexError):
                 pass
 
         return SandboxResult(
-            exit_code=result.exit_code,
+            exit_code=aggregate_exit_code,
             tests_passed=result.tests_passed,
             tests_failed=result.tests_failed,
             errors=result.errors,

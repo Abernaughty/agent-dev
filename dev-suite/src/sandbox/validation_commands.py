@@ -26,6 +26,11 @@ from .e2b_runner import select_template_for_files
 FRONTEND_EXTENSIONS = {".svelte", ".ts", ".tsx", ".js", ".jsx", ".css", ".vue"}
 PYTHON_EXTENSIONS = {".py", ".pyi"}
 
+# CR fix: .pyi stubs are type annotations only -- not executable.
+# Use this for _get_primary_script() selection so stubs are never
+# chosen as the script to run via SCRIPT_EXEC.
+EXECUTABLE_PYTHON_EXTENSIONS = {".py"}
+
 
 class ValidationStrategy(str, Enum):
     """How to validate the generated code in the sandbox.
@@ -34,8 +39,8 @@ class ValidationStrategy(str, Enum):
                  files are present in target_files.
     SCRIPT_EXEC: Run the primary script and check exit code + stdout.
                  Used for single-file scripts with no test suite.
-    LINT_ONLY:   Syntax/lint check only, no execution. Reserved for
-                 future use (config generators, migrations, etc.).
+    LINT_ONLY:   Syntax/lint check only, no execution. Used for
+                 non-executable code (e.g., .pyi stubs, config generators).
     SKIP:        No validation needed (non-code files).
     """
     TEST_SUITE = "test_suite"
@@ -51,7 +56,7 @@ class ValidationPlan:
     Attributes:
         strategy: The validation approach to use.
         template: Sandbox template name ("fullstack" or None for default).
-        commands: Shell commands to run in the sandbox (for TEST_SUITE).
+        commands: Shell commands to run in the sandbox (for TEST_SUITE/LINT_ONLY).
         script_file: Primary file to execute (for SCRIPT_EXEC).
         description: Human-readable summary for logging/QA context.
     """
@@ -129,12 +134,15 @@ def _has_test_files(target_files: list[str]) -> bool:
 def _get_primary_script(target_files: list[str]) -> str | None:
     """Find the primary executable script from target files.
 
-    Returns the first .py file that doesn't look like a test file,
-    or the first .py file if all look like tests, or None.
+    Returns the first .py file (not .pyi stubs) that doesn't look like
+    a test file, or the first .py file if all look like tests, or None.
+
+    CR fix: .pyi stubs are excluded -- they are type annotations only
+    and cannot be meaningfully executed.
     """
     py_files = [
         f for f in target_files
-        if os.path.splitext(f.lower())[1] in PYTHON_EXTENSIONS
+        if os.path.splitext(f.lower())[1] in EXECUTABLE_PYTHON_EXTENSIONS
     ]
     if not py_files:
         return None
@@ -156,7 +164,9 @@ def get_validation_plan(target_files: list[str]) -> ValidationPlan:
       - Non-code files only -> SKIP
       - Frontend files -> TEST_SUITE (pnpm check + tsc)
       - Python files with test files -> TEST_SUITE (ruff + pytest)
-      - Python files without test files -> SCRIPT_EXEC (run the script)
+      - Python files without test files:
+          - Has executable .py files -> SCRIPT_EXEC (run the script)
+          - Only .pyi stubs -> LINT_ONLY (ruff check only)
       - Mixed frontend + Python -> TEST_SUITE (fullstack)
 
     Args:
@@ -224,6 +234,18 @@ def get_validation_plan(target_files: list[str]) -> ValidationPlan:
             )
         else:
             primary = _get_primary_script(target_files)
+            # CR fix: if no executable .py files found (e.g., .pyi stubs
+            # only), fall back to lint-only instead of trying to execute
+            if primary is None:
+                return ValidationPlan(
+                    strategy=ValidationStrategy.LINT_ONLY,
+                    template=template,
+                    commands=list(PYTHON_LINT_COMMANDS),
+                    description=(
+                        f"Lint-only validation: {len(target_files)} files "
+                        f"using default template (no executable .py files)"
+                    ),
+                )
             return ValidationPlan(
                 strategy=ValidationStrategy.SCRIPT_EXEC,
                 template=template,
