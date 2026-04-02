@@ -1,15 +1,18 @@
 """Tests for the sandbox_validate orchestrator node.
 
 These tests validate the sandbox_validate node behavior with mocked
-E2B runner — no real sandbox needed. Tests cover:
+E2B runner -- no real sandbox needed. Tests cover:
+  - Strategy-based dispatch (TEST_SUITE, SCRIPT_EXEC, SKIP)
   - Template selection from blueprint target_files
-  - Validation command execution
   - Graceful skip when E2B_API_KEY is missing
+  - validation_skipped flag propagation
   - SandboxResult stored in graph state
-  - QA prompt includes sandbox results
+  - Warnings surfaced in trace
+
+Issue #95: Updated for ValidationStrategy dispatch.
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -43,19 +46,91 @@ def _make_state(target_files: list[str], **overrides) -> GraphState:
         "memory_context": [],
         "memory_writes": [],
         "trace": [],
+        "parsed_files": [],
+        "tool_calls_log": [],
     }
     state.update(overrides)
     return state
 
 
+class TestSandboxValidateStrategy:
+    """Tests for strategy-based dispatch in sandbox_validate_node."""
+
+    def test_script_exec_for_single_python_file(self):
+        """Single .py file without tests should use SCRIPT_EXEC."""
+        state = _make_state(["hello_world.py"])
+
+        with patch("src.orchestrator._run_sandbox_script") as mock_script:
+            mock_script.return_value = SandboxResult(
+                exit_code=0,
+                tests_passed=1,
+                tests_failed=0,
+                output_summary="Hello, World!",
+            )
+            result = sandbox_validate_node(state)
+
+        assert result["sandbox_result"] is not None
+        assert result["sandbox_result"].exit_code == 0
+        assert result["sandbox_result"].tests_passed == 1
+        mock_script.assert_called_once()
+        call_kwargs = mock_script.call_args[1]
+        assert call_kwargs["script_file"] == "hello_world.py"
+
+    def test_test_suite_for_python_with_tests(self):
+        """Python files with test files should use TEST_SUITE."""
+        state = _make_state(["src/main.py", "tests/test_main.py"])
+
+        with patch("src.orchestrator._run_sandbox_tests") as mock_tests:
+            mock_tests.return_value = SandboxResult(
+                exit_code=0,
+                tests_passed=5,
+                tests_failed=0,
+                output_summary="5 passed in 1.2s",
+            )
+            result = sandbox_validate_node(state)
+
+        assert result["sandbox_result"] is not None
+        assert result["sandbox_result"].tests_passed == 5
+        mock_tests.assert_called_once()
+        call_kwargs = mock_tests.call_args[1]
+        assert call_kwargs["template"] is None
+
+    def test_test_suite_for_frontend_files(self):
+        """Frontend files should use TEST_SUITE with fullstack template."""
+        state = _make_state(["dashboard/src/lib/Widget.svelte"])
+
+        with patch("src.orchestrator._run_sandbox_tests") as mock_tests:
+            mock_tests.return_value = SandboxResult(
+                exit_code=0,
+                tests_passed=1,
+                tests_failed=0,
+                output_summary="svelte-check found 0 errors",
+            )
+            result = sandbox_validate_node(state)
+
+        assert result["sandbox_result"] is not None
+        call_kwargs = mock_tests.call_args[1]
+        assert call_kwargs["template"] == "fullstack"
+
+    def test_skip_for_non_code_files(self):
+        """Non-code files should get SKIP strategy with validation_skipped=True."""
+        state = _make_state(["schema.sql", "config.yaml"])
+
+        result = sandbox_validate_node(state)
+
+        assert result["sandbox_result"] is not None
+        assert result["sandbox_result"].validation_skipped is True
+        assert result["sandbox_result"].exit_code == 0
+
+
 class TestSandboxValidateNode:
-    """Tests for the sandbox_validate_node function."""
+    """Core sandbox_validate_node tests."""
 
     def test_python_task_uses_default_template(self):
         """Python-only tasks should use the default (None) template."""
         state = _make_state(["src/main.py", "tests/test_main.py"])
 
-        with patch("src.orchestrator._run_sandbox_validation") as mock_run:
+        with patch("src.orchestrator._run_sandbox_tests") as mock_run:
             mock_run.return_value = SandboxResult(
                 exit_code=0,
                 tests_passed=5,
@@ -67,15 +142,14 @@ class TestSandboxValidateNode:
         assert result["sandbox_result"] is not None
         assert result["sandbox_result"].exit_code == 0
         assert result["sandbox_result"].tests_passed == 5
-        # Check it was called with None template (default)
-        call_args = mock_run.call_args
-        assert call_args[1]["template"] is None
+        call_kwargs = mock_run.call_args[1]
+        assert call_kwargs["template"] is None
 
     def test_svelte_task_uses_fullstack_template(self):
         """Svelte tasks should use the fullstack template."""
         state = _make_state(["dashboard/src/lib/Widget.svelte"])
 
-        with patch("src.orchestrator._run_sandbox_validation") as mock_run:
+        with patch("src.orchestrator._run_sandbox_tests") as mock_run:
             mock_run.return_value = SandboxResult(
                 exit_code=0,
                 tests_passed=1,
@@ -85,14 +159,14 @@ class TestSandboxValidateNode:
             result = sandbox_validate_node(state)
 
         assert result["sandbox_result"] is not None
-        call_args = mock_run.call_args
-        assert call_args[1]["template"] == "fullstack"
+        call_kwargs = mock_run.call_args[1]
+        assert call_kwargs["template"] == "fullstack"
 
     def test_mixed_task_uses_fullstack_template(self):
         """Mixed Python+frontend tasks should use fullstack."""
         state = _make_state(["src/api.py", "dashboard/src/App.svelte"])
 
-        with patch("src.orchestrator._run_sandbox_validation") as mock_run:
+        with patch("src.orchestrator._run_sandbox_tests") as mock_run:
             mock_run.return_value = SandboxResult(
                 exit_code=0,
                 tests_passed=6,
@@ -101,19 +175,19 @@ class TestSandboxValidateNode:
             )
             result = sandbox_validate_node(state)
 
-        call_args = mock_run.call_args
-        assert call_args[1]["template"] == "fullstack"
+        call_kwargs = mock_run.call_args[1]
+        assert call_kwargs["template"] == "fullstack"
 
     def test_graceful_skip_no_api_key(self):
-        """Should warn and skip when E2B_API_KEY is missing."""
-        state = _make_state(["src/main.py"])
+        """Should return validation_skipped when E2B_API_KEY is missing."""
+        state = _make_state(["src/main.py", "tests/test_main.py"])
 
-        with patch("src.orchestrator._run_sandbox_validation") as mock_run:
-            mock_run.return_value = None  # Signals skip
+        with patch("src.orchestrator._run_sandbox_tests") as mock_run:
+            mock_run.return_value = None
             result = sandbox_validate_node(state)
 
-        assert result["sandbox_result"] is None
-        assert any("skip" in t.lower() or "warn" in t.lower() for t in result["trace"])
+        assert result["sandbox_result"] is not None
+        assert result["sandbox_result"].validation_skipped is True
 
     def test_no_blueprint_skips(self):
         """Should skip validation when there's no blueprint."""
@@ -125,20 +199,11 @@ class TestSandboxValidateNode:
         assert result["sandbox_result"] is None
         assert any("no blueprint" in t.lower() for t in result["trace"])
 
-    def test_non_code_files_skip_validation(self):
-        """Non-code files (JSON, YAML, SQL) should skip sandbox validation."""
-        state = _make_state(["schema.sql", "config.yaml"])
-
-        result = sandbox_validate_node(state)
-
-        assert result["sandbox_result"] is None
-        assert any("no code validation" in t.lower() or "skip" in t.lower() for t in result["trace"])
-
     def test_sandbox_error_doesnt_crash(self):
         """Sandbox errors should be captured, not raise exceptions."""
-        state = _make_state(["src/main.py"])
+        state = _make_state(["src/main.py", "tests/test_main.py"])
 
-        with patch("src.orchestrator._run_sandbox_validation") as mock_run:
+        with patch("src.orchestrator._run_sandbox_tests") as mock_run:
             mock_run.side_effect = Exception("E2B connection failed")
             result = sandbox_validate_node(state)
 
@@ -146,10 +211,10 @@ class TestSandboxValidateNode:
         assert any("error" in t.lower() or "failed" in t.lower() for t in result["trace"])
 
     def test_failed_validation_still_continues(self):
-        """Sandbox validation failure should not block QA — it adds context."""
-        state = _make_state(["src/main.py"])
+        """Sandbox validation failure should not block QA -- it adds context."""
+        state = _make_state(["src/main.py", "tests/test_main.py"])
 
-        with patch("src.orchestrator._run_sandbox_validation") as mock_run:
+        with patch("src.orchestrator._run_sandbox_tests") as mock_run:
             mock_run.return_value = SandboxResult(
                 exit_code=1,
                 tests_passed=3,
@@ -159,29 +224,41 @@ class TestSandboxValidateNode:
             )
             result = sandbox_validate_node(state)
 
-        # Node should still return the result even though tests failed
         assert result["sandbox_result"] is not None
         assert result["sandbox_result"].tests_failed == 2
-        # Status should not change — QA decides pass/fail
-        assert "status" not in result or result.get("status") == WorkflowStatus.REVIEWING
 
-    def test_trace_includes_validation_plan(self):
-        """Trace should include which template and commands were selected."""
-        state = _make_state(["dashboard/src/App.svelte"])
+    def test_warnings_surfaced_in_trace(self):
+        """Sandbox warnings should appear in the trace log."""
+        state = _make_state(["src/main.py", "tests/test_main.py"])
 
-        with patch("src.orchestrator._run_sandbox_validation") as mock_run:
+        with patch("src.orchestrator._run_sandbox_tests") as mock_run:
             mock_run.return_value = SandboxResult(
                 exit_code=0,
                 tests_passed=1,
                 tests_failed=0,
-                output_summary="svelte-check found 0 errors",
+                output_summary="1 passed",
+                warnings=["[WARN] ruff not available -- lint skipped"],
             )
             result = sandbox_validate_node(state)
 
-        trace = result.get("trace", [])
-        trace_text = " ".join(trace).lower()
-        assert "sandbox_validate" in trace_text
-        assert "fullstack" in trace_text or "frontend" in trace_text
+        trace_text = " ".join(result.get("trace", []))
+        assert "ruff" in trace_text.lower()
+
+    def test_trace_includes_strategy(self):
+        """Trace should include which strategy was selected."""
+        state = _make_state(["hello_world.py"])
+
+        with patch("src.orchestrator._run_sandbox_script") as mock_script:
+            mock_script.return_value = SandboxResult(
+                exit_code=0,
+                tests_passed=1,
+                tests_failed=0,
+                output_summary="Hello, World!",
+            )
+            result = sandbox_validate_node(state)
+
+        trace_text = " ".join(result.get("trace", []))
+        assert "script_exec" in trace_text.lower()
 
 
 class TestSandboxValidateGraphIntegration:
@@ -193,7 +270,6 @@ class TestSandboxValidateGraphIntegration:
 
         graph = build_graph()
         compiled = graph.compile()
-        # LangGraph stores node names — check sandbox_validate exists
         node_names = set(compiled.get_graph().nodes.keys())
         assert "sandbox_validate" in node_names
 
