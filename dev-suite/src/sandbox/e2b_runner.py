@@ -19,6 +19,8 @@ Issue #96: Migrated from e2b_code_interpreter (Jupyter kernel on port 49999)
 to base e2b SDK (commands.run). Eliminates kernel timeout errors entirely.
 Uses sbx.files.write() for project files and sbx.commands.run() for
 shell execution. No more base64 encoding or subprocess wrappers.
+Must use Sandbox.create() classmethod (not constructor) -- the constructor
+does not accept template/envs kwargs in the installed SDK version.
 """
 
 import logging
@@ -204,6 +206,31 @@ def select_template_for_files(target_files: list[str]) -> str | None:
     return "fullstack" if has_frontend else None
 
 
+# -- Sandbox Creation Helper --
+
+def _create_sandbox(
+    template: str | None = None,
+    env_vars: dict[str, str] | None = None,
+) -> Sandbox:
+    """Create a sandbox via Sandbox.create() classmethod.
+
+    IMPORTANT: Must use Sandbox.create(), not the Sandbox() constructor.
+    The constructor (SandboxBase.__init__) does not accept template/envs
+    kwargs -- only the create() classmethod does.
+
+    Env vars are injected at sandbox creation time via the envs param,
+    which is more secure than setting them via shell commands.
+    """
+    create_kwargs: dict = {}
+    template_id = _get_template_id(template)
+    if template_id:
+        create_kwargs["template"] = template_id
+    if env_vars:
+        create_kwargs["envs"] = env_vars
+    logger.info("[SANDBOX] Creating sandbox: template=%s, envs=%s", template_id, bool(env_vars))
+    return Sandbox.create(**create_kwargs)
+
+
 # -- File Upload Helper --
 
 def _write_project_files(sbx: Sandbox, project_files: dict[str, str]) -> None:
@@ -226,8 +253,9 @@ def _write_project_files(sbx: Sandbox, project_files: dict[str, str]) -> None:
 class E2BRunner:
     """Execute code in E2B sandboxes with structured output.
 
-    Uses the base e2b SDK with commands.run() for shell execution.
-    No Jupyter kernel dependency (port 49999 eliminated).
+    Uses the base e2b SDK with Sandbox.create() + commands.run()
+    for shell execution. No Jupyter kernel dependency (port 49999
+    eliminated).
 
     Usage:
         runner = E2BRunner()
@@ -239,24 +267,6 @@ class E2BRunner:
         if api_key:
             os.environ["E2B_API_KEY"] = api_key
         self._default_timeout = default_timeout
-
-    def _create_sandbox(
-        self,
-        template: str | None = None,
-        env_vars: dict[str, str] | None = None,
-    ) -> Sandbox:
-        """Create a sandbox with optional template and env vars.
-
-        Env vars are injected at sandbox creation time via the `envs` param,
-        which is more secure than setting them via shell commands.
-        """
-        create_kwargs: dict = {}
-        template_id = _get_template_id(template)
-        if template_id:
-            create_kwargs["template"] = template_id
-        if env_vars:
-            create_kwargs["envs"] = env_vars
-        return Sandbox(**create_kwargs)
 
     def _build_result(
         self,
@@ -302,7 +312,7 @@ class E2BRunner:
         (e.g., pytest) from running. Results are aggregated.
         """
         try:
-            with self._create_sandbox(template=template, env_vars=env_vars) as sbx:
+            with _create_sandbox(template=template, env_vars=env_vars) as sbx:
                 if project_files:
                     _write_project_files(sbx, project_files)
 
@@ -382,7 +392,7 @@ class E2BRunner:
         wrapper, no __EXIT_CODE__ trailer parsing.
         """
         try:
-            with self._create_sandbox(template=template, env_vars=env_vars) as sbx:
+            with _create_sandbox(template=template, env_vars=env_vars) as sbx:
                 if project_files:
                     _write_project_files(sbx, project_files)
 
