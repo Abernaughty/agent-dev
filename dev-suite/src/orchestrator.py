@@ -601,8 +601,20 @@ def sandbox_validate_node(state: GraphState) -> dict:
         return {"sandbox_result": None, "trace": trace}
 
     parsed_files = state.get("parsed_files", [])
-    if parsed_files:
-        trace.append(f"sandbox_validate: loading {len(parsed_files)} files into sandbox")
+
+    # CR fix: guard against empty parsed_files before dispatching to sandbox.
+    # apply_code_node can leave parsed_files=[] on parse/path-validation failures.
+    # Running SCRIPT_EXEC/TEST_SUITE/LINT_ONLY with no files causes spurious errors.
+    if plan.strategy in {
+        ValidationStrategy.SCRIPT_EXEC,
+        ValidationStrategy.TEST_SUITE,
+        ValidationStrategy.LINT_ONLY,
+    }:
+        if not parsed_files:
+            trace.append("sandbox_validate: no parsed files available -- skipping")
+            return {"sandbox_result": None, "trace": trace}
+
+    trace.append(f"sandbox_validate: loading {len(parsed_files)} files into sandbox")
 
     template_label = plan.template or "default"
     trace.append(f"sandbox_validate: strategy={plan.strategy.value}, template={template_label}")
@@ -616,8 +628,13 @@ def sandbox_validate_node(state: GraphState) -> dict:
                 template=plan.template,
                 parsed_files=parsed_files if parsed_files else None,
             )
-        elif plan.strategy == ValidationStrategy.TEST_SUITE:
-            trace.append(f"sandbox_validate: running {len(plan.commands)} commands sequentially")
+        # CR fix: fold LINT_ONLY into TEST_SUITE -- both run commands
+        # sequentially via _run_sandbox_tests(). LINT_ONLY was falling
+        # through to the skip branch instead of executing plan.commands.
+        elif plan.strategy in {ValidationStrategy.TEST_SUITE, ValidationStrategy.LINT_ONLY}:
+            trace.append(
+                f"sandbox_validate: running {len(plan.commands)} command(s) sequentially"
+            )
             result = _run_sandbox_tests(
                 commands=plan.commands,
                 template=plan.template,
