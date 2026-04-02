@@ -738,12 +738,29 @@ def create_workflow():
     return build_graph().compile()
 
 
+def _get_mcp_config_path() -> Path:
+    """Resolve path to mcp-config.json.
+
+    Priority:
+      1. MCP_CONFIG_PATH env var (absolute or relative)
+      2. Fallback: dev-suite/mcp-config.json (relative to this source file)
+
+    WORKSPACE_ROOT is intentionally NOT used here -- it points to the
+    agent output directory (e.g. ../workspace), not the project source.
+    """
+    explicit = os.getenv("MCP_CONFIG_PATH")
+    if explicit:
+        return Path(explicit).resolve()
+    # __file__ is dev-suite/src/orchestrator.py -> parent.parent = dev-suite/
+    return Path(__file__).resolve().parent.parent / "mcp-config.json"
+
+
 def init_tools_config(workspace_root=None):
     if workspace_root is None:
         workspace_root = _get_workspace_root()
     try:
         from .tools import create_provider, get_tools, load_mcp_config
-        config_path = Path(workspace_root) / "mcp-config.json"
+        config_path = _get_mcp_config_path()
         if not config_path.is_file():
             logger.info("[TOOLS] No mcp-config.json found at %s, tools disabled", config_path)
             return {"configurable": {"tools": []}}
