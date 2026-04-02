@@ -191,6 +191,38 @@ class TestGetValidationPlan:
         plan = get_validation_plan(["utils.py"])
         assert plan.script_file == "utils.py"
 
+    # -- Boundary matching: false positive avoidance (CR fix) --
+
+    def test_latest_utils_not_detected_as_test(self):
+        """'latest_utils.py' contains 'test_' as substring but is not a test file."""
+        plan = get_validation_plan(["src/latest_utils.py"])
+        assert plan.strategy == ValidationStrategy.SCRIPT_EXEC
+
+    def test_contest_helper_not_detected_as_test(self):
+        """'contest_helper.py' contains 'test' as substring but is not a test file."""
+        plan = get_validation_plan(["src/contest_helper.py"])
+        assert plan.strategy == ValidationStrategy.SCRIPT_EXEC
+
+    def test_attestation_not_detected_as_test(self):
+        """'attestation.py' contains 'test' but is not a test file."""
+        plan = get_validation_plan(["src/attestation.py"])
+        assert plan.strategy == ValidationStrategy.SCRIPT_EXEC
+
+    def test_real_test_prefix_still_detected(self):
+        """'test_utils.py' should still be detected as a test file."""
+        plan = get_validation_plan(["src/main.py", "test_utils.py"])
+        assert plan.strategy == ValidationStrategy.TEST_SUITE
+
+    def test_real_test_suffix_still_detected(self):
+        """'auth_test.py' should still be detected as a test file."""
+        plan = get_validation_plan(["src/auth.py", "auth_test.py"])
+        assert plan.strategy == ValidationStrategy.TEST_SUITE
+
+    def test_tests_directory_still_detected(self):
+        """Files under tests/ directory should still be detected."""
+        plan = get_validation_plan(["src/main.py", "tests/test_main.py"])
+        assert plan.strategy == ValidationStrategy.TEST_SUITE
+
 
 class TestValidationPlan:
     """Tests for the ValidationPlan dataclass."""

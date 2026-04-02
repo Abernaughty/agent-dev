@@ -26,9 +26,6 @@ from .e2b_runner import select_template_for_files
 FRONTEND_EXTENSIONS = {".svelte", ".ts", ".tsx", ".js", ".jsx", ".css", ".vue"}
 PYTHON_EXTENSIONS = {".py", ".pyi"}
 
-# Filenames/patterns that indicate a test suite exists
-TEST_INDICATORS = {"tests/", "test_", "_test.py", "tests.py", ".test.", ".spec."}
-
 
 class ValidationStrategy(str, Enum):
     """How to validate the generated code in the sandbox.
@@ -68,12 +65,14 @@ class ValidationPlan:
 
 # -- Command Sets --
 
+# CR fix: if/then/else preserves ruff exit code; A && B || C masks failures
 PYTHON_LINT_COMMANDS = [
-    "which ruff >/dev/null 2>&1 && ruff check . --select=E,F,W --no-fix || echo '[WARN] ruff not available -- lint skipped'",
+    "if command -v ruff >/dev/null 2>&1; then ruff check . --select=E,F,W --no-fix; else echo '[WARN] ruff not available -- lint skipped'; fi",
 ]
 
+# CR fix: drop hardcoded tests/ -- let pytest auto-discover
 PYTHON_TEST_COMMANDS = [
-    "python -m pytest tests/ -v --tb=short",
+    "python -m pytest -v --tb=short",
 ]
 
 PYTHON_COMMANDS = PYTHON_LINT_COMMANDS + PYTHON_TEST_COMMANDS
@@ -87,14 +86,44 @@ FRONTEND_COMMANDS = [
 FULLSTACK_COMMANDS = FRONTEND_COMMANDS + PYTHON_COMMANDS
 
 
+# CR fix: boundary-based test detection instead of substring matching
+def _is_test_file(filepath: str) -> bool:
+    """Check if a single file looks like a test file using boundary matching.
+
+    Matches on basename boundaries to avoid false positives like
+    'latest_utils.py' or 'contest_helper.py'.
+    """
+    lower = filepath.lower().replace("\\", "/")
+    parts = lower.split("/")
+    basename = parts[-1] if parts else lower
+
+    # Directory component is "tests" (exact match)
+    if "tests" in parts[:-1]:
+        return True
+
+    # Basename starts with "test_"
+    if basename.startswith("test_"):
+        return True
+
+    # Basename ends with "_test.py" or "_test.pyi"
+    name_no_ext = os.path.splitext(basename)[0]
+    if name_no_ext.endswith("_test"):
+        return True
+
+    # Exact matches
+    if basename in ("tests.py", "conftest.py"):
+        return True
+
+    # JS/TS test patterns: .test.js, .test.ts, .spec.js, .spec.ts
+    if ".test." in basename or ".spec." in basename:
+        return True
+
+    return False
+
+
 def _has_test_files(target_files: list[str]) -> bool:
     """Check if any target files look like test files or test directories."""
-    for filepath in target_files:
-        lower = filepath.lower()
-        for indicator in TEST_INDICATORS:
-            if indicator in lower:
-                return True
-    return False
+    return any(_is_test_file(f) for f in target_files)
 
 
 def _get_primary_script(target_files: list[str]) -> str | None:
@@ -112,9 +141,7 @@ def _get_primary_script(target_files: list[str]) -> str | None:
 
     # Prefer non-test files
     for f in py_files:
-        lower = f.lower()
-        is_test = any(ind in lower for ind in TEST_INDICATORS)
-        if not is_test:
+        if not _is_test_file(f):
             return f
 
     # Fallback to first .py file
