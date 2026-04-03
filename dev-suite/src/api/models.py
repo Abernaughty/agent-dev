@@ -4,6 +4,7 @@ These define the contract between the FastAPI backend and the SvelteKit
 dashboard. All endpoints return an ApiResponse envelope.
 
 Issue #19: Added AuditLogEntry, confidence/sandbox/related_files to MemoryEntryResponse
+Issue #89: Added publish_pr to CreateTaskRequest, pr_url/working_branch/pr_number to TaskSummary
 Issue #105: Added workspace models, workspace field to CreateTaskRequest/TaskSummary
 """
 
@@ -112,6 +113,10 @@ class TaskSummary(BaseModel):
     budget: TaskBudget = Field(default_factory=TaskBudget)
     timeline: list[TimelineEvent] = []
     workspace: str = ""
+    # Issue #89: PR publication fields
+    pr_url: str | None = None
+    pr_number: int | None = None
+    working_branch: str | None = None
 
 
 class TaskDetail(TaskSummary):
@@ -280,6 +285,8 @@ class MergePRRequest(BaseModel):
 class CreateTaskRequest(BaseModel):
     """Request body for creating a new task.
 
+    Issue #89: publish_pr controls whether a PR is opened after QA passes.
+    Defaults to True when GITHUB_TOKEN is configured.
     Issue #105: workspace is required. The dashboard pre-fills it with
     WORKSPACE_ROOT, but it must be explicitly sent. For protected
     workspaces, pin must also be provided.
@@ -296,6 +303,11 @@ class CreateTaskRequest(BaseModel):
         default=None,
         description="Admin PIN for protected workspaces. "
         "Required when workspace is protected.",
+    )
+    publish_pr: bool | None = Field(
+        default=None,
+        description="Whether to create a branch and open a PR after QA passes. "
+        "Defaults to True if GITHUB_TOKEN is configured, False otherwise.",
     )
 
 
