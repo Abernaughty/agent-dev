@@ -64,7 +64,7 @@ def _make_pr_summary(number=142):
 class TestPublishCodeGuards:
     """Test the guard chain that skips publishing gracefully."""
 
-    @patch("src.orchestrator.github_pr_provider")
+    @patch("src.api.github_prs.github_pr_provider")
     def test_skips_when_no_github_token(self, mock_provider):
         """Guard 1: No GITHUB_TOKEN \u2192 skip."""
         mock_provider.configured = False
@@ -73,7 +73,7 @@ class TestPublishCodeGuards:
         assert "skipped -- no GITHUB_TOKEN" in result["trace"][-1]
         assert "pr_url" not in result
 
-    @patch("src.orchestrator.github_pr_provider")
+    @patch("src.api.github_prs.github_pr_provider")
     def test_skips_when_publish_pr_false(self, mock_provider):
         """Guard 2: publish_pr=False \u2192 skip."""
         mock_provider.configured = True
@@ -81,7 +81,7 @@ class TestPublishCodeGuards:
         result = publish_code_node(state)
         assert "publish_pr=False" in result["trace"][-1]
 
-    @patch("src.orchestrator.github_pr_provider")
+    @patch("src.api.github_prs.github_pr_provider")
     def test_skips_when_no_parsed_files(self, mock_provider):
         """Guard 3: No parsed_files \u2192 skip."""
         mock_provider.configured = True
@@ -89,7 +89,7 @@ class TestPublishCodeGuards:
         result = publish_code_node(state)
         assert "no parsed_files" in result["trace"][-1]
 
-    @patch("src.orchestrator.github_pr_provider")
+    @patch("src.api.github_prs.github_pr_provider")
     def test_skips_when_no_blueprint(self, mock_provider):
         """Guard 4: No blueprint \u2192 skip."""
         mock_provider.configured = True
@@ -101,7 +101,7 @@ class TestPublishCodeGuards:
 class TestPublishCodeHappyPath:
     """Test successful branch creation, file push, and PR opening."""
 
-    @patch("src.orchestrator.github_pr_provider")
+    @patch("src.api.github_prs.github_pr_provider")
     def test_creates_branch_pushes_files_opens_pr(self, mock_provider):
         """Full happy path: branch \u2192 files \u2192 PR."""
         mock_provider.configured = True
@@ -130,7 +130,7 @@ class TestPublishCodeHappyPath:
         assert pr_call.kwargs["base"] == "main"
         assert "test-auth-rls" in pr_call.kwargs["title"]
 
-    @patch("src.orchestrator.github_pr_provider")
+    @patch("src.api.github_prs.github_pr_provider")
     def test_branch_name_sanitized(self, mock_provider):
         """Branch name should have special chars replaced."""
         mock_provider.configured = True
@@ -153,7 +153,7 @@ class TestPublishCodeHappyPath:
 class TestPublishCodeErrorHandling:
     """Test error handling for various failure scenarios."""
 
-    @patch("src.orchestrator.github_pr_provider")
+    @patch("src.api.github_prs.github_pr_provider")
     def test_branch_creation_fails(self, mock_provider):
         """Branch creation failure \u2192 no files pushed, no PR."""
         mock_provider.configured = True
@@ -166,7 +166,7 @@ class TestPublishCodeErrorHandling:
         assert "pr_url" not in result
         assert "working_branch" not in result
 
-    @patch("src.orchestrator.github_pr_provider")
+    @patch("src.api.github_prs.github_pr_provider")
     def test_file_push_fails(self, mock_provider):
         """File push failure \u2192 branch exists but no PR."""
         mock_provider.configured = True
@@ -180,7 +180,7 @@ class TestPublishCodeErrorHandling:
         assert result["working_branch"] == "agent/test-auth-rls"
         assert "pr_url" not in result
 
-    @patch("src.orchestrator.github_pr_provider")
+    @patch("src.api.github_prs.github_pr_provider")
     def test_pr_creation_fails(self, mock_provider):
         """PR creation failure \u2192 branch + files exist, no PR URL."""
         mock_provider.configured = True
@@ -195,7 +195,7 @@ class TestPublishCodeErrorHandling:
         assert result["working_branch"] == "agent/test-auth-rls"
         assert "pr_url" not in result
 
-    @patch("src.orchestrator.github_pr_provider")
+    @patch("src.api.github_prs.github_pr_provider")
     def test_unexpected_exception_caught(self, mock_provider):
         """Unexpected exceptions are caught and traced."""
         mock_provider.configured = True

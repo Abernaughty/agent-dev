@@ -213,10 +213,10 @@ class TestEscalationRouting:
         from src.orchestrator import WorkflowStatus, route_after_qa
         return route_after_qa, WorkflowStatus
 
-    def test_pass_routes_to_flush(self):
+    def test_pass_routes_to_publish_code(self):
         route, WS = self._import_route()
         state = {"status": WS.PASSED, "retry_count": 0, "tokens_used": 1000}
-        assert route(state) == "flush_memory"
+        assert route(state) == "publish_code"
 
     def test_code_failure_routes_to_developer(self):
         route, WS = self._import_route()
