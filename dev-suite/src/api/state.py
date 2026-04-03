@@ -10,6 +10,7 @@ Issue #50: PR methods delegate to GitHubPRProvider for live data.
 Issue #51: Removed mock data seeding -- always starts with clean state.
 Issue #19: Added audit log for memory approve/reject actions.
 Issue #92: Added add_memory_entry() to bridge flush_memory -> dashboard.
+Issue #105: Added WorkspaceManager singleton, workspace-aware task creation.
 
 Usage:
     from src.api.state import state_manager
@@ -25,6 +26,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 
+from ..workspace import WorkspaceManager
 from .events import EventType, SSEEvent, event_bus
 from .models import (
     AgentInfo,
@@ -58,6 +60,9 @@ class StateManager:
 
     State starts empty. Populated by real orchestrator runs,
     Chroma memory queries, and GitHub API calls.
+
+    Issue #105: Now holds a WorkspaceManager singleton for workspace
+    security validation.
     """
 
     def __init__(self):
@@ -67,6 +72,18 @@ class StateManager:
         self._memory: dict[str, MemoryEntryResponse] = {}
         self._prs: dict[str, PRSummary] = {}
         self._audit_log: list[AuditLogEntry] = []
+        # Issue #105: Workspace security manager
+        self._workspace_manager = WorkspaceManager.from_env()
+        logger.info(
+            "WorkspaceManager initialized: %d allowed dirs, default=%s",
+            len(self._workspace_manager.list_directories()),
+            self._workspace_manager.default_root,
+        )
+
+    @property
+    def workspace_manager(self) -> WorkspaceManager:
+        """Access the workspace security manager."""
+        return self._workspace_manager
 
     # -- Event Emission --
 
@@ -102,10 +119,21 @@ class StateManager:
     def get_task(self, task_id: str) -> TaskDetail | None:
         return self._tasks.get(task_id)
 
-    async def create_task(self, description: str) -> str:
+    async def create_task(self, description: str, workspace: str = "") -> str:
+        """Create a new task.
+
+        Issue #105: Now accepts workspace parameter, stored on task detail.
+        """
         task_id = f"task-{uuid.uuid4().hex[:8]}"
-        self._tasks[task_id] = TaskDetail(id=task_id, description=description, status=TaskStatus.QUEUED, created_at=_utcnow())
-        logger.info("Task created: %s", task_id)
+        task = TaskDetail(
+            id=task_id,
+            description=description,
+            status=TaskStatus.QUEUED,
+            created_at=_utcnow(),
+            workspace=workspace or str(self._workspace_manager.default_root),
+        )
+        self._tasks[task_id] = task
+        logger.info("Task created: %s (workspace=%s)", task_id, task.workspace)
         await self._emit(EventType.TASK_PROGRESS, {"task_id": task_id, "event": "task_queued", "agent": None, "detail": f"Task queued: {description[:100]}"})
         return task_id
 

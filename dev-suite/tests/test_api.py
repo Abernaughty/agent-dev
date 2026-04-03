@@ -4,6 +4,7 @@ Issue #34: FastAPI Bootstrap -- API Layer for Orchestrator
 Issue #35: Updated for async StateManager mutations and version 0.2.0
 Issue #50: PR tests updated for live GitHub integration
 Issue #51: Replaced seeded mock data with fixture-based state
+Issue #105: Updated for workspace-aware task creation
 
 Uses httpx TestClient (sync) to test all endpoints. State is
 explicitly created via fixtures -- no pre-seeded mock data.
@@ -41,6 +42,7 @@ from src.api.models import (
     TimelineEvent,
 )
 from src.api.state import StateManager
+from tests.conftest import TEST_WORKSPACE_ROOT
 
 
 # -- Helpers --
@@ -74,6 +76,7 @@ def _seed_task(sm: StateManager) -> str:
             constraints=["Use JWT", "No plaintext passwords"],
             acceptance_criteria=["Auth tests pass", "401 on invalid token"],
         ),
+        workspace=TEST_WORKSPACE_ROOT,
     )
     return task_id
 
@@ -254,25 +257,39 @@ class TestTasks:
         assert r.status_code == 404
 
     def test_create_task(self, client):
+        """Issue #105: task creation now requires workspace."""
         with patch("src.api.runner.task_runner") as mock_runner:
-            r = client.post("/tasks", json={"description": "Build a login page"})
+            r = client.post("/tasks", json={
+                "description": "Build a login page",
+                "workspace": TEST_WORKSPACE_ROOT,
+            })
             assert r.status_code == 201
             data = r.json()["data"]
             assert "task_id" in data
             assert data["status"] == "queued"
-            mock_runner.submit.assert_called_once_with(data["task_id"], "Build a login page")
+            mock_runner.submit.assert_called_once_with(
+                data["task_id"], "Build a login page", workspace=TEST_WORKSPACE_ROOT,
+            )
 
             r2 = client.get("/tasks")
             task_ids = [t["id"] for t in r2.json()["data"]]
             assert data["task_id"] in task_ids
 
     def test_create_task_empty_description(self, client):
-        r = client.post("/tasks", json={"description": ""})
+        r = client.post("/tasks", json={"description": "", "workspace": TEST_WORKSPACE_ROOT})
+        assert r.status_code == 422
+
+    def test_create_task_missing_workspace(self, client):
+        """Issue #105: workspace is required."""
+        r = client.post("/tasks", json={"description": "Build a login page"})
         assert r.status_code == 422
 
     def test_cancel_task(self, client):
         with patch("src.api.runner.task_runner"):
-            r = client.post("/tasks", json={"description": "Test task"})
+            r = client.post("/tasks", json={
+                "description": "Test task",
+                "workspace": TEST_WORKSPACE_ROOT,
+            })
             task_id = r.json()["data"]["task_id"]
 
             r2 = client.post(f"/tasks/{task_id}/cancel")
