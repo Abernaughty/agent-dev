@@ -7,6 +7,7 @@
  * Issue #37: SvelteKit API Routes & Providers
  * Issue #19: Added confidence, sandbox, related_files to MemoryEntry; AuditLogEntry
  * Issue #85: Added tool_call SSE event type and ToolCallEvent interface
+ * Issue #106: Added workspace types, updated CreateTaskRequest
  */
 
 // -- Envelope --
@@ -80,6 +81,10 @@ export interface TaskSummary {
 	completed_at: string | null;
 	budget: TaskBudget;
 	timeline: TimelineEvent[];
+	workspace?: string;
+	pr_url?: string | null;
+	pr_number?: number | null;
+	working_branch?: string | null;
 }
 
 export interface TaskDetail extends TaskSummary {
@@ -90,11 +95,37 @@ export interface TaskDetail extends TaskSummary {
 
 export interface CreateTaskRequest {
 	description: string;
+	workspace: string;
+	pin?: string | null;
+	publish_pr?: boolean | null;
 }
 
 export interface CreateTaskResponse {
 	task_id: string;
 	status: TaskStatus;
+}
+
+// -- Workspaces (Issue #106) --
+
+export interface WorkspaceInfo {
+	path: string;
+	is_default: boolean;
+	is_protected: boolean;
+}
+
+export interface AddWorkspaceRequest {
+	path: string;
+}
+
+export interface VerifyWorkspaceAuthRequest {
+	workspace: string;
+	pin: string;
+}
+
+export interface VerifyWorkspaceAuthResponse {
+	workspace: string;
+	authorized: boolean;
+	is_protected: boolean;
 }
 
 // -- Memory --

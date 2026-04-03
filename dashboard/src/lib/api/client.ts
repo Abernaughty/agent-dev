@@ -5,6 +5,7 @@
  * Injects auth headers, handles errors, and normalises responses.
  *
  * Issue #37: SvelteKit API Routes & Providers
+ * Issue #106: Fix FastAPI 422 detail parsing (array-of-objects)
  */
 
 import { BACKEND_URL, API_SECRET } from '$env/static/private';
@@ -28,6 +29,33 @@ export interface ApiResult<T = unknown> {
 	status: number;
 	data: T | null;
 	errors: string[];
+}
+
+/**
+ * Normalise a FastAPI error detail into a human-readable string.
+ *
+ * FastAPI returns `detail` as a string for most errors, but 422
+ * validation errors return an array of objects like:
+ *   [{ "loc": ["body", "workspace"], "msg": "Field required", "type": "missing" }]
+ *
+ * Issue #106: Prevents [object Object] from reaching the UI.
+ */
+function normaliseDetail(detail: unknown): string {
+	if (typeof detail === 'string') return detail;
+	if (Array.isArray(detail)) {
+		return detail
+			.map((e) => {
+				if (typeof e === 'string') return e;
+				if (e && typeof e === 'object') {
+					const loc = Array.isArray(e.loc) ? e.loc.join('.') : '';
+					const msg = e.msg || JSON.stringify(e);
+					return loc ? `${loc}: ${msg}` : msg;
+				}
+				return JSON.stringify(e);
+			})
+			.join('; ');
+	}
+	return JSON.stringify(detail);
 }
 
 /**
@@ -56,7 +84,7 @@ export async function apiFetch<T = unknown>(
 			let detail = `Backend returned ${res.status}`;
 			try {
 				const body = await res.json();
-				if (body.detail) detail = body.detail;
+				if (body.detail) detail = normaliseDetail(body.detail);
 			} catch {
 				// body wasn't JSON — use status text
 				detail = res.statusText || detail;

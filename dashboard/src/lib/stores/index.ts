@@ -4,6 +4,7 @@
  * Issue #37: Store definitions
  * Issue #38: initAllStores() + destroyAllStores()
  * Issue #51: Removed mock mode — always live
+ * Issue #106: Added workspacesStore
  */
 
 export { agentsStore } from './agents.svelte.js';
@@ -11,11 +12,13 @@ export { tasksStore } from './tasks.svelte.js';
 export { memoryStore } from './memory.svelte.js';
 export { prsStore } from './prs.svelte.js';
 export { connection } from './connection.svelte.js';
+export { workspacesStore } from './workspaces.svelte.js';
 
 import { agentsStore } from './agents.svelte.js';
 import { tasksStore } from './tasks.svelte.js';
 import { memoryStore } from './memory.svelte.js';
 import { prsStore } from './prs.svelte.js';
+import { workspacesStore } from './workspaces.svelte.js';
 
 /**
  * Kick off initial data fetch for all stores.
@@ -32,6 +35,7 @@ export async function initAllStores(): Promise<void> {
 	memoryStore.refresh();
 	prsStore.refresh();
 	prsStore.startPolling();
+	workspacesStore.refresh();
 }
 
 /**
@@ -43,4 +47,5 @@ export function destroyAllStores(): void {
 	tasksStore.reset();
 	memoryStore.reset();
 	prsStore.reset();
+	workspacesStore.reset();
 }

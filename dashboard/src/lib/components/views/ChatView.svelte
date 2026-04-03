@@ -3,11 +3,15 @@
 
 	Provides a chat-style interface for submitting tasks to the
 	agent team and viewing system/event messages as they stream in.
+	Includes workspace selector for targeting agent work.
 
 	Relates to #17 — Dashboard v1
+	Issue #106: Workspace selector + workspace-aware create()
 -->
 <script lang="ts">
 	import { tasksStore } from '$lib/stores/tasks.svelte.js';
+	import { workspacesStore } from '$lib/stores/workspaces.svelte.js';
+	import WorkspaceSelector from '$lib/components/WorkspaceSelector.svelte';
 	import { tick } from 'svelte';
 
 	interface ChatMessage {
@@ -44,12 +48,23 @@
 		const text = input.trim();
 		if (!text || sending) return;
 
+		// Check workspace is selected and ready
+		if (!workspacesStore.canCreateTask) {
+			const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+			if (!workspacesStore.selected) {
+				messages = [...messages, { role: 'event', text: 'No workspace selected. Choose a workspace above.', time: now }];
+			} else if (workspacesStore.isSelectedProtected && !workspacesStore.pinVerified) {
+				messages = [...messages, { role: 'event', text: 'Protected workspace — enter PIN above before submitting.', time: now }];
+			}
+			return;
+		}
+
 		const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 		messages = [...messages, { role: 'user', text, time: now }];
 		input = '';
 		sending = true;
 
-		const taskId = await tasksStore.create(text);
+		const taskId = await tasksStore.create(text, workspacesStore.selected);
 
 		if (taskId) {
 			messages = [
@@ -83,6 +98,9 @@
 </script>
 
 <div class="flex h-full flex-col" style="font-family: var(--font-mono);">
+	<!-- Workspace selector -->
+	<WorkspaceSelector />
+
 	<!-- Messages -->
 	<div bind:this={scrollContainer} class="flex-1 overflow-y-auto p-4 pl-6">
 		{#each messages as msg (msg)}

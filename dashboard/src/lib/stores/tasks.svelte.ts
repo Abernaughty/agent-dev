@@ -10,6 +10,7 @@
  * Issue #85: Added handleToolCall() for TOOL_CALL SSE events
  * Issue #92: handleProgress() now pushes timeline events + budget updates;
  *            handleComplete() sets completed_at
+ * Issue #106: create() accepts workspace, pin, publish_pr
  */
 
 import type { TaskSummary, TaskStatus, CreateTaskResponse, ToolCallEvent, TimelineEvent } from '$lib/types/api.js';
@@ -115,13 +116,27 @@ export const tasksStore = {
 		}
 	},
 
-	/** Create a new task. Returns the task_id on success. */
-	async create(description: string): Promise<string | null> {
+	/**
+	 * Create a new task with workspace context.
+	 *
+	 * Issue #106: Now requires workspace (from workspacesStore.selected).
+	 * Optional pin for protected workspaces, publish_pr to control PR creation.
+	 * Returns the task_id on success, null on failure.
+	 */
+	async create(
+		description: string,
+		workspace: string,
+		options?: { pin?: string; publish_pr?: boolean | null }
+	): Promise<string | null> {
 		try {
+			const payload: Record<string, unknown> = { description, workspace };
+			if (options?.pin) payload.pin = options.pin;
+			if (options?.publish_pr !== undefined) payload.publish_pr = options.publish_pr;
+
 			const res = await fetch('/api/tasks', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ description })
+				body: JSON.stringify(payload)
 			});
 			const body = await res.json();
 			if (res.ok && body.data) {
@@ -142,7 +157,8 @@ export const tasksStore = {
 							cost_used: 0,
 							cost_budget: 1.0
 						},
-						timeline: []
+						timeline: [],
+						workspace
 					}
 				];
 				return created.task_id;
