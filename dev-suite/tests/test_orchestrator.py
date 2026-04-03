@@ -49,10 +49,10 @@ class TestGraphConstruction:
 class TestRouting:
     """route_after_qa expects a GraphState (TypedDict/dict), not AgentState."""
 
-    def test_route_pass_goes_to_flush(self):
-        """PASSED now routes to flush_memory instead of END."""
+    def test_route_pass_goes_to_publish_code(self):
+        """PASSED routes to publish_code (which then goes to flush_memory)."""
         state: GraphState = {"status": WorkflowStatus.PASSED, "retry_count": 0, "tokens_used": 0}
-        assert route_after_qa(state) == "flush_memory"
+        assert route_after_qa(state) == "publish_code"
 
     def test_route_fail_retries_developer(self):
         state: GraphState = {"status": WorkflowStatus.REVIEWING, "retry_count": 0, "tokens_used": 0}

@@ -2,6 +2,8 @@
 
 Issue #48: StateManager <-> Orchestrator bridge
 Issue #80: Tool binding -- tools_config initialization, TOOL_CALL SSE events
+Issue #89: publish_code_node -- PR metadata on TaskSummary, SSE events for
+           branch creation and PR opening.
 Issue #92: Budget data in SSE events, flush_memory -> StateManager bridge
 Issue #97: Langfuse tracing -- wires create_trace_config + callbacks +
            propagation_context into the astream loop, mirroring CLI parity.
@@ -59,7 +61,7 @@ NODE_TO_AGENT = {
 }
 
 # Infrastructure nodes that get SSE events but aren't mapped to agents
-INFRA_NODES = {"apply_code", "sandbox_validate", "flush_memory"}
+INFRA_NODES = {"apply_code", "sandbox_validate", "publish_code", "flush_memory"}
 
 # Map orchestrator WorkflowStatus to API TaskStatus
 WORKFLOW_TO_TASK_STATUS = {
@@ -101,20 +103,14 @@ class TaskRunner:
 
     def __init__(self):
         self._tasks: dict[str, asyncio.Task] = {}
-        # Fix 6: Track per-task dev tool call baselines for per-pass counting
         self._dev_tool_baselines: dict[str, int] = {}
 
-    def submit(self, task_id: str, description: str, workspace: str = "") -> None:
-        """Submit a task for background execution.
-
-        Issue #105: Now accepts workspace parameter, threaded into GraphState
-        and init_tools_config for per-task workspace scoping.
-        """
+    def submit(self, task_id: str, description: str, workspace: str = "", publish_pr: bool | None = None) -> None:
+        """Submit a task for background execution."""
         if task_id in self._tasks:
             logger.warning("Task %s already running, ignoring duplicate submit", task_id)
             return
-
-        coro = self._run_task(task_id, description, workspace=workspace)
+        coro = self._run_task(task_id, description, workspace=workspace, publish_pr=publish_pr)
         async_task = asyncio.create_task(coro, name=f"orchestrator-{task_id}")
         self._tasks[task_id] = async_task
         async_task.add_done_callback(lambda t: self._tasks.pop(task_id, None))
@@ -144,21 +140,13 @@ class TaskRunner:
     def running_count(self) -> int:
         return len(self._tasks)
 
-    async def _run_task(self, task_id: str, description: str, workspace: str = "") -> None:
-        """Run the orchestrator via astream() and emit SSE events.
-
-        Issue #97: Creates TracingConfig and passes Langfuse callbacks.
-        Issue #105: Validates workspace via WorkspaceManager.resolve_workspace(),
-            passes workspace_root into GraphState and init_tools_config.
-        """
+    async def _run_task(self, task_id: str, description: str, workspace: str = "", publish_pr: bool | None = None) -> None:
+        """Run the orchestrator via astream() and emit SSE events."""
         from .state import state_manager
 
         start_time = time.time()
         self._dev_tool_baselines[task_id] = 0
 
-        # Issue #105: Resolve and validate workspace via WorkspaceManager.
-        # resolve_workspace() checks the allowlist and raises ValueError
-        # if the workspace is not permitted — fail closed.
         try:
             task_workspace = (
                 state_manager.workspace_manager.resolve_workspace(workspace)
@@ -175,7 +163,6 @@ class TaskRunner:
             await self._emit_complete(task_id, "failed", str(exc))
             return
 
-        # Issue #97: Initialize Langfuse tracing for this task run.
         trace_config = create_trace_config(
             enabled=True,
             task_description=description,
@@ -199,7 +186,6 @@ class TaskRunner:
             graph = build_graph()
             workflow = graph.compile()
 
-            # Issue #105: Pass per-task workspace to init_tools_config
             tools_config = init_tools_config(workspace_root=task_workspace)
             n_tools = len(tools_config.get("configurable", {}).get("tools", []))
             if n_tools > 0:
@@ -207,7 +193,7 @@ class TaskRunner:
             else:
                 await self._emit_log("[orchestrator] No tools configured (single-shot mode)")
 
-            # Issue #105: workspace_root is now part of GraphState
+            # Issue #89: publish_pr defaults to True, API can override
             initial_state: GraphState = {
                 "task_description": description,
                 "blueprint": None,
@@ -222,6 +208,7 @@ class TaskRunner:
                 "parsed_files": [],
                 "tool_calls_log": [],
                 "workspace_root": str(task_workspace),
+                "publish_pr": True if publish_pr is None else publish_pr,
             }
 
             stream_config = {
@@ -229,7 +216,6 @@ class TaskRunner:
                 **tools_config,
             }
 
-            # Issue #97: Merge Langfuse callbacks into the stream config
             if trace_config.callbacks:
                 stream_config["callbacks"] = trace_config.callbacks
 
@@ -397,6 +383,39 @@ class TaskRunner:
                 await self._emit_progress(task_id, "sandbox_validated", "qa", action)
             else:
                 await self._emit_log("[sandbox] Validation skipped (no E2B key or no code files)")
+
+        elif node_name == "publish_code":
+            # Issue #89: PR publication results
+            pr_url = node_output.get("pr_url")
+            pr_number = node_output.get("pr_number")
+            working_branch = node_output.get("working_branch")
+
+            # Update task with PR metadata
+            if pr_url:
+                task.pr_url = pr_url
+            if pr_number:
+                task.pr_number = pr_number
+            if working_branch:
+                task.working_branch = working_branch
+
+            if pr_number and pr_url:
+                action = f"PR #{pr_number} opened"
+                task.timeline.append(TimelineEvent(
+                    time=_now_str(), agent="dev", action=action, type="success",
+                ))
+                await self._emit_progress(task_id, "pr_opened", "dev", action, task=task)
+                await self._emit_log(f"[github] PR #{pr_number} opened -> {pr_url}")
+            elif working_branch:
+                action = f"Files pushed to branch '{working_branch}' (PR creation failed)"
+                task.timeline.append(TimelineEvent(
+                    time=_now_str(), agent="dev", action=action, type="exec",
+                ))
+                await self._emit_log(f"[github] Branch '{working_branch}' created, PR creation failed")
+            else:
+                # Skipped (no token, opt-out, no files, etc.)
+                trace = node_output.get("trace", [])
+                skip_reason = trace[-1] if trace else "unknown reason"
+                await self._emit_log(f"[github] PR publication skipped: {skip_reason}")
 
         elif node_name == "flush_memory":
             flushed = node_output.get("memory_writes_flushed", [])

@@ -1,6 +1,8 @@
 """GitHub PR provider — live REST API integration.
 
 Issue #50: PR store ↔ GitHub REST API (real pull requests)
+Issue #89: Added create_branch, push_file, get_file_sha, delete_branch,
+           push_files_batch for publish_code_node branch+PR workflow.
 
 Replaces mock PR data with live GitHub API calls. Supports full
 read/write PR lifecycle: list, detail, files, reviews, comments,
@@ -24,6 +26,7 @@ Usage:
 
 from __future__ import annotations
 
+import base64
 import logging
 import os
 import time
@@ -74,6 +77,14 @@ class GitHubPRProvider:
     @property
     def configured(self) -> bool:
         return bool(self._token)
+
+    @property
+    def owner(self) -> str:
+        return self._owner
+
+    @property
+    def repo(self) -> str:
+        return self._repo
 
     @property
     def base_url(self) -> str:
@@ -173,6 +184,168 @@ class GitHubPRProvider:
             logger.error("GitHub PATCH failed: %s %s — %s", path, type(e).__name__, e)
             return None
 
+    async def _delete(self, path: str) -> bool:
+        """Send a DELETE request. Returns True on success."""
+        if not self._token:
+            logger.warning("GitHub write operation requires GITHUB_TOKEN")
+            return False
+        client = await self._get_client()
+        try:
+            resp = await client.request("DELETE", f"{self.base_url}{path}")
+            resp.raise_for_status()
+            return True
+        except httpx.HTTPError as e:
+            logger.error("GitHub DELETE failed: %s %s — %s", path, type(e).__name__, e)
+            return False
+
+    # -- Branch operations (Issue #89) --
+
+    async def get_branch_sha(self, branch: str = "main") -> str | None:
+        """Get the HEAD commit SHA of a branch."""
+        data = await self._get(f"/git/ref/heads/{branch}")
+        if not data:
+            return None
+        obj = data.get("object", {})
+        return obj.get("sha")
+
+    async def create_branch(self, branch_name: str, from_branch: str = "main") -> bool:
+        """Create a new branch from an existing branch.
+
+        Returns True if branch was created or already exists.
+        """
+        base_sha = await self.get_branch_sha(from_branch)
+        if not base_sha:
+            logger.error("Cannot create branch: base branch '%s' not found", from_branch)
+            return False
+        data = await self._post("/git/refs", json={
+            "ref": f"refs/heads/{branch_name}",
+            "sha": base_sha,
+        })
+        if data:
+            logger.info("Branch '%s' created from '%s' (sha=%s)", branch_name, from_branch, base_sha[:8])
+            return True
+        # Check if branch already exists (422 = already exists)
+        existing = await self.get_branch_sha(branch_name)
+        if existing:
+            logger.info("Branch '%s' already exists (sha=%s)", branch_name, existing[:8])
+            return True
+        return False
+
+    async def delete_branch(self, branch_name: str) -> bool:
+        """Delete a branch. Returns True on success or if branch doesn't exist."""
+        return await self._delete(f"/git/refs/heads/{branch_name}")
+
+    async def get_file_sha(self, path: str, branch: str = "main") -> str | None:
+        """Get the blob SHA of a file on a specific branch.
+
+        Needed for updating existing files via the Contents API.
+        Returns None if the file doesn't exist on that branch.
+        """
+        client = await self._get_client()
+        try:
+            resp = await client.get(f"{self.base_url}/contents/{path}?ref={branch}")
+            if resp.status_code == 404:
+                return None
+            resp.raise_for_status()
+            data = resp.json()
+            return data.get("sha")
+        except httpx.HTTPError:
+            return None
+
+    async def push_file(
+        self,
+        path: str,
+        content: str,
+        branch: str,
+        message: str | None = None,
+    ) -> bool:
+        """Push a single file to a branch via the Contents API.
+
+        Handles both create (new file) and update (existing file) cases.
+        Content is base64-encoded automatically.
+
+        Returns True on success.
+        """
+        if not self._token:
+            logger.warning("GitHub write operation requires GITHUB_TOKEN")
+            return False
+
+        if message is None:
+            message = f"agent: update {path}"
+
+        # Check if file already exists on the branch to get its SHA
+        existing_sha = await self.get_file_sha(path, branch)
+
+        encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
+        payload: dict[str, Any] = {
+            "message": message,
+            "content": encoded,
+            "branch": branch,
+        }
+        if existing_sha:
+            payload["sha"] = existing_sha
+
+        client = await self._get_client()
+        try:
+            resp = await client.put(
+                f"{self.base_url}/contents/{path}",
+                json=payload,
+            )
+            resp.raise_for_status()
+            logger.info("Pushed %s to %s (%s)", path, branch, "updated" if existing_sha else "created")
+            return True
+        except httpx.HTTPStatusError as e:
+            logger.error("Push file failed: %s -> %s %s", path, e.response.status_code, e.response.text[:200])
+            return False
+        except httpx.HTTPError as e:
+            logger.error("Push file failed: %s -> %s", path, e)
+            return False
+
+    async def push_files_batch(
+        self,
+        files: list[dict[str, str]],
+        branch: str,
+        message: str,
+    ) -> bool:
+        """Push multiple files in individual commits.
+
+        Each file dict has 'path' and 'content' keys.
+        Files are pushed sequentially — each commit builds on the previous.
+
+        Validates all file sizes against GitHub's 100 MB Contents API limit
+        before starting the batch to avoid partial publishes.
+
+        Returns True if all files were pushed successfully.
+        """
+        # Preflight: validate all file sizes before starting any commits
+        max_content_bytes = 100 * 1024 * 1024  # 100 MB GitHub Contents API limit
+        for f in files:
+            byte_size = len(f["content"].encode("utf-8"))
+            if byte_size > max_content_bytes:
+                logger.error(
+                    "File '%s' exceeds GitHub 100 MB limit (%d bytes) — aborting batch",
+                    f["path"], byte_size,
+                )
+                return False
+
+        success_count = 0
+        for f in files:
+            ok = await self.push_file(
+                path=f["path"],
+                content=f["content"],
+                branch=branch,
+                message=f"{message} [{f['path']}]",
+            )
+            if ok:
+                success_count += 1
+            else:
+                logger.error("Failed to push %s — aborting batch", f["path"])
+                return False
+        logger.info("Batch push: %d/%d files to %s", success_count, len(files), branch)
+        return True
+
+    # -- PR mapping helpers --
+
     def _map_pr_status(self, pr: dict) -> PRStatus:
         if pr.get("draft"):
             return PRStatus.DRAFT
@@ -237,6 +410,8 @@ class GitHubPRProvider:
             conclusion=check.get("conclusion"),
         )
 
+    # -- Read operations --
+
     async def list_prs(self, state: str = "all") -> list[PRSummary]:
         cache_key = f"pulls_list_{state}"
         data = await self._get(f"/pulls?state={state}&per_page=100&sort=updated&direction=desc", cache_key=cache_key)
@@ -288,6 +463,8 @@ class GitHubPRProvider:
         if not data or not isinstance(data, dict):
             return []
         return [self._map_check_run(c) for c in data.get("check_runs", [])]
+
+    # -- Write operations --
 
     async def create_pr(self, head: str, base: str, title: str, body: str = "") -> PRSummary | None:
         data = await self._post("/pulls", json={"head": head, "base": base, "title": title, "body": body})
