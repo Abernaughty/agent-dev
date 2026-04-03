@@ -1,0 +1,19 @@
+/**
+ * POST /api/workspaces/verify-auth — proxy to FastAPI POST /workspaces/verify-auth
+ * Issue #106
+ */
+import { json } from '@sveltejs/kit';
+import { apiFetch } from '$lib/api/client.js';
+import type { RequestHandler } from './$types.js';
+
+export const POST: RequestHandler = async ({ request }) => {
+	const body = await request.json();
+	const result = await apiFetch<unknown>('/workspaces/verify-auth', {
+		method: 'POST',
+		body: JSON.stringify(body)
+	});
+	if (!result.ok) {
+		return json({ data: null, errors: result.errors }, { status: result.status });
+	}
+	return json({ data: result.data, errors: [] });
+};
