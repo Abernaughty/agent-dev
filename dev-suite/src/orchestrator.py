@@ -726,7 +726,27 @@ async def _publish_code_async(state: dict) -> dict:
             return {"trace": trace}
 
         trace.append(f"publish_code: pushing {len(parsed_files)} file(s)")
-        files_payload = [{"path": pf["path"], "content": pf["content"]} for pf in parsed_files]
+        # Compute repo-relative paths: if workspace_root is a subdirectory
+        # of the repo, prefix file paths so the PR targets correct locations.
+        workspace_root = state.get("workspace_root", "")
+        repo_subdir = ""
+        if workspace_root:
+            ws = Path(workspace_root).resolve()
+            # Walk up to find .git directory — that's the repo root
+            for parent in [ws, *ws.parents]:
+                if (parent / ".git").exists():
+                    try:
+                        repo_subdir = str(ws.relative_to(parent))
+                    except ValueError:
+                        repo_subdir = ""
+                    break
+
+        files_payload = []
+        for pf in parsed_files:
+            repo_path = pf["path"]
+            if repo_subdir and repo_subdir != ".":
+                repo_path = f"{repo_subdir}/{pf['path']}"
+            files_payload.append({"path": repo_path, "content": pf["content"]})
         push_ok = await github_pr_provider.push_files_batch(
             files=files_payload, branch=branch_name,
             message=f"feat({task_id}): implement {blueprint.instructions[:60]}",

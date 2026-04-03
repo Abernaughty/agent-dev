@@ -268,7 +268,7 @@ class TestTasks:
             assert "task_id" in data
             assert data["status"] == "queued"
             mock_runner.submit.assert_called_once_with(
-                data["task_id"], "Build a login page", workspace=TEST_WORKSPACE_ROOT,
+                data["task_id"], "Build a login page", workspace=TEST_WORKSPACE_ROOT, publish_pr=None,
             )
 
             r2 = client.get("/tasks")
