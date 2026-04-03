@@ -9,6 +9,9 @@ Issue #80: Agent tool binding -- Dev and QA agents can now use
 workspace tools (filesystem_read, filesystem_write, etc.) via
 LangChain's bind_tools() + iterative tool execution loop.
 Tools are passed via RunnableConfig["configurable"]["tools"].
+
+Issue #105: Workspace security -- GraphState carries workspace_root,
+apply_code_node uses per-task workspace instead of global env var.
 """
 
 import asyncio
@@ -100,6 +103,7 @@ class GraphState(TypedDict, total=False):
     parsed_files: list[dict]
     tool_calls_log: list[dict]
     memory_writes_flushed: list[dict]
+    workspace_root: str  # Issue #105: per-task workspace directory
 
 
 class AgentState(BaseModel):
@@ -117,6 +121,7 @@ class AgentState(BaseModel):
     sandbox_result: SandboxResult | None = None
     parsed_files: list[dict] = []
     tool_calls_log: list[dict] = []
+    workspace_root: str = ""  # Issue #105
 
 
 def _get_architect_llm():
@@ -215,12 +220,9 @@ def _infer_module(target_files: list[str]) -> str:
 
 # -- Tool Binding (Issue #80) --
 
-# Fix 2: Removed github_create_pr -- non-idempotent write should not be in
-# an iterative tool loop. PR creation belongs in a post-QA-pass step.
 DEV_TOOL_NAMES = {"filesystem_read", "filesystem_write", "filesystem_list", "github_read_diff"}
 QA_TOOL_NAMES = {"filesystem_read", "filesystem_list", "github_read_diff"}
 
-# Fix 4: Secret pattern regexes for sanitizing tool call previews
 _SECRET_PATTERNS = [
     re.compile(r'(?:sk|pk|api|key|token|secret|password|bearer)[_-]?\w{10,}', re.IGNORECASE),
     re.compile(r'(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{30,}'),
@@ -230,7 +232,6 @@ _SECRET_PATTERNS = [
 
 
 def _sanitize_preview(text: str, max_len: int = 200) -> str:
-    """Truncate and redact known secret patterns from tool call previews."""
     if not text:
         return ""
     sanitized = text
@@ -254,7 +255,6 @@ def _get_agent_tools(config, allowed_names=None):
 
 
 async def _execute_tool_call(tool_call, tools):
-    """Execute a single tool call. Uses ainvoke/invoke public API (Fix 3)."""
     tool_name = tool_call.get("name", "")
     tool_args = tool_call.get("args", {})
     tool_id = tool_call.get("id", "unknown")
@@ -263,8 +263,6 @@ async def _execute_tool_call(tool_call, tools):
     if not tool:
         return ToolMessage(content=f"Error: Tool '{tool_name}' not found. Available: {list(tool_map.keys())}", tool_call_id=tool_id)
     try:
-        # Fix 3: Use public ainvoke/invoke API instead of tool.coroutine.
-        # ainvoke handles input validation, callbacks, and config propagation.
         if hasattr(tool, "ainvoke"):
             result = await tool.ainvoke(tool_args)
         else:
@@ -280,7 +278,6 @@ async def _run_tool_loop(llm_with_tools, messages, tools, max_turns=MAX_TOOL_TUR
         trace = []
     tool_calls_log = []
     current_messages = list(messages)
-    # Fix 5: Guard against max_turns <= 0 to prevent unbound response variable
     if max_turns <= 0:
         logger.warning("[%s] max_turns=%d, skipping tool loop", agent_name.upper(), max_turns)
         trace.append(f"{agent_name}: tool loop skipped (max_turns={max_turns})")
@@ -299,7 +296,6 @@ async def _run_tool_loop(llm_with_tools, messages, tools, max_turns=MAX_TOOL_TUR
         for tc in tool_calls:
             tool_msg = await _execute_tool_call(tc, tools)
             current_messages.append(tool_msg)
-            # Fix 4: Sanitize previews before persisting to tool_calls_log
             tool_calls_log.append({"agent": agent_name, "turn": turn + 1, "tool": tc.get("name", "unknown"), "args_preview": _sanitize_preview(str(tc.get("args", {}))), "result_preview": _sanitize_preview(str(tool_msg.content)), "success": not tool_msg.content.startswith("Error")})
     trace.append(f"{agent_name}: tool loop hit max turns ({max_turns})")
     logger.warning("[%s] Hit max tool turns (%d)", agent_name.upper(), max_turns)
@@ -307,14 +303,6 @@ async def _run_tool_loop(llm_with_tools, messages, tools, max_turns=MAX_TOOL_TUR
 
 
 def _run_async(coro):
-    """Run an async coroutine from sync context for the tool loop.
-
-    Design note (re: CodeRabbit #8): This is intentional. developer_node and
-    qa_node are sync functions that use _run_async() to bridge into the async
-    tool loop. run_task() uses workflow.invoke() (sync). Converting everything
-    to async would cascade changes to CLI, tests, and callers with no benefit
-    since LangGraph handles sync nodes with internal async bridges fine.
-    """
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
@@ -378,7 +366,6 @@ Do not include any text before or after the JSON.{memory_block}"""
 
 
 def developer_node(state: GraphState, config: RunnableConfig | None = None) -> dict:
-    """Lead Dev: executes the Blueprint and generates code. Issue #80: tool binding support."""
     trace = list(state.get("trace", []))
     trace.append("developer: starting build")
     memory_writes = list(state.get("memory_writes", []))
@@ -469,7 +456,9 @@ def apply_code_node(state: GraphState) -> dict:
     if not parsed:
         trace.append("apply_code: parser returned no files")
         return {"parsed_files": [], "trace": trace}
-    workspace_root = _get_workspace_root()
+    # Issue #105: Use per-task workspace from GraphState, fall back to env var
+    ws_from_state = state.get("workspace_root", "")
+    workspace_root = Path(ws_from_state).resolve() if ws_from_state else _get_workspace_root()
     safe_files = validate_paths_for_workspace(parsed, workspace_root)
     if len(safe_files) < len(parsed):
         skipped = len(parsed) - len(safe_files)
@@ -486,14 +475,13 @@ def apply_code_node(state: GraphState) -> dict:
         except Exception as e:
             logger.warning("[APPLY_CODE] Failed to write %s: %s", pf.path, e)
             trace.append(f"apply_code: failed to write {pf.path} -- {e}")
-    trace.append(f"apply_code: wrote {written_count} files ({total_chars:,} chars total) to workspace")
+    trace.append(f"apply_code: wrote {written_count} files ({total_chars:,} chars total) to {workspace_root}")
     logger.info("[APPLY_CODE] Wrote %d files (%d chars) to %s", written_count, total_chars, workspace_root)
     parsed_files_data = [{"path": pf.path, "content": pf.content} for pf in safe_files]
     return {"parsed_files": parsed_files_data, "trace": trace}
 
 
 def qa_node(state: GraphState, config: RunnableConfig | None = None) -> dict:
-    """QA: reviews the generated code. Issue #80: read-only tool access."""
     trace = list(state.get("trace", []))
     trace.append("qa: starting review")
     memory_writes = list(state.get("memory_writes", []))
@@ -563,7 +551,6 @@ def qa_node(state: GraphState, config: RunnableConfig | None = None) -> dict:
 
 
 def _run_sandbox_tests(commands, template, parsed_files=None, timeout=120):
-    """Run TEST_SUITE validation: sequential commands in sandbox."""
     api_key = os.getenv("E2B_API_KEY")
     if not api_key:
         return None
@@ -575,7 +562,6 @@ def _run_sandbox_tests(commands, template, parsed_files=None, timeout=120):
 
 
 def _run_sandbox_script(script_file, template, parsed_files=None, timeout=30):
-    """Run SCRIPT_EXEC validation: execute a single script."""
     api_key = os.getenv("E2B_API_KEY")
     if not api_key:
         return None
@@ -602,9 +588,6 @@ def sandbox_validate_node(state: GraphState) -> dict:
 
     parsed_files = state.get("parsed_files", [])
 
-    # CR fix: guard against empty parsed_files before dispatching to sandbox.
-    # apply_code_node can leave parsed_files=[] on parse/path-validation failures.
-    # Running SCRIPT_EXEC/TEST_SUITE/LINT_ONLY with no files causes spurious errors.
     if plan.strategy in {
         ValidationStrategy.SCRIPT_EXEC,
         ValidationStrategy.TEST_SUITE,
@@ -628,9 +611,6 @@ def sandbox_validate_node(state: GraphState) -> dict:
                 template=plan.template,
                 parsed_files=parsed_files if parsed_files else None,
             )
-        # CR fix: fold LINT_ONLY into TEST_SUITE -- both run commands
-        # sequentially via _run_sandbox_tests(). LINT_ONLY was falling
-        # through to the skip branch instead of executing plan.commands.
         elif plan.strategy in {ValidationStrategy.TEST_SUITE, ValidationStrategy.LINT_ONLY}:
             trace.append(
                 f"sandbox_validate: running {len(plan.commands)} command(s) sequentially"
@@ -739,27 +719,12 @@ def create_workflow():
 
 
 def _get_mcp_config_path() -> Path:
-    """Resolve path to mcp-config.json.
-
-    Priority:
-      1. MCP_CONFIG_PATH env var (absolute or relative)
-      2. Fallback: dev-suite/mcp-config.json (relative to this source file)
-
-    WORKSPACE_ROOT is intentionally NOT used here -- it points to the
-    agent output directory (e.g. ../workspace), not the project source.
-
-    Relative MCP_CONFIG_PATH values are anchored to the project root
-    (dev-suite/), not the process CWD, for deterministic resolution.
-    Supports ~ expansion for home directory paths.
-    """
     explicit = os.getenv("MCP_CONFIG_PATH")
     if explicit:
         p = Path(explicit).expanduser()
         if not p.is_absolute():
-            # Anchor relative paths to dev-suite/ (same root as default fallback)
             p = Path(__file__).resolve().parent.parent / p
         return p.resolve()
-    # __file__ is dev-suite/src/orchestrator.py -> parent.parent = dev-suite/
     return Path(__file__).resolve().parent.parent / "mcp-config.json"
 
 
