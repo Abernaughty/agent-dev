@@ -3,11 +3,15 @@
 
 	Provides a chat-style interface for submitting tasks to the
 	agent team and viewing system/event messages as they stream in.
+	Includes workspace selector for targeting agent work.
 
 	Relates to #17 — Dashboard v1
+	Issue #106: Workspace selector + workspace-aware create()
 -->
 <script lang="ts">
 	import { tasksStore } from '$lib/stores/tasks.svelte.js';
+	import { workspacesStore } from '$lib/stores/workspaces.svelte.js';
+	import WorkspaceSelector from '$lib/components/WorkspaceSelector.svelte';
 	import { tick } from 'svelte';
 
 	interface ChatMessage {
@@ -45,11 +49,35 @@
 		if (!text || sending) return;
 
 		const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+		// Check workspace availability and readiness
+		if (workspacesStore.loading) {
+			messages = [...messages, { role: 'event', text: 'Workspaces loading\u2026 please wait.', time: now }];
+			return;
+		}
+		if (workspacesStore.error) {
+			messages = [...messages, { role: 'event', text: `Unable to load workspaces \u2014 ${workspacesStore.error}`, time: now }];
+			return;
+		}
+		if (!workspacesStore.canCreateTask) {
+			if (!workspacesStore.selected) {
+				messages = [...messages, { role: 'event', text: 'No workspace selected. Choose a workspace above.', time: now }];
+			} else if (workspacesStore.isSelectedProtected && !workspacesStore.pinVerified) {
+				messages = [...messages, { role: 'event', text: 'Protected workspace \u2014 enter PIN above before submitting.', time: now }];
+			}
+			return;
+		}
+
 		messages = [...messages, { role: 'user', text, time: now }];
 		input = '';
 		sending = true;
 
-		const taskId = await tasksStore.create(text);
+		// Forward PIN for protected workspaces
+		const options = workspacesStore.isSelectedProtected && workspacesStore.verifiedPin
+			? { pin: workspacesStore.verifiedPin }
+			: undefined;
+
+		const taskId = await tasksStore.create(text, workspacesStore.selected, options);
 
 		if (taskId) {
 			messages = [
@@ -83,6 +111,9 @@
 </script>
 
 <div class="flex h-full flex-col" style="font-family: var(--font-mono);">
+	<!-- Workspace selector -->
+	<WorkspaceSelector />
+
 	<!-- Messages -->
 	<div bind:this={scrollContainer} class="flex-1 overflow-y-auto p-4 pl-6">
 		{#each messages as msg (msg)}
