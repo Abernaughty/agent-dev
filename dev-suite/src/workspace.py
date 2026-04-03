@@ -66,10 +66,11 @@ class WorkspaceManager:
 
         # Build the compiled regex list for protected workspace detection.
         # Includes built-in agent-dev patterns + user-configured patterns.
+        # NOTE: User patterns are literal matches (escaped via re.escape),
+        # not globs or regex. E.g., "my-repo" matches paths containing
+        # that exact string as a directory component.
         self._protected_regexes: list[re.Pattern] = list(_AGENT_DEV_PATTERNS)
         for pattern in self._protected_patterns:
-            # Each user pattern matches as a substring (case-insensitive)
-            # against the resolved path string or workspace reference.
             escaped = re.escape(pattern)
             self._protected_regexes.append(
                 re.compile(rf"(?:^|[\\/]){escaped}(?:[\\/]?$)", re.IGNORECASE)
@@ -88,11 +89,17 @@ class WorkspaceManager:
         Env vars:
             WORKSPACE_ROOT: Default workspace directory (required).
             PROTECTED_WORKSPACES: Comma-separated list of protected
-                workspace patterns (paths, repo names, URLs).
+                workspace patterns — literal matches, not globs or regex.
             WORKSPACE_PROTECTED_PIN: bcrypt hash of the admin PIN.
         """
         raw_root = os.getenv("WORKSPACE_ROOT", ".")
         default_root = Path(raw_root).resolve()
+
+        if not default_root.is_dir():
+            logger.warning(
+                "WORKSPACE_ROOT does not exist or is not a directory: %s",
+                default_root,
+            )
 
         raw_protected = os.getenv("PROTECTED_WORKSPACES", "")
         protected_patterns = [
@@ -222,6 +229,7 @@ class WorkspaceManager:
 
         The workspace_ref can be a local path, GitHub URL, or repo name.
         Detection is case-insensitive and resolves local paths.
+        Patterns are matched literally (not as globs or regex).
         """
         # Check against the resolved path string
         try:
@@ -322,7 +330,7 @@ def hash_pin(pin: str) -> str:
     """Generate a bcrypt hash for a PIN. Use this to create the
     WORKSPACE_PROTECTED_PIN value for .env.
 
-    Usage:
-        python -c "from src.workspace import hash_pin; print(hash_pin('1234'))"
+    Usage (interactive, avoids PIN in shell history):
+        python -c "import getpass; from src.workspace import hash_pin; print(hash_pin(getpass.getpass('PIN: ')))"
     """
     return bcrypt.hashpw(pin.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")

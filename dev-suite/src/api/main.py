@@ -38,7 +38,6 @@ from .models import (
     MergePRRequest,
     PostCommentRequest,
     PostReviewRequest,
-    RemoveWorkspaceRequest,
     VerifyWorkspaceAuthRequest,
     VerifyWorkspaceAuthResponse,
     WorkspaceInfo,
@@ -150,8 +149,7 @@ async def create_task(body: CreateTaskRequest, _auth: str | None = Depends(requi
     """Create a new task with workspace validation (Issue #105).
 
     Validates that the workspace is in the allowed directories list.
-    If the workspace is protected, returns 403 (must verify PIN first
-    via POST /workspaces/verify-auth).
+    If the workspace is protected, the PIN must be provided and verified.
     """
     from .runner import task_runner
 
@@ -165,14 +163,16 @@ async def create_task(body: CreateTaskRequest, _auth: str | None = Depends(requi
             403,
         )
 
-    # Block writes to protected workspaces without prior auth
-    # (Dashboard sends PIN verification before task creation)
+    # For protected workspaces, verify PIN inline
     if ws_mgr.is_protected(body.workspace):
-        _error(
-            f"Workspace '{body.workspace}' is protected. "
-            f"Verify PIN via POST /workspaces/verify-auth before creating tasks.",
-            403,
-        )
+        if not body.pin:
+            _error(
+                f"Workspace '{body.workspace}' is protected. "
+                f"Provide 'pin' field for authorization.",
+                403,
+            )
+        if not ws_mgr.verify_pin(body.pin):
+            _error("Invalid PIN for protected workspace.", 403)
 
     task_id = await state_manager.create_task(body.description, workspace=body.workspace)
     task_runner.submit(task_id, body.description, workspace=body.workspace)
@@ -192,6 +192,7 @@ async def cancel_task(task_id: str, _auth: str | None = Depends(require_auth)):
 
 @app.post("/tasks/{task_id}/retry", response_model=ApiResponse)
 async def retry_task(task_id: str, _auth: str | None = Depends(require_auth)):
+    """Retry a failed task. Re-validates workspace protection status."""
     if not await state_manager.retry_task(task_id):
         task = state_manager.get_task(task_id)
         if not task:
@@ -199,9 +200,18 @@ async def retry_task(task_id: str, _auth: str | None = Depends(require_auth)):
         else:
             _error(f"Task '{task_id}' is not in a retryable state (status: {task.status})", 400)
         return _ok({"task_id": task_id, "status": task.status if task else "not_found"})
+
     from .runner import task_runner
     task = state_manager.get_task(task_id)
     if task:
+        # Re-validate protected workspace on retry
+        ws_mgr = state_manager.workspace_manager
+        if task.workspace and ws_mgr.is_protected(task.workspace):
+            _error(
+                f"Workspace '{task.workspace}' is now protected. "
+                f"Create a new task with PIN authorization instead of retrying.",
+                403,
+            )
         task_runner.submit(task_id, task.description, workspace=task.workspace)
     return _ok({"task_id": task_id, "status": "queued"})
 
@@ -227,13 +237,13 @@ async def add_workspace(body: AddWorkspaceRequest, _auth: str | None = Depends(r
 
 
 @app.delete("/workspaces", response_model=ApiResponse)
-async def remove_workspace(body: RemoveWorkspaceRequest, _auth: str | None = Depends(require_auth)):
+async def remove_workspace(path: str = Query(..., min_length=1, description="Absolute path to directory"), _auth: str | None = Depends(require_auth)):
     """Remove a directory from the allowed workspaces list."""
     ws_mgr = state_manager.workspace_manager
-    if ws_mgr.remove_directory(body.path):
+    if ws_mgr.remove_directory(path):
         dirs = ws_mgr.list_directories()
         return _ok([WorkspaceInfo(**d) for d in dirs])
-    _error(f"Cannot remove workspace '{body.path}' -- not found or is the default root")
+    _error(f"Cannot remove workspace '{path}' -- not found or is the default root")
 
 
 @app.post("/workspaces/verify-auth", response_model=ApiResponse)
@@ -241,7 +251,8 @@ async def verify_workspace_auth(body: VerifyWorkspaceAuthRequest, _auth: str | N
     """Verify PIN for a protected workspace.
 
     Returns whether the workspace is protected and whether the PIN is correct.
-    The dashboard calls this before allowing task creation on protected workspaces.
+    The dashboard can use this for pre-flight checks before showing the
+    task creation form.
     """
     ws_mgr = state_manager.workspace_manager
     is_protected = ws_mgr.is_protected(body.workspace)

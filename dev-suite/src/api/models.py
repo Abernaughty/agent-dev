@@ -281,7 +281,8 @@ class CreateTaskRequest(BaseModel):
     """Request body for creating a new task.
 
     Issue #105: workspace is required. The dashboard pre-fills it with
-    WORKSPACE_ROOT, but it must be explicitly sent.
+    WORKSPACE_ROOT, but it must be explicitly sent. For protected
+    workspaces, pin must also be provided.
     """
 
     description: str = Field(..., min_length=1, max_length=2000)
@@ -290,6 +291,11 @@ class CreateTaskRequest(BaseModel):
         min_length=1,
         description="Target workspace directory (absolute path). "
         "Must be in the allowed directories list.",
+    )
+    pin: str | None = Field(
+        default=None,
+        description="Admin PIN for protected workspaces. "
+        "Required when workspace is protected.",
     )
 
 
@@ -311,12 +317,6 @@ class WorkspaceInfo(BaseModel):
 
 class AddWorkspaceRequest(BaseModel):
     """Request body for adding a workspace directory."""
-
-    path: str = Field(..., min_length=1, description="Absolute path to directory")
-
-
-class RemoveWorkspaceRequest(BaseModel):
-    """Request body for removing a workspace directory."""
 
     path: str = Field(..., min_length=1, description="Absolute path to directory")
 

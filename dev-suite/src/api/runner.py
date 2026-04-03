@@ -6,7 +6,7 @@ Issue #92: Budget data in SSE events, flush_memory -> StateManager bridge
 Issue #97: Langfuse tracing -- wires create_trace_config + callbacks +
            propagation_context into the astream loop, mirroring CLI parity.
 Issue #105: Workspace-aware task execution -- workspace_root in GraphState,
-            per-task init_tools_config scoping.
+            per-task init_tools_config scoping, WorkspaceManager validation.
 
 Uses LangGraph's astream() to iterate node completions and emit SSE events
 in real time. Runs entirely on the async event loop -- no threading needed.
@@ -148,19 +148,32 @@ class TaskRunner:
         """Run the orchestrator via astream() and emit SSE events.
 
         Issue #97: Creates TracingConfig and passes Langfuse callbacks.
-        Issue #105: Passes workspace_root into GraphState and init_tools_config.
+        Issue #105: Validates workspace via WorkspaceManager.resolve_workspace(),
+            passes workspace_root into GraphState and init_tools_config.
         """
         from .state import state_manager
 
         start_time = time.time()
         self._dev_tool_baselines[task_id] = 0
 
-        # Issue #105: Resolve workspace for this task.
-        # Falls back to the default WORKSPACE_ROOT if not specified.
-        if workspace:
-            task_workspace = Path(workspace).resolve()
-        else:
-            task_workspace = state_manager.workspace_manager.default_root
+        # Issue #105: Resolve and validate workspace via WorkspaceManager.
+        # resolve_workspace() checks the allowlist and raises ValueError
+        # if the workspace is not permitted — fail closed.
+        try:
+            task_workspace = (
+                state_manager.workspace_manager.resolve_workspace(workspace)
+                if workspace
+                else state_manager.workspace_manager.default_root
+            )
+        except ValueError as exc:
+            logger.error("Task %s workspace rejected: %s", task_id, exc)
+            task = state_manager.get_task(task_id)
+            if task:
+                task.status = TaskStatus.FAILED
+                task.error_message = str(exc)
+                task.completed_at = datetime.now(timezone.utc)
+            await self._emit_complete(task_id, "failed", str(exc))
+            return
 
         # Issue #97: Initialize Langfuse tracing for this task run.
         trace_config = create_trace_config(
