@@ -5,6 +5,8 @@ Issue #80: Tool binding -- tools_config initialization, TOOL_CALL SSE events
 Issue #92: Budget data in SSE events, flush_memory -> StateManager bridge
 Issue #97: Langfuse tracing -- wires create_trace_config + callbacks +
            propagation_context into the astream loop, mirroring CLI parity.
+Issue #105: Workspace-aware task execution -- workspace_root in GraphState,
+            per-task init_tools_config scoping.
 
 Uses LangGraph's astream() to iterate node completions and emit SSE events
 in real time. Runs entirely on the async event loop -- no threading needed.
@@ -13,8 +15,8 @@ Usage:
     from src.api.runner import task_runner
 
     # In POST /tasks handler:
-    task_id = await state_manager.create_task(description)
-    task_runner.submit(task_id, description)
+    task_id = await state_manager.create_task(description, workspace=ws)
+    task_runner.submit(task_id, description, workspace=ws)
 
     # On shutdown:
     await task_runner.shutdown()
@@ -26,6 +28,7 @@ import asyncio
 import logging
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 from ..agents.architect import Blueprint
 from ..orchestrator import (
@@ -101,17 +104,21 @@ class TaskRunner:
         # Fix 6: Track per-task dev tool call baselines for per-pass counting
         self._dev_tool_baselines: dict[str, int] = {}
 
-    def submit(self, task_id: str, description: str) -> None:
-        """Submit a task for background execution."""
+    def submit(self, task_id: str, description: str, workspace: str = "") -> None:
+        """Submit a task for background execution.
+
+        Issue #105: Now accepts workspace parameter, threaded into GraphState
+        and init_tools_config for per-task workspace scoping.
+        """
         if task_id in self._tasks:
             logger.warning("Task %s already running, ignoring duplicate submit", task_id)
             return
 
-        coro = self._run_task(task_id, description)
+        coro = self._run_task(task_id, description, workspace=workspace)
         async_task = asyncio.create_task(coro, name=f"orchestrator-{task_id}")
         self._tasks[task_id] = async_task
         async_task.add_done_callback(lambda t: self._tasks.pop(task_id, None))
-        logger.info("Task %s submitted for background execution", task_id)
+        logger.info("Task %s submitted for background execution (workspace=%s)", task_id, workspace or "default")
 
     async def cancel(self, task_id: str) -> bool:
         """Cancel a running task."""
@@ -137,21 +144,25 @@ class TaskRunner:
     def running_count(self) -> int:
         return len(self._tasks)
 
-    async def _run_task(self, task_id: str, description: str) -> None:
+    async def _run_task(self, task_id: str, description: str, workspace: str = "") -> None:
         """Run the orchestrator via astream() and emit SSE events.
 
-        Issue #97: Now creates a TracingConfig and passes Langfuse
-        callbacks into the astream config, wrapped in propagation_context()
-        for session/tag/metadata grouping. Mirrors the CLI run_task() pattern.
+        Issue #97: Creates TracingConfig and passes Langfuse callbacks.
+        Issue #105: Passes workspace_root into GraphState and init_tools_config.
         """
         from .state import state_manager
 
         start_time = time.time()
         self._dev_tool_baselines[task_id] = 0
 
+        # Issue #105: Resolve workspace for this task.
+        # Falls back to the default WORKSPACE_ROOT if not specified.
+        if workspace:
+            task_workspace = Path(workspace).resolve()
+        else:
+            task_workspace = state_manager.workspace_manager.default_root
+
         # Issue #97: Initialize Langfuse tracing for this task run.
-        # create_trace_config handles missing credentials gracefully
-        # (returns enabled=False) so tracing never crashes a task.
         trace_config = create_trace_config(
             enabled=True,
             task_description=description,
@@ -160,6 +171,7 @@ class TaskRunner:
             metadata={
                 "source": "dashboard",
                 "task_id": task_id,
+                "workspace": str(task_workspace),
                 "max_retries": str(MAX_RETRIES),
                 "token_budget": str(TOKEN_BUDGET),
             },
@@ -168,18 +180,21 @@ class TaskRunner:
         try:
             await self._emit_progress(task_id, "task_started", None, f"Task started: {description[:100]}")
             await self._emit_log(f"[orchestrator] Task accepted: {task_id}")
+            await self._emit_log(f"[orchestrator] Workspace: {task_workspace}")
             await self._emit_log("[orchestrator] Spinning up agent team...")
 
             graph = build_graph()
             workflow = graph.compile()
 
-            tools_config = init_tools_config()
+            # Issue #105: Pass per-task workspace to init_tools_config
+            tools_config = init_tools_config(workspace_root=task_workspace)
             n_tools = len(tools_config.get("configurable", {}).get("tools", []))
             if n_tools > 0:
                 await self._emit_log(f"[orchestrator] {n_tools} tools loaded for agents")
             else:
                 await self._emit_log("[orchestrator] No tools configured (single-shot mode)")
 
+            # Issue #105: workspace_root is now part of GraphState
             initial_state: GraphState = {
                 "task_description": description,
                 "blueprint": None,
@@ -193,6 +208,7 @@ class TaskRunner:
                 "trace": [],
                 "parsed_files": [],
                 "tool_calls_log": [],
+                "workspace_root": str(task_workspace),
             }
 
             stream_config = {
@@ -201,22 +217,18 @@ class TaskRunner:
             }
 
             # Issue #97: Merge Langfuse callbacks into the stream config
-            # so LangChain/LangGraph LLM calls are automatically traced.
             if trace_config.callbacks:
                 stream_config["callbacks"] = trace_config.callbacks
 
             prev_node = None
             prev_tool_count = 0
 
-            # Issue #97: Wrap the entire astream loop in propagation_context()
-            # so Langfuse traces get session_id, tags, and metadata attached.
-            # propagation_context() is a sync contextmanager that sets
-            # contextvars -- safe to use in async code within a single task.
             with trace_config.propagation_context():
                 add_trace_event(
                     trace_config, "orchestrator_start",
                     metadata={
                         "task_preview": description[:200],
+                        "workspace": str(task_workspace),
                         "max_retries": str(MAX_RETRIES),
                         "token_budget": str(TOKEN_BUDGET),
                         "tools_available": str(n_tools),
@@ -255,7 +267,6 @@ class TaskRunner:
                 await self._emit_complete(task_id, final_status.value, f"Task completed in {elapsed:.1f}s -- {final_status.value}")
                 await self._emit_log(f"[orchestrator] Task {task_id} finished: {final_status.value} ({elapsed:.1f}s, {task.budget.tokens_used} tokens, ${task.budget.cost_used:.2f})")
 
-                # Issue #97: Record completion in Langfuse trace
                 add_trace_event(
                     trace_config, "orchestrator_complete",
                     metadata={
@@ -289,8 +300,6 @@ class TaskRunner:
 
         finally:
             self._dev_tool_baselines.pop(task_id, None)
-            # Issue #97: Flush Langfuse client to ensure all trace data
-            # is shipped, even on cancel/error paths.
             trace_config.flush()
 
     async def _handle_node_completion(self, task_id, node_name, node_output, state_manager, prev_node):
@@ -377,7 +386,6 @@ class TaskRunner:
                 await self._emit_log("[sandbox] Validation skipped (no E2B key or no code files)")
 
         elif node_name == "flush_memory":
-            # Issue #92: Bridge flush_memory writes into StateManager for dashboard display.
             flushed = node_output.get("memory_writes_flushed", [])
             if flushed:
                 n_entries = len(flushed)
@@ -469,11 +477,6 @@ class TaskRunner:
         await state_manager.update_agent_status("qa", AgentStatus.IDLE, task_id)
 
     async def _emit_progress(self, task_id, event, agent, detail, task=None):
-        """Emit a task_progress SSE event.
-
-        Issue #92: Now includes budget data when a task reference is available,
-        so the dashboard can update budget displays in real time.
-        """
         try:
             payload = {
                 "task_id": task_id,
