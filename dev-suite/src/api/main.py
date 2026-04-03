@@ -175,7 +175,7 @@ async def create_task(body: CreateTaskRequest, _auth: str | None = Depends(requi
             _error("Invalid PIN for protected workspace.", 403)
 
     task_id = await state_manager.create_task(body.description, workspace=body.workspace)
-    task_runner.submit(task_id, body.description, workspace=body.workspace)
+    task_runner.submit(task_id, body.description, workspace=body.workspace, publish_pr=body.publish_pr)
     return _ok(CreateTaskResponse(task_id=task_id))
 
 

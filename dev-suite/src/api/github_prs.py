@@ -312,8 +312,22 @@ class GitHubPRProvider:
         Each file dict has 'path' and 'content' keys.
         Files are pushed sequentially — each commit builds on the previous.
 
+        Validates all file sizes against GitHub's 100 MB Contents API limit
+        before starting the batch to avoid partial publishes.
+
         Returns True if all files were pushed successfully.
         """
+        # Preflight: validate all file sizes before starting any commits
+        MAX_CONTENT_BYTES = 100 * 1024 * 1024  # 100 MB GitHub Contents API limit
+        for f in files:
+            byte_size = len(f["content"].encode("utf-8"))
+            if byte_size > MAX_CONTENT_BYTES:
+                logger.error(
+                    "File '%s' exceeds GitHub 100 MB limit (%d bytes) — aborting batch",
+                    f["path"], byte_size,
+                )
+                return False
+
         success_count = 0
         for f in files:
             ok = await self.push_file(
