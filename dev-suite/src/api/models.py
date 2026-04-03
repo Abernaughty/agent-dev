@@ -4,6 +4,7 @@ These define the contract between the FastAPI backend and the SvelteKit
 dashboard. All endpoints return an ApiResponse envelope.
 
 Issue #19: Added AuditLogEntry, confidence/sandbox/related_files to MemoryEntryResponse
+Issue #105: Added workspace models, workspace field to CreateTaskRequest/TaskSummary
 """
 
 from __future__ import annotations
@@ -110,6 +111,7 @@ class TaskSummary(BaseModel):
     completed_at: datetime | None = None
     budget: TaskBudget = Field(default_factory=TaskBudget)
     timeline: list[TimelineEvent] = []
+    workspace: str = ""
 
 
 class TaskDetail(TaskSummary):
@@ -276,12 +278,62 @@ class MergePRRequest(BaseModel):
 
 
 class CreateTaskRequest(BaseModel):
+    """Request body for creating a new task.
+
+    Issue #105: workspace is required. The dashboard pre-fills it with
+    WORKSPACE_ROOT, but it must be explicitly sent.
+    """
+
     description: str = Field(..., min_length=1, max_length=2000)
+    workspace: str = Field(
+        ...,
+        min_length=1,
+        description="Target workspace directory (absolute path). "
+        "Must be in the allowed directories list.",
+    )
 
 
 class CreateTaskResponse(BaseModel):
     task_id: str
     status: TaskStatus = TaskStatus.QUEUED
+
+
+# -- Workspace Models (Issue #105) --
+
+
+class WorkspaceInfo(BaseModel):
+    """Workspace directory info as returned by GET /workspaces."""
+
+    path: str
+    is_default: bool = False
+    is_protected: bool = False
+
+
+class AddWorkspaceRequest(BaseModel):
+    """Request body for adding a workspace directory."""
+
+    path: str = Field(..., min_length=1, description="Absolute path to directory")
+
+
+class RemoveWorkspaceRequest(BaseModel):
+    """Request body for removing a workspace directory."""
+
+    path: str = Field(..., min_length=1, description="Absolute path to directory")
+
+
+class VerifyWorkspaceAuthRequest(BaseModel):
+    """Request body for verifying protected workspace PIN."""
+
+    workspace: str = Field(..., min_length=1, description="Workspace path or reference")
+    pin: str = Field(..., min_length=1, description="Admin PIN")
+
+
+class VerifyWorkspaceAuthResponse(BaseModel):
+    """Response for PIN verification."""
+
+    workspace: str
+    authorized: bool
+    is_protected: bool
 
 
 # -- Health --
