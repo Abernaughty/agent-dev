@@ -7,10 +7,12 @@
 	Issue #38: Data Integration — PR4
 	Issue #51: Removed mock mode — SSE-only log streaming
 	Issue #92: Fixed log_line field mismatch (message/level vs text/type)
+	Issue #106: Pass workspace to tasksStore.create()
 -->
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { tasksStore } from '$lib/stores/tasks.svelte.js';
+	import { workspacesStore } from '$lib/stores/workspaces.svelte.js';
 
 	interface Props {
 		height: number;
@@ -117,8 +119,15 @@
 
 		if (text.startsWith('run ') || text.startsWith('task ')) {
 			const desc = text.replace(/^(run|task)\s+/, '');
+			if (!workspacesStore.canCreateTask) {
+				lines = [...lines, { type: 'error', text: '[orchestrator] No workspace selected or workspace requires PIN. Use the Chat panel to select a workspace.' }];
+				return;
+			}
 			lines = [...lines, { type: 'info', text: `[orchestrator] Processing: "${desc}"...` }];
-			const taskId = await tasksStore.create(desc);
+			const options = workspacesStore.isSelectedProtected && workspacesStore.verifiedPin
+				? { pin: workspacesStore.verifiedPin }
+				: undefined;
+			const taskId = await tasksStore.create(desc, workspacesStore.selected, options);
 			if (taskId) {
 				lines = [...lines, { type: 'success', text: `[orchestrator] Task ${taskId} created` }];
 			} else {

@@ -7,7 +7,12 @@ import { apiFetch } from '$lib/api/client.js';
 import type { RequestHandler } from './$types.js';
 
 export const POST: RequestHandler = async ({ request }) => {
-	const body = await request.json();
+	let body: unknown;
+	try {
+		body = await request.json();
+	} catch {
+		return json({ data: null, errors: ['Invalid JSON body'] }, { status: 400 });
+	}
 	const result = await apiFetch<unknown>('/workspaces/verify-auth', {
 		method: 'POST',
 		body: JSON.stringify(body)

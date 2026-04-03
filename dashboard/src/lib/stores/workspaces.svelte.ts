@@ -18,6 +18,8 @@ let error = $state<string | null>(null);
 /** PIN verification state for protected workspaces. */
 let pinVerified = $state(false);
 let pinError = $state<string | null>(null);
+/** Stores the verified PIN so it can be forwarded to task creation. */
+let storedPin = $state<string | null>(null);
 
 export const workspacesStore = {
 	get list() {
@@ -37,6 +39,10 @@ export const workspacesStore = {
 	},
 	get pinError() {
 		return pinError;
+	},
+	/** The verified PIN value for forwarding to task creation. */
+	get verifiedPin(): string | null {
+		return storedPin;
 	},
 
 	/** Whether the currently selected workspace is protected. */
@@ -69,6 +75,7 @@ export const workspacesStore = {
 				// Reset PIN state when workspaces refresh
 				pinVerified = false;
 				pinError = null;
+				storedPin = null;
 			} else {
 				error = body.errors?.[0] ?? 'Failed to fetch workspaces';
 			}
@@ -84,9 +91,10 @@ export const workspacesStore = {
 		selectedPath = path;
 		pinVerified = false;
 		pinError = null;
+		storedPin = null;
 	},
 
-	/** Verify PIN for a protected workspace. */
+	/** Verify PIN for a protected workspace. Stores PIN on success for task creation. */
 	async verifyPin(pin: string): Promise<boolean> {
 		pinError = null;
 		try {
@@ -99,8 +107,11 @@ export const workspacesStore = {
 			if (res.ok && body.data) {
 				const result = body.data as VerifyWorkspaceAuthResponse;
 				pinVerified = result.authorized;
-				if (!result.authorized) {
+				if (result.authorized) {
+					storedPin = pin;
+				} else {
 					pinError = 'Invalid PIN';
+					storedPin = null;
 				}
 				return result.authorized;
 			}
@@ -123,7 +134,7 @@ export const workspacesStore = {
 			const body = await res.json();
 			if (res.ok && body.data) {
 				workspaces = body.data as WorkspaceInfo[];
-				selectedPath = path;
+				this.select(path);
 				return true;
 			}
 			error = body.errors?.[0] ?? 'Failed to add workspace';
@@ -138,8 +149,10 @@ export const workspacesStore = {
 	reset() {
 		workspaces = [];
 		selectedPath = '';
+		loading = false;
 		error = null;
 		pinVerified = false;
 		pinError = null;
+		storedPin = null;
 	}
 };

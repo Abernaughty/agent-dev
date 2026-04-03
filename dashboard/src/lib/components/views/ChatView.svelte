@@ -48,23 +48,36 @@
 		const text = input.trim();
 		if (!text || sending) return;
 
-		// Check workspace is selected and ready
+		const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+		// Check workspace availability and readiness
+		if (workspacesStore.loading) {
+			messages = [...messages, { role: 'event', text: 'Workspaces loading\u2026 please wait.', time: now }];
+			return;
+		}
+		if (workspacesStore.error) {
+			messages = [...messages, { role: 'event', text: `Unable to load workspaces \u2014 ${workspacesStore.error}`, time: now }];
+			return;
+		}
 		if (!workspacesStore.canCreateTask) {
-			const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 			if (!workspacesStore.selected) {
 				messages = [...messages, { role: 'event', text: 'No workspace selected. Choose a workspace above.', time: now }];
 			} else if (workspacesStore.isSelectedProtected && !workspacesStore.pinVerified) {
-				messages = [...messages, { role: 'event', text: 'Protected workspace — enter PIN above before submitting.', time: now }];
+				messages = [...messages, { role: 'event', text: 'Protected workspace \u2014 enter PIN above before submitting.', time: now }];
 			}
 			return;
 		}
 
-		const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 		messages = [...messages, { role: 'user', text, time: now }];
 		input = '';
 		sending = true;
 
-		const taskId = await tasksStore.create(text, workspacesStore.selected);
+		// Forward PIN for protected workspaces
+		const options = workspacesStore.isSelectedProtected && workspacesStore.verifiedPin
+			? { pin: workspacesStore.verifiedPin }
+			: undefined;
+
+		const taskId = await tasksStore.create(text, workspacesStore.selected, options);
 
 		if (taskId) {
 			messages = [
