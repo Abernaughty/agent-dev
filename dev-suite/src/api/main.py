@@ -5,6 +5,7 @@ Issue #35: SSE Event System -- Real-Time Task Streaming
 Issue #50: Full GitHub PR endpoints (read + write)
 Issue #51: Removed mock_data from startup log
 Issue #19: Memory audit log endpoint
+Issue #105: Workspace security endpoints + workspace-aware task creation
 
 Run with:
     uv run --group api uvicorn src.api.main:app --reload --port 8000
@@ -25,6 +26,7 @@ from sse_starlette import EventSourceResponse
 from .auth import require_auth
 from .events import EventType, SSEEvent, event_bus
 from .models import (
+    AddWorkspaceRequest,
     ApiResponse,
     CreatePRRequest,
     CreateTaskRequest,
@@ -36,6 +38,10 @@ from .models import (
     MergePRRequest,
     PostCommentRequest,
     PostReviewRequest,
+    RemoveWorkspaceRequest,
+    VerifyWorkspaceAuthRequest,
+    VerifyWorkspaceAuthResponse,
+    WorkspaceInfo,
 )
 from .state import state_manager
 
@@ -49,7 +55,13 @@ SSE_HEARTBEAT_SECONDS = 15
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     secret_set = bool(os.getenv("API_SECRET"))
-    logger.info("Dev Suite API starting | auth=%s | cors=%s", "enabled" if secret_set else "disabled (dev mode)", _allowed_origins)
+    ws_count = len(state_manager.workspace_manager.list_directories())
+    logger.info(
+        "Dev Suite API starting | auth=%s | cors=%s | workspaces=%d",
+        "enabled" if secret_set else "disabled (dev mode)",
+        _allowed_origins,
+        ws_count,
+    )
     yield
     from .runner import task_runner
     logger.info("Dev Suite API shutting down | running_tasks=%d | sse_subscribers=%d | events_published=%d", task_runner.running_count, event_bus.subscriber_count, event_bus.event_counter)
@@ -61,9 +73,9 @@ async def lifespan(app: FastAPI):
 
 _allowed_origins = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://localhost:4173").split(",")
 
-app = FastAPI(title="Dev Suite API", description="Exposes orchestrator state to the SvelteKit dashboard", version="0.2.0", docs_url="/docs", redoc_url=None, lifespan=lifespan)
+app = FastAPI(title="Dev Suite API", description="Exposes orchestrator state to the SvelteKit dashboard", version="0.3.0", docs_url="/docs", redoc_url=None, lifespan=lifespan)
 
-app.add_middleware(CORSMiddleware, allow_origins=[o.strip() for o in _allowed_origins], allow_credentials=True, allow_methods=["GET", "POST", "PATCH", "OPTIONS"], allow_headers=["Authorization", "Content-Type"])
+app.add_middleware(CORSMiddleware, allow_origins=[o.strip() for o in _allowed_origins], allow_credentials=True, allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"], allow_headers=["Authorization", "Content-Type"])
 
 
 def _ok(data) -> ApiResponse:
@@ -135,9 +147,35 @@ async def get_task(task_id: str, _auth: str | None = Depends(require_auth)):
 
 @app.post("/tasks", response_model=ApiResponse, status_code=201)
 async def create_task(body: CreateTaskRequest, _auth: str | None = Depends(require_auth)):
+    """Create a new task with workspace validation (Issue #105).
+
+    Validates that the workspace is in the allowed directories list.
+    If the workspace is protected, returns 403 (must verify PIN first
+    via POST /workspaces/verify-auth).
+    """
     from .runner import task_runner
-    task_id = await state_manager.create_task(body.description)
-    task_runner.submit(task_id, body.description)
+
+    ws_mgr = state_manager.workspace_manager
+
+    # Validate workspace is in the allowed list
+    if not ws_mgr.is_allowed(body.workspace):
+        _error(
+            f"Workspace '{body.workspace}' is not in the allowed directories list. "
+            f"Add it via POST /workspaces first.",
+            403,
+        )
+
+    # Block writes to protected workspaces without prior auth
+    # (Dashboard sends PIN verification before task creation)
+    if ws_mgr.is_protected(body.workspace):
+        _error(
+            f"Workspace '{body.workspace}' is protected. "
+            f"Verify PIN via POST /workspaces/verify-auth before creating tasks.",
+            403,
+        )
+
+    task_id = await state_manager.create_task(body.description, workspace=body.workspace)
+    task_runner.submit(task_id, body.description, workspace=body.workspace)
     return _ok(CreateTaskResponse(task_id=task_id))
 
 
@@ -164,8 +202,60 @@ async def retry_task(task_id: str, _auth: str | None = Depends(require_auth)):
     from .runner import task_runner
     task = state_manager.get_task(task_id)
     if task:
-        task_runner.submit(task_id, task.description)
+        task_runner.submit(task_id, task.description, workspace=task.workspace)
     return _ok({"task_id": task_id, "status": "queued"})
+
+
+# -- Workspaces (Issue #105) --
+
+@app.get("/workspaces", response_model=ApiResponse)
+async def get_workspaces(_auth: str | None = Depends(require_auth)):
+    """List all allowed workspace directories."""
+    ws_mgr = state_manager.workspace_manager
+    dirs = ws_mgr.list_directories()
+    return _ok([WorkspaceInfo(**d) for d in dirs])
+
+
+@app.post("/workspaces", response_model=ApiResponse, status_code=201)
+async def add_workspace(body: AddWorkspaceRequest, _auth: str | None = Depends(require_auth)):
+    """Add a directory to the allowed workspaces list."""
+    ws_mgr = state_manager.workspace_manager
+    if ws_mgr.add_directory(body.path):
+        dirs = ws_mgr.list_directories()
+        return _ok([WorkspaceInfo(**d) for d in dirs])
+    _error(f"Cannot add workspace '{body.path}' -- does not exist or already added")
+
+
+@app.delete("/workspaces", response_model=ApiResponse)
+async def remove_workspace(body: RemoveWorkspaceRequest, _auth: str | None = Depends(require_auth)):
+    """Remove a directory from the allowed workspaces list."""
+    ws_mgr = state_manager.workspace_manager
+    if ws_mgr.remove_directory(body.path):
+        dirs = ws_mgr.list_directories()
+        return _ok([WorkspaceInfo(**d) for d in dirs])
+    _error(f"Cannot remove workspace '{body.path}' -- not found or is the default root")
+
+
+@app.post("/workspaces/verify-auth", response_model=ApiResponse)
+async def verify_workspace_auth(body: VerifyWorkspaceAuthRequest, _auth: str | None = Depends(require_auth)):
+    """Verify PIN for a protected workspace.
+
+    Returns whether the workspace is protected and whether the PIN is correct.
+    The dashboard calls this before allowing task creation on protected workspaces.
+    """
+    ws_mgr = state_manager.workspace_manager
+    is_protected = ws_mgr.is_protected(body.workspace)
+    authorized = False
+    if is_protected:
+        authorized = ws_mgr.verify_pin(body.pin)
+    else:
+        # Not protected — no PIN needed
+        authorized = True
+    return _ok(VerifyWorkspaceAuthResponse(
+        workspace=body.workspace,
+        authorized=authorized,
+        is_protected=is_protected,
+    ))
 
 
 # -- Memory --
