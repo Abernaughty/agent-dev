@@ -773,7 +773,7 @@ async def _publish_code_async(state: dict) -> dict:
             f"### Acceptance Criteria\n{criteria_block}"
             f"{test_summary}\n\n"
             f"### Files Changed\n"
-            + "\n".join(f"- `{pf['path']}`" for pf in parsed_files)
+            + "\n".join(f"- `{fp['path']}`" for fp in files_payload)
             + "\n\n---\n_Opened automatically by the agent orchestrator._"
         )
 
