@@ -1,14 +1,18 @@
-"""LangGraph orchestrator -- Architect -> Lead Dev -> apply_code -> sandbox -> QA loop.
+"""LangGraph orchestrator -- Architect -> Lead Dev -> apply_code -> sandbox -> QA -> publish loop.
 
 This is the main entry point for the agent workflow.
 Implements the state machine with retry logic, token budgets,
 structured Blueprint passing, human escalation, code application,
-tool binding (issue #80), and memory write-back.
+tool binding (issue #80), memory write-back, and PR publication (#89).
 
 Issue #80: Agent tool binding -- Dev and QA agents can now use
 workspace tools (filesystem_read, filesystem_write, etc.) via
 LangChain's bind_tools() + iterative tool execution loop.
 Tools are passed via RunnableConfig["configurable"]["tools"].
+
+Issue #89: publish_code_node -- After QA passes, creates a branch,
+pushes files, and opens a PR via GitHub REST API. Guard chain skips
+gracefully when GITHUB_TOKEN is missing, no files exist, or user opts out.
 
 Issue #105: Workspace security -- GraphState carries workspace_root,
 apply_code_node uses per-task workspace instead of global env var.
@@ -104,6 +108,11 @@ class GraphState(TypedDict, total=False):
     tool_calls_log: list[dict]
     memory_writes_flushed: list[dict]
     workspace_root: str  # Issue #105: per-task workspace directory
+    # Issue #89: PR publication fields
+    publish_pr: bool  # Whether to create branch + PR after QA passes
+    working_branch: str | None  # Branch created for this task
+    pr_url: str | None  # URL of opened PR
+    pr_number: int | None  # PR number
 
 
 class AgentState(BaseModel):
@@ -122,6 +131,11 @@ class AgentState(BaseModel):
     parsed_files: list[dict] = []
     tool_calls_log: list[dict] = []
     workspace_root: str = ""  # Issue #105
+    # Issue #89
+    publish_pr: bool = True
+    working_branch: str | None = None
+    pr_url: str | None = None
+    pr_number: int | None = None
 
 
 def _get_architect_llm():
@@ -581,58 +595,35 @@ def sandbox_validate_node(state: GraphState) -> dict:
         return {"sandbox_result": None, "trace": trace}
     plan = get_validation_plan(blueprint.target_files)
     trace.append(f"sandbox_validate: {plan.description}")
-
     if plan.strategy == ValidationStrategy.SKIP:
         trace.append("sandbox_validate: no code validation needed -- skipping")
         return {"sandbox_result": None, "trace": trace}
-
     parsed_files = state.get("parsed_files", [])
-
-    if plan.strategy in {
-        ValidationStrategy.SCRIPT_EXEC,
-        ValidationStrategy.TEST_SUITE,
-        ValidationStrategy.LINT_ONLY,
-    }:
+    if plan.strategy in {ValidationStrategy.SCRIPT_EXEC, ValidationStrategy.TEST_SUITE, ValidationStrategy.LINT_ONLY}:
         if not parsed_files:
             trace.append("sandbox_validate: no parsed files available -- skipping")
             return {"sandbox_result": None, "trace": trace}
-
     trace.append(f"sandbox_validate: loading {len(parsed_files)} files into sandbox")
-
     template_label = plan.template or "default"
     trace.append(f"sandbox_validate: strategy={plan.strategy.value}, template={template_label}")
-
     try:
         result = None
         if plan.strategy == ValidationStrategy.SCRIPT_EXEC:
             trace.append(f"sandbox_validate: executing script {plan.script_file}")
-            result = _run_sandbox_script(
-                script_file=plan.script_file,
-                template=plan.template,
-                parsed_files=parsed_files if parsed_files else None,
-            )
+            result = _run_sandbox_script(script_file=plan.script_file, template=plan.template, parsed_files=parsed_files if parsed_files else None)
         elif plan.strategy in {ValidationStrategy.TEST_SUITE, ValidationStrategy.LINT_ONLY}:
-            trace.append(
-                f"sandbox_validate: running {len(plan.commands)} command(s) sequentially"
-            )
-            result = _run_sandbox_tests(
-                commands=plan.commands,
-                template=plan.template,
-                parsed_files=parsed_files if parsed_files else None,
-            )
+            trace.append(f"sandbox_validate: running {len(plan.commands)} command(s) sequentially")
+            result = _run_sandbox_tests(commands=plan.commands, template=plan.template, parsed_files=parsed_files if parsed_files else None)
         else:
             trace.append(f"sandbox_validate: unhandled strategy {plan.strategy.value} -- skipping")
             return {"sandbox_result": None, "trace": trace}
-
         if result is None:
             logger.warning("[SANDBOX] E2B_API_KEY not configured -- sandbox validation SKIPPED.")
             trace.append("sandbox_validate: WARNING -- E2B_API_KEY not configured, sandbox validation skipped")
             return {"sandbox_result": None, "trace": trace}
-
         if result.warnings:
             for w in result.warnings:
                 trace.append(f"sandbox_validate: WARNING -- {w}")
-
         trace.append(f"sandbox_validate: exit_code={result.exit_code}, passed={result.tests_passed}, failed={result.tests_failed}")
         logger.info("[SANDBOX] Validation complete: exit=%d, passed=%s, failed=%s", result.exit_code, result.tests_passed, result.tests_failed)
         return {"sandbox_result": result, "trace": trace}
@@ -678,13 +669,140 @@ def flush_memory_node(state: GraphState) -> dict:
     return {"trace": trace, "memory_writes_flushed": written_entries}
 
 
-def route_after_qa(state: GraphState) -> Literal["flush_memory", "developer", "architect", "__end__"]:
+# -- Publish Code Node (Issue #89) --
+
+
+async def _publish_code_async(state: dict) -> dict:
+    """Push parsed files to a branch and open a PR.
+
+    This is an infrastructure node -- no LLM calls. It uses the
+    GitHubPRProvider directly via httpx for branch creation,
+    file push, and PR opening.
+
+    Guard chain (any condition skips gracefully):
+    1. No GITHUB_TOKEN configured
+    2. publish_pr is False (user opted out)
+    3. No parsed_files in state
+    4. No blueprint in state
+    """
+    from .api.github_prs import github_pr_provider
+
+    trace = list(state.get("trace", []))
+    trace.append("publish_code: starting")
+
+    if not github_pr_provider.configured:
+        trace.append("publish_code: skipped -- no GITHUB_TOKEN configured")
+        logger.info("[PUBLISH] Skipped: no GITHUB_TOKEN")
+        return {"trace": trace}
+
+    publish_pr = state.get("publish_pr", True)
+    if not publish_pr:
+        trace.append("publish_code: skipped -- publish_pr=False (user opted out)")
+        logger.info("[PUBLISH] Skipped: publish_pr=False")
+        return {"trace": trace}
+
+    parsed_files = state.get("parsed_files", [])
+    if not parsed_files:
+        trace.append("publish_code: skipped -- no parsed_files")
+        logger.info("[PUBLISH] Skipped: no parsed_files")
+        return {"trace": trace}
+
+    blueprint = state.get("blueprint")
+    if not blueprint:
+        trace.append("publish_code: skipped -- no blueprint")
+        logger.info("[PUBLISH] Skipped: no blueprint")
+        return {"trace": trace}
+
+    task_id = blueprint.task_id
+    branch_name = f"agent/{task_id}"
+    branch_name = re.sub(r"[^a-zA-Z0-9/_-]", "-", branch_name)
+
+    try:
+        trace.append(f"publish_code: creating branch '{branch_name}'")
+        branch_ok = await github_pr_provider.create_branch(branch_name)
+        if not branch_ok:
+            trace.append("publish_code: FAILED to create branch")
+            logger.error("[PUBLISH] Failed to create branch '%s'", branch_name)
+            return {"trace": trace}
+
+        trace.append(f"publish_code: pushing {len(parsed_files)} file(s)")
+        files_payload = [{"path": pf["path"], "content": pf["content"]} for pf in parsed_files]
+        push_ok = await github_pr_provider.push_files_batch(
+            files=files_payload, branch=branch_name,
+            message=f"feat({task_id}): implement {blueprint.instructions[:60]}",
+        )
+        if not push_ok:
+            trace.append("publish_code: FAILED to push files")
+            logger.error("[PUBLISH] Failed to push files to '%s'", branch_name)
+            return {"working_branch": branch_name, "trace": trace}
+
+        criteria_lines = [f"- [x] {ac}" for ac in blueprint.acceptance_criteria]
+        criteria_block = "\n".join(criteria_lines) if criteria_lines else "_No criteria specified._"
+
+        sandbox_result = state.get("sandbox_result")
+        test_summary = ""
+        if sandbox_result is not None:
+            passed = getattr(sandbox_result, "tests_passed", None)
+            failed = getattr(sandbox_result, "tests_failed", None)
+            if passed is not None or failed is not None:
+                test_summary = f"\n\n### Test Results\n- Passed: {passed or 0}\n- Failed: {failed or 0}\n"
+
+        pr_body = (
+            f"## Task: `{task_id}`\n\n"
+            f"{blueprint.instructions}\n\n"
+            f"### Acceptance Criteria\n{criteria_block}"
+            f"{test_summary}\n\n"
+            f"### Files Changed\n"
+            + "\n".join(f"- `{pf['path']}`" for pf in parsed_files)
+            + "\n\n---\n_Opened automatically by the agent orchestrator._"
+        )
+
+        pr_title = f"feat({task_id}): {blueprint.instructions[:80]}"
+        if len(blueprint.instructions) > 80:
+            pr_title = pr_title[:83] + "..."
+
+        trace.append("publish_code: opening PR")
+        pr_result = await github_pr_provider.create_pr(
+            head=branch_name, base="main", title=pr_title, body=pr_body,
+        )
+
+        if pr_result:
+            trace.append(f"publish_code: PR #{pr_result.number} opened -> {pr_result.id}")
+            logger.info("[PUBLISH] PR #%d opened: %s", pr_result.number, pr_title)
+            return {
+                "working_branch": branch_name,
+                "pr_url": f"https://github.com/{github_pr_provider.owner}/{github_pr_provider.repo}/pull/{pr_result.number}",
+                "pr_number": pr_result.number,
+                "trace": trace,
+            }
+        else:
+            trace.append("publish_code: FAILED to open PR (files pushed to branch)")
+            logger.error("[PUBLISH] Failed to open PR (files are on branch '%s')", branch_name)
+            return {"working_branch": branch_name, "trace": trace}
+
+    except Exception as e:
+        trace.append(f"publish_code: error -- {type(e).__name__}: {e}")
+        logger.error("[PUBLISH] Unexpected error: %s", e, exc_info=True)
+        return {"trace": trace}
+
+
+def publish_code_node(state: GraphState) -> dict:
+    """Push files to GitHub branch and open PR after QA passes.
+
+    Issue #89: This is an infrastructure node (no LLM calls).
+    Runs between QA-pass and flush_memory in the graph.
+    Uses _run_async() to bridge sync node execution to async GitHub API.
+    """
+    return _run_async(_publish_code_async(state))
+
+
+def route_after_qa(state: GraphState) -> Literal["publish_code", "flush_memory", "developer", "architect", "__end__"]:
     status = state.get("status", WorkflowStatus.FAILED)
     retry_count = state.get("retry_count", 0)
     tokens_used = state.get("tokens_used", 0)
     logger.info("[ROUTER] status=%s, retry_count=%d, tokens_used=%d, max_retries=%d, token_budget=%d", status, retry_count, tokens_used, MAX_RETRIES, TOKEN_BUDGET)
     if status == WorkflowStatus.PASSED:
-        return "flush_memory"
+        return "publish_code"
     if status == WorkflowStatus.FAILED:
         return END
     if retry_count >= MAX_RETRIES:
@@ -703,6 +821,7 @@ def build_graph() -> StateGraph:
     graph.add_node("apply_code", apply_code_node)
     graph.add_node("sandbox_validate", sandbox_validate_node)
     graph.add_node("qa", qa_node)
+    graph.add_node("publish_code", publish_code_node)
     graph.add_node("flush_memory", flush_memory_node)
     graph.add_edge(START, "architect")
     graph.add_edge("architect", "developer")
@@ -710,6 +829,7 @@ def build_graph() -> StateGraph:
     graph.add_edge("apply_code", "sandbox_validate")
     graph.add_edge("sandbox_validate", "qa")
     graph.add_conditional_edges("qa", route_after_qa)
+    graph.add_edge("publish_code", "flush_memory")
     graph.add_edge("flush_memory", END)
     return graph
 
@@ -751,7 +871,8 @@ def run_task(task_description, enable_tracing=True, session_id=None, tags=None):
     trace_config = create_trace_config(enabled=enable_tracing, task_description=task_description, session_id=session_id, tags=tags or ["orchestrator"], metadata={"max_retries": str(MAX_RETRIES), "token_budget": str(TOKEN_BUDGET)})
     workflow = create_workflow()
     tools_config = init_tools_config()
-    initial_state: GraphState = {"task_description": task_description, "blueprint": None, "generated_code": "", "failure_report": None, "status": WorkflowStatus.PLANNING, "retry_count": 0, "tokens_used": 0, "error_message": "", "memory_context": [], "memory_writes": [], "trace": [], "sandbox_result": None, "parsed_files": [], "tool_calls_log": []}
+    publish_pr = bool(os.getenv("GITHUB_TOKEN"))
+    initial_state: GraphState = {"task_description": task_description, "blueprint": None, "generated_code": "", "failure_report": None, "status": WorkflowStatus.PLANNING, "retry_count": 0, "tokens_used": 0, "error_message": "", "memory_context": [], "memory_writes": [], "trace": [], "sandbox_result": None, "parsed_files": [], "tool_calls_log": [], "publish_pr": publish_pr}
     invoke_config = {"recursion_limit": 25, **tools_config}
     if trace_config.callbacks:
         invoke_config["callbacks"] = trace_config.callbacks
