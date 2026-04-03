@@ -19,6 +19,9 @@ chroma_data/
 # Run logs (written by CLI, consumed by dashboard)
 runs/
 
+# Workspace config (user-local allowed directories — Issue #105)
+workspace-config.json
+
 # IDE
 .vscode/
 .idea/
