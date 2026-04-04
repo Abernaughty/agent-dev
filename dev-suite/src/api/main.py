@@ -8,7 +8,16 @@ Issue #19: Memory audit log endpoint
 Issue #105: Workspace security endpoints + workspace-aware task creation
 
 Run with:
-    uv run --group api uvicorn src.api.main:app --reload --port 8000
+    uv run --group api uvicorn src.api.main:app --reload --port 8000 \
+        --reload-exclude .venv --reload-exclude workspace \
+        --reload-exclude __pycache__ --reload-exclude chroma_data \
+        --reload-exclude node_modules --reload-exclude '*.pyc'
+
+IMPORTANT: The --reload-exclude flags are critical. Without them, agent
+file writes to the workspace (or SDK imports touching .venv/) will
+trigger a server restart, killing active tasks and severing SSE streams.
+See: ERR_INCOMPLETE_CHUNKED_ENCODING / "ASGI callable returned without
+completing response" in uvicorn logs.
 """
 
 from __future__ import annotations
@@ -54,12 +63,15 @@ SSE_HEARTBEAT_SECONDS = 15
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     secret_set = bool(os.getenv("API_SECRET"))
-    ws_count = len(state_manager.workspace_manager.list_directories())
+    ws_mgr = state_manager.workspace_manager
+    ws_count = len(ws_mgr.list_directories())
+    ws_root = ws_mgr.default_root
     logger.info(
-        "Dev Suite API starting | auth=%s | cors=%s | workspaces=%d",
+        "Dev Suite API starting | auth=%s | cors=%s | workspaces=%d | workspace_root=%s",
         "enabled" if secret_set else "disabled (dev mode)",
         _allowed_origins,
         ws_count,
+        ws_root,
     )
     yield
     from .runner import task_runner

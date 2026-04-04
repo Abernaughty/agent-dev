@@ -40,6 +40,48 @@ _AGENT_DEV_PATTERNS = [
 ]
 
 
+def _is_devserver_directory(path: Path) -> bool:
+    """Detect if a directory is likely the dev-suite source tree.
+
+    When WORKSPACE_ROOT points inside dev-suite/, agent file writes
+    trigger uvicorn --reload, killing the server mid-task and severing
+    the SSE stream (ERR_INCOMPLETE_CHUNKED_ENCODING).
+
+    Detection heuristic: directory contains both pyproject.toml and src/.
+    """
+    return (path / "pyproject.toml").is_file() and (path / "src").is_dir()
+
+
+def _safe_workspace_root(raw: str) -> Path:
+    """Resolve WORKSPACE_ROOT with safety check.
+
+    If the resolved path IS the dev-suite directory (contains pyproject.toml
+    + src/), auto-redirect to ../workspace to prevent uvicorn --reload
+    crashes when agents write files during task execution.
+    """
+    resolved = Path(raw).resolve()
+
+    if _is_devserver_directory(resolved):
+        safe_root = resolved.parent / "workspace"
+        logger.warning(
+            "WORKSPACE_ROOT=%s points to the dev-suite source tree! "
+            "Agent file writes here will trigger uvicorn --reload and kill "
+            "running tasks. Redirecting to: %s\n"
+            "  Fix: set WORKSPACE_ROOT=../workspace in your .env file.",
+            resolved,
+            safe_root,
+        )
+        safe_root.mkdir(parents=True, exist_ok=True)
+        return safe_root
+
+    # Ensure the directory exists
+    if not resolved.is_dir():
+        resolved.mkdir(parents=True, exist_ok=True)
+        logger.info("Created workspace directory: %s", resolved)
+
+    return resolved
+
+
 class WorkspaceManager:
     """Manages the allowed-directories registry and protected workspace auth.
 
@@ -88,18 +130,14 @@ class WorkspaceManager:
 
         Env vars:
             WORKSPACE_ROOT: Default workspace directory (required).
+                IMPORTANT: Must point OUTSIDE dev-suite/ to prevent
+                uvicorn --reload from restarting when agents write files.
             PROTECTED_WORKSPACES: Comma-separated list of protected
                 workspace patterns — literal matches, not globs or regex.
             WORKSPACE_PROTECTED_PIN: bcrypt hash of the admin PIN.
         """
-        raw_root = os.getenv("WORKSPACE_ROOT", ".")
-        default_root = Path(raw_root).resolve()
-
-        if not default_root.is_dir():
-            logger.warning(
-                "WORKSPACE_ROOT does not exist or is not a directory: %s",
-                default_root,
-            )
+        raw_root = os.getenv("WORKSPACE_ROOT", "../workspace")
+        default_root = _safe_workspace_root(raw_root)
 
         raw_protected = os.getenv("PROTECTED_WORKSPACES", "")
         protected_patterns = [
