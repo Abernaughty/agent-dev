@@ -358,3 +358,23 @@ class HealthResponse(BaseModel):
     agents: int = 3
     active_tasks: int = 0
     sse_subscribers: int = 0
+
+
+# -- Filesystem Browse Models (Issue #106 Phase A) --
+
+
+class BrowseDirectoryEntry(BaseModel):
+    """A single directory entry returned by the filesystem browser."""
+
+    name: str
+    path: str
+    has_children: bool = False
+    is_project: bool = False
+
+
+class BrowseDirectoryResponse(BaseModel):
+    """Response for the filesystem browse endpoint."""
+
+    current_path: str
+    parent_path: str | None = None
+    entries: list[BrowseDirectoryEntry] = []

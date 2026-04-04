@@ -8,6 +8,7 @@
  * Issue #19: Added confidence, sandbox, related_files to MemoryEntry; AuditLogEntry
  * Issue #85: Added tool_call SSE event type and ToolCallEvent interface
  * Issue #106: Added workspace types, updated CreateTaskRequest
+ * Issue #106 Phase A: Added BrowseDirectoryEntry, BrowseDirectoryResponse
  */
 
 // -- Envelope --
@@ -236,4 +237,19 @@ export interface HealthResponse {
 	agents: number;
 	active_tasks: number;
 	sse_subscribers: number;
+}
+
+// -- Filesystem Browse (Issue #106 Phase A) --
+
+export interface BrowseDirectoryEntry {
+	name: string;
+	path: string;
+	has_children: boolean;
+	is_project: boolean;
+}
+
+export interface BrowseDirectoryResponse {
+	current_path: string;
+	parent_path: string | null;
+	entries: BrowseDirectoryEntry[];
 }

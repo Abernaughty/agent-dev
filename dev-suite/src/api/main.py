@@ -6,6 +6,7 @@ Issue #50: Full GitHub PR endpoints (read + write)
 Issue #51: Removed mock_data from startup log
 Issue #19: Memory audit log endpoint
 Issue #105: Workspace security endpoints + workspace-aware task creation
+Issue #106: Filesystem browse endpoint for directory picker
 
 Run with:
     uv run --group api uvicorn src.api.main:app --reload --port 8000 \
@@ -25,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from pathlib import Path
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
@@ -37,6 +39,8 @@ from .events import EventType, SSEEvent, event_bus
 from .models import (
     AddWorkspaceRequest,
     ApiResponse,
+    BrowseDirectoryEntry,
+    BrowseDirectoryResponse,
     CreatePRRequest,
     CreateTaskRequest,
     CreateTaskResponse,
@@ -373,3 +377,75 @@ async def merge_pr(pr_number: int, body: MergePRRequest, _auth: str | None = Dep
     if not success:
         _error(f"Failed to merge PR #{pr_number} -- check mergeable status and permissions", 502)
     return _ok({"pr_number": pr_number, "merged": True, "method": body.method})
+
+
+# -- Filesystem Browse (Issue #106 Phase A) --
+
+# Project marker files — if any exist in a directory, it's flagged as a project.
+_PROJECT_MARKERS = frozenset({
+    ".git", "package.json", "pyproject.toml", "Cargo.toml",
+    "go.mod", "pom.xml", "build.gradle", "Makefile",
+})
+
+
+@app.get("/filesystem/browse", response_model=ApiResponse)
+async def browse_filesystem(
+    path: str = Query("", description="Directory to list. Defaults to user home."),
+    show_hidden: bool = Query(False, description="Include hidden directories (.-prefix)"),
+    _auth: str | None = Depends(require_auth),
+):
+    """Browse the local filesystem for directory selection.
+
+    Returns subdirectories at the given path with metadata useful for
+    the workspace selector UI: whether each dir has children and
+    whether it appears to be a project root.
+
+    Issue #106 Phase A: directory picker for workspace selector.
+    """
+    target = Path(path).expanduser().resolve() if path else Path.home()
+
+    if not target.is_dir():
+        _error(f"Not a directory: {target}", 400)
+
+    parent_path: str | None = None
+    if target != target.parent:
+        parent_path = str(target.parent)
+
+    entries: list[BrowseDirectoryEntry] = []
+    try:
+        for child in sorted(target.iterdir(), key=lambda p: p.name.lower()):
+            if not child.is_dir():
+                continue
+            if not show_hidden and child.name.startswith("."):
+                continue
+            try:
+                # Detect project markers
+                child_contents = set(c.name for c in child.iterdir()) if child.is_dir() else set()
+                is_project = bool(child_contents & _PROJECT_MARKERS)
+                has_children = any(
+                    c.is_dir() and (show_hidden or not c.name.startswith("."))
+                    for c in child.iterdir()
+                    if c.is_dir()
+                )
+            except PermissionError:
+                # Can't read inside — still list the entry
+                is_project = False
+                has_children = False
+
+            entries.append(BrowseDirectoryEntry(
+                name=child.name,
+                path=str(child),
+                has_children=has_children,
+                is_project=is_project,
+            ))
+    except PermissionError:
+        _error(f"Permission denied: {target}", 403)
+
+    # Sort: projects first, then alphabetical
+    entries.sort(key=lambda e: (not e.is_project, e.name.lower()))
+
+    return _ok(BrowseDirectoryResponse(
+        current_path=str(target),
+        parent_path=parent_path,
+        entries=entries,
+    ))
