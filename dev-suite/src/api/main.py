@@ -26,8 +26,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from pathlib import Path
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
@@ -419,14 +419,14 @@ async def browse_filesystem(
             if not show_hidden and child.name.startswith("."):
                 continue
             try:
-                # Detect project markers
-                child_contents = set(c.name for c in child.iterdir()) if child.is_dir() else set()
-                is_project = bool(child_contents & _PROJECT_MARKERS)
-                has_children = any(
-                    c.is_dir() and (show_hidden or not c.name.startswith("."))
-                    for c in child.iterdir()
-                    if c.is_dir()
-                )
+                # Single pass: detect project markers and visible subdirectories
+                child_names: set[str] = set()
+                has_children = False
+                for c in child.iterdir():
+                    child_names.add(c.name)
+                    if not has_children and c.is_dir() and (show_hidden or not c.name.startswith(".")):
+                        has_children = True
+                is_project = bool(child_names & _PROJECT_MARKERS)
             except (PermissionError, FileNotFoundError, NotADirectoryError):
                 # Unreadable or transient child; skip it.
                 continue
@@ -439,6 +439,8 @@ async def browse_filesystem(
             ))
     except PermissionError:
         _error(f"Permission denied: {target}", 403)
+    except (FileNotFoundError, NotADirectoryError):
+        _error(f"Not a directory: {target}", 404)
 
     # Sort: projects first, then alphabetical
     entries.sort(key=lambda e: (not e.is_project, e.name.lower()))
