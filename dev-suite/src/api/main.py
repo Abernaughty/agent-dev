@@ -427,10 +427,9 @@ async def browse_filesystem(
                     for c in child.iterdir()
                     if c.is_dir()
                 )
-            except PermissionError:
-                # Can't read inside — still list the entry
-                is_project = False
-                has_children = False
+            except (PermissionError, FileNotFoundError, NotADirectoryError):
+                # Unreadable or transient child; skip it.
+                continue
 
             entries.append(BrowseDirectoryEntry(
                 name=child.name,

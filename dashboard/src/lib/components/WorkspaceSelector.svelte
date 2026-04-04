@@ -30,6 +30,7 @@
 	let browseEntries = $state<BrowseEntry[]>([]);
 	let browseLoading = $state(false);
 	let browseError = $state<string | null>(null);
+	let browseUnavailable = $state(false);
 
 	interface BrowseEntry {
 		name: string;
@@ -106,6 +107,7 @@
 		browsePath = '';
 		browseParent = null;
 		browseError = null;
+		browseUnavailable = false;
 		browseLoading = false;
 	}
 
@@ -144,6 +146,9 @@
 
 	async function openBrowseMode() {
 		browseMode = true;
+		browsePath = '';
+		browseParent = null;
+		browseEntries = [];
 		addDirError = null;
 		browseError = null;
 		await fetchBrowse('');
@@ -151,6 +156,10 @@
 
 	async function fetchBrowse(path: string) {
 		browseLoading = true;
+		browseUnavailable = false;
+		browsePath = '';
+		browseParent = null;
+		browseEntries = [];
 		browseError = null;
 		try {
 			const params = new URLSearchParams();
@@ -165,7 +174,8 @@
 				browseError = body.errors?.[0] ?? 'Failed to browse directory';
 			}
 		} catch (err) {
-			browseError = err instanceof Error ? err.message : 'Network error';
+			browseUnavailable = true;
+			browseError = null;
 		} finally {
 			browseLoading = false;
 		}
@@ -299,6 +309,8 @@
 					<div class="browse-list">
 						{#if browseLoading}
 							<div class="browse-status">Loading…</div>
+						{:else if browseUnavailable}
+							<div class="browse-status">Browser unavailable — use "Type path" below.</div>
 						{:else if browseError}
 							<div class="browse-status error">{browseError}</div>
 						{:else if browseEntries.length === 0}
@@ -331,7 +343,7 @@
 
 					<!-- Browse actions -->
 					<div class="browse-actions">
-						<button class="browse-select" onclick={selectBrowsedDir} disabled={!browsePath}>
+						<button class="browse-select" onclick={selectBrowsedDir} disabled={!browsePath || browseLoading || !!browseError || browseUnavailable}>
 							Select this directory
 						</button>
 						<button class="browse-text-btn" onclick={() => { browseMode = false; requestAnimationFrame(() => addInputEl?.focus()); }}>
