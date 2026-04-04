@@ -6,12 +6,12 @@ Issue #50: Full GitHub PR endpoints (read + write)
 Issue #51: Removed mock_data from startup log
 Issue #19: Memory audit log endpoint
 Issue #105: Workspace security endpoints + workspace-aware task creation
-Issue #106: Filesystem browse endpoint for directory picker
+Issue #106: Filesystem browse endpoint + Planner session endpoints
 
 Run with:
-    uv run --group api uvicorn src.api.main:app --reload --port 8000 \
-        --reload-exclude .venv --reload-exclude workspace \
-        --reload-exclude __pycache__ --reload-exclude chroma_data \
+    uv run --group api uvicorn src.api.main:app --reload --port 8000 \\
+        --reload-exclude .venv --reload-exclude workspace \\
+        --reload-exclude __pycache__ --reload-exclude chroma_data \\
         --reload-exclude node_modules --reload-exclude '*.pyc'
 
 IMPORTANT: The --reload-exclude flags are critical. Without them, agent
@@ -35,7 +35,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette import EventSourceResponse
 
 from .auth import require_auth
-from .events import SSEEvent, event_bus
+from .events import EventType, SSEEvent, event_bus
 from .models import (
     AddWorkspaceRequest,
     ApiResponse,
@@ -49,6 +49,13 @@ from .models import (
     MemoryStatus,
     MemoryTierEnum,
     MergePRRequest,
+    PlannerChecklistItemResponse,
+    PlannerChecklistResponse,
+    PlannerMessageRequest,
+    PlannerSessionResponse,
+    PlannerStartRequest,
+    PlannerSubmitResponse,
+    PlannerTaskSpecResponse,
     PostCommentRequest,
     PostReviewRequest,
     VerifyWorkspaceAuthRequest,
@@ -283,6 +290,223 @@ async def verify_workspace_auth(body: VerifyWorkspaceAuthRequest, _auth: str | N
         authorized=authorized,
         is_protected=is_protected,
     ))
+
+
+# -- Planner (Issue #106 Phase B) --
+
+@app.post("/tasks/plan", response_model=ApiResponse, status_code=201)
+async def start_planner_session(
+    body: PlannerStartRequest,
+    _auth: str | None = Depends(require_auth),
+):
+    """Start a new Planner conversation session.
+
+    Validates workspace, runs auto-inference on project files,
+    and creates a session with pre-populated languages/frameworks.
+    Returns the session ID and initial checklist state.
+    """
+    from ..agents.planner import (
+        create_planner_session,
+        infer_workspace_stack,
+        planner_sessions,
+    )
+
+    ws_mgr = state_manager.workspace_manager
+
+    # Validate workspace
+    if not ws_mgr.is_allowed(body.workspace):
+        _error(
+            f"Workspace '{body.workspace}' is not in the allowed directories list.",
+            403,
+        )
+
+    # Protected workspace check
+    if ws_mgr.is_protected(body.workspace):
+        if not body.pin:
+            _error(
+                f"Workspace '{body.workspace}' is protected. Provide 'pin'.",
+                403,
+            )
+        if not ws_mgr.verify_pin(body.pin):
+            _error("Invalid PIN for protected workspace.", 403)
+
+    # Auto-infer languages/frameworks
+    try:
+        workspace_path = ws_mgr.resolve_workspace(body.workspace)
+        stack = infer_workspace_stack(workspace_path)
+    except (ValueError, OSError) as e:
+        logger.warning("Auto-inference failed for %s: %s", body.workspace, e)
+        stack = {"languages": [], "frameworks": []}
+
+    # Create session
+    session = create_planner_session(
+        workspace=body.workspace,
+        languages=stack["languages"],
+        frameworks=stack["frameworks"],
+    )
+    planner_sessions.create(session)
+
+    # Build response
+    resp = _planner_session_to_response(session)
+    resp.message = session.messages[0].content if session.messages else ""
+
+    logger.info(
+        "Planner session started: %s (workspace=%s, languages=%s, frameworks=%s)",
+        session.session_id,
+        body.workspace,
+        stack["languages"],
+        stack["frameworks"],
+    )
+
+    return _ok(resp)
+
+
+@app.post("/tasks/plan/{session_id}/message", response_model=ApiResponse)
+async def send_planner_msg(
+    session_id: str,
+    body: PlannerMessageRequest,
+    _auth: str | None = Depends(require_auth),
+):
+    """Send a message to the Planner agent in an existing session.
+
+    The Planner validates the task against the readiness checklist,
+    extracts TaskSpec fields from the conversation, and responds
+    with guidance on missing information.
+    """
+    from ..agents.planner import planner_sessions, send_planner_message
+
+    session = planner_sessions.get(session_id)
+    if not session:
+        _error(f"Planner session '{session_id}' not found or expired.", 404)
+        return  # unreachable, but makes type checker happy
+
+    if session.submitted:
+        _error("Session already submitted. Start a new session.", 409)
+        return
+
+    try:
+        planner_resp = await send_planner_message(session, body.message)
+    except Exception as e:
+        logger.error("Planner LLM call failed: %s", e, exc_info=True)
+        _error(f"Planner failed: {e}", 502)
+        return
+
+    # Emit SSE event for dashboard
+    await event_bus.publish(SSEEvent(
+        type=EventType.PLANNER_MESSAGE,
+        data={
+            "session_id": session_id,
+            "message": planner_resp.message,
+            "ready": planner_resp.ready,
+            "warnings": planner_resp.warnings,
+        },
+    ))
+
+    # Build response
+    resp = _planner_session_to_response(session)
+    resp.message = planner_resp.message
+    resp.ready = planner_resp.ready
+    resp.warnings = planner_resp.warnings
+
+    return _ok(resp)
+
+
+@app.post("/tasks/plan/{session_id}/submit", response_model=ApiResponse)
+async def submit_planner_session(
+    session_id: str,
+    _auth: str | None = Depends(require_auth),
+):
+    """Submit a Planner session to the Architect.
+
+    Converts the TaskSpec into a task description and creates a task
+    via the normal POST /tasks flow. The Planner session is marked
+    as submitted and cannot be reused.
+
+    Allows submission even if recommended fields are missing (user
+    autonomy), but blocks if required fields are incomplete.
+    """
+    from ..agents.planner import build_checklist, planner_sessions
+    from .runner import task_runner
+
+    session = planner_sessions.get(session_id)
+    if not session:
+        _error(f"Planner session '{session_id}' not found or expired.", 404)
+        return
+
+    if session.submitted:
+        _error("Session already submitted.", 409)
+        return
+
+    # Re-validate checklist
+    checklist = build_checklist(session.task_spec)
+    if not checklist.required_satisfied:
+        missing = checklist.missing_required
+        _error(
+            f"Task is not ready. Missing required fields: {', '.join(missing)}",
+            422,
+        )
+        return
+
+    # Build description from TaskSpec
+    description = session.task_spec.to_description()
+    workspace = session.task_spec.workspace
+
+    # Create task via existing flow
+    task_id = await state_manager.create_task(description, workspace=workspace)
+    task_runner.submit(task_id, description, workspace=workspace)
+
+    # Mark session as submitted
+    session.submitted = True
+
+    logger.info(
+        "Planner session %s submitted as task %s (workspace=%s)",
+        session_id,
+        task_id,
+        workspace,
+    )
+
+    return _ok(PlannerSubmitResponse(
+        session_id=session_id,
+        task_id=task_id,
+        description=description,
+    ))
+
+
+def _planner_session_to_response(session) -> PlannerSessionResponse:
+    """Convert internal PlannerSession to API response model."""
+    from ..agents.planner import build_checklist
+
+    checklist = build_checklist(session.task_spec)
+
+    return PlannerSessionResponse(
+        session_id=session.session_id,
+        task_spec=PlannerTaskSpecResponse(
+            workspace=session.task_spec.workspace,
+            objective=session.task_spec.objective,
+            languages=session.task_spec.languages,
+            frameworks=session.task_spec.frameworks,
+            output_type=session.task_spec.output_type,
+            acceptance_criteria=session.task_spec.acceptance_criteria,
+            constraints=session.task_spec.constraints,
+            related_files=session.task_spec.related_files,
+        ),
+        checklist=PlannerChecklistResponse(
+            items=[
+                PlannerChecklistItemResponse(
+                    field=item.field,
+                    priority=item.priority.value,
+                    satisfied=item.satisfied,
+                    auto_inferred=item.auto_inferred,
+                    value=item.value,
+                )
+                for item in checklist.items
+            ],
+            required_satisfied=checklist.required_satisfied,
+            has_warnings=checklist.has_warnings,
+            missing_required=checklist.missing_required,
+            missing_recommended=checklist.missing_recommended,
+        ),
+    )
 
 
 # -- Memory --
