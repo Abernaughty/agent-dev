@@ -7,13 +7,9 @@ for unit tests.
 
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
 from src.orchestrator import WorkflowStatus
-from src.tools.code_parser import ParsedFile
 
 
 class TestApplyCodeNode:

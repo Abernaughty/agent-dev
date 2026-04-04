@@ -14,8 +14,6 @@ Issue #95: Updated for ValidationStrategy dispatch.
 
 from unittest.mock import patch
 
-import pytest
-
 from src.agents.architect import Blueprint
 from src.orchestrator import (
     GraphState,

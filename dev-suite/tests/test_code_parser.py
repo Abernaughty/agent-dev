@@ -4,8 +4,6 @@ Covers: multi-file parsing, single-file fallback, edge cases,
 path validation, security boundaries, and markdown fence stripping.
 """
 
-import os
-from pathlib import Path
 
 import pytest
 
@@ -17,7 +15,6 @@ from src.tools.code_parser import (
     parse_generated_code,
     validate_paths_for_workspace,
 )
-
 
 # -- _normalize_path tests --
 

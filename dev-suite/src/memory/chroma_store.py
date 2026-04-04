@@ -20,7 +20,6 @@ from chromadb.api import ClientAPI
 from .protocol import (
     L0_DISCOVERED_TTL,
     L2_TTL,
-    MemoryEntry,
     MemoryQueryResult,
     MemoryTier,
 )

@@ -41,15 +41,13 @@ from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel
 
 from .agents.architect import Blueprint
-from .agents.qa import FailureReport, FailureType
+from .agents.qa import FailureReport
 from .memory.factory import create_memory_store
-from .memory.protocol import MemoryQueryResult, MemoryStore
+from .memory.protocol import MemoryStore
 from .memory.summarizer import summarize_writes_sync
 from .sandbox.e2b_runner import E2BRunner, SandboxResult
 from .sandbox.validation_commands import (
-    ValidationPlan,
     ValidationStrategy,
-    format_validation_summary,
     get_validation_plan,
 )
 from .tools.code_parser import (

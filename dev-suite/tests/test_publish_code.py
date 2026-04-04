@@ -7,8 +7,6 @@ unittest.mock.patch on the GitHubPRProvider methods.
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
 from src.agents.architect import Blueprint
 from src.orchestrator import GraphState, WorkflowStatus, publish_code_node
 
@@ -230,7 +228,7 @@ class TestPublishCodeGraphIntegration:
 
     def test_route_after_qa_budget_exhausted_to_flush(self):
         """Budget exhaustion routes to flush_memory (no PR)."""
-        from src.orchestrator import route_after_qa, MAX_RETRIES
+        from src.orchestrator import MAX_RETRIES, route_after_qa
 
         state: GraphState = {
             "status": WorkflowStatus.REVIEWING,

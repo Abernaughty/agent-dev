@@ -41,7 +41,6 @@ from .models import (
     PRReview,
     PRStatus,
     PRSummary,
-    PRTestResults,
 )
 
 logger = logging.getLogger(__name__)

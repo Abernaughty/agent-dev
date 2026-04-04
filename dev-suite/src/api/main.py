@@ -33,7 +33,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette import EventSourceResponse
 
 from .auth import require_auth
-from .events import EventType, SSEEvent, event_bus
+from .events import SSEEvent, event_bus
 from .models import (
     AddWorkspaceRequest,
     ApiResponse,

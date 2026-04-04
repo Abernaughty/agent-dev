@@ -4,24 +4,22 @@ Unit tests verify graph construction, routing logic, state management,
 and memory_writes accumulation without calling real LLMs.
 """
 
-import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
+from src.agents.architect import Blueprint
+from src.agents.qa import FailureReport
 from src.orchestrator import (
+    MAX_RETRIES,
+    TOKEN_BUDGET,
     AgentState,
     GraphState,
     WorkflowStatus,
+    _infer_module,
     build_graph,
     create_workflow,
-    route_after_qa,
     flush_memory_node,
-    _infer_module,
-    MAX_RETRIES,
-    TOKEN_BUDGET,
+    route_after_qa,
 )
-from src.agents.architect import Blueprint
-from src.agents.qa import FailureReport
-
 
 # -- Graph Construction Tests --
 

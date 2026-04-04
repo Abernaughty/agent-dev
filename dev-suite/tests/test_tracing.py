@@ -20,8 +20,6 @@ import os
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from src.tracing import (
     TracingConfig,
     _is_langfuse_configured,
@@ -29,7 +27,6 @@ from src.tracing import (
     create_trace_config,
     redact_secrets,
 )
-
 
 # ============================================================
 # Secret redaction
