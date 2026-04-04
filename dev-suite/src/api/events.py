@@ -2,6 +2,7 @@
 
 Issue #35: SSE Event System -- Real-Time Task Streaming
 Issue #80: Added TOOL_CALL event type for agent tool usage tracking
+Issue #106: Added PLANNER_MESSAGE event type for Planner agent responses
 
 The EventBus is a singleton that LangGraph nodes publish events to.
 Connected SSE clients each get their own asyncio.Queue for fan-out.
@@ -51,6 +52,7 @@ class EventType(str, Enum):
     LOG_LINE = "log_line"
     QA_ESCALATION = "qa_escalation"
     TOOL_CALL = "tool_call"
+    PLANNER_MESSAGE = "planner_message"  # Issue #106: Planner agent responses
 
 
 class SSEEvent(BaseModel):
