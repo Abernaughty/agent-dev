@@ -26,6 +26,16 @@ import time
 import uuid
 from datetime import datetime, timezone
 
+# CRITICAL: load_dotenv() MUST be called before WorkspaceManager.from_env()
+# and before _init_agents() reads model env vars. The state_manager singleton
+# is constructed at module import time (bottom of this file), which happens
+# BEFORE main.py's load_dotenv() call. Without this, os.getenv() falls back
+# to defaults and ignores the user's .env settings entirely.
+# This was the root cause of the WORKSPACE_ROOT=dev-suite bug.
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from ..workspace import WorkspaceManager
 from .events import EventType, SSEEvent, event_bus
 from .models import (
