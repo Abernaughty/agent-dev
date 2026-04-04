@@ -19,7 +19,6 @@ from src.api.events import EventBus, EventType, SSEEvent, event_bus
 from src.api.main import app
 from src.api.state import state_manager
 
-
 # ============================================================
 # Fixtures
 # ============================================================
@@ -348,6 +347,7 @@ class TestStateManagerEmission:
     async def test_approve_memory_emits_memory_added(self):
         """Seed a memory entry, approve it, verify SSE event fires."""
         import time
+
         from src.api.models import MemoryEntryResponse, MemoryStatus, MemoryTierEnum
 
         # Seed a pending entry into state_manager so approve_memory finds it
@@ -375,6 +375,7 @@ class TestStateManagerEmission:
     async def test_reject_memory_emits_memory_added(self):
         """Seed a memory entry, reject it, verify SSE event fires."""
         import time
+
         from src.api.models import MemoryEntryResponse, MemoryStatus, MemoryTierEnum
 
         # Seed a pending entry into state_manager so reject_memory finds it

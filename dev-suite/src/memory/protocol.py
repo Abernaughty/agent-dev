@@ -16,8 +16,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Protocol, runtime_checkable
 
-from pydantic import BaseModel, Field
-
+from pydantic import BaseModel
 
 # ── Tier Definitions ──
 

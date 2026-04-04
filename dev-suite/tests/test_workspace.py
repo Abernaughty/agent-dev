@@ -15,14 +15,12 @@ Covers:
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from unittest.mock import patch
 
 import bcrypt
 import pytest
 
 from src.workspace import WorkspaceManager, hash_pin
-
 
 # -- Fixtures --
 

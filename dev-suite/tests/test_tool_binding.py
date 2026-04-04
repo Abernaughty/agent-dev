@@ -16,9 +16,7 @@ Tests cover:
 - max_turns <= 0 guard (Fix 5)
 """
 
-import asyncio
 import json
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -213,8 +211,9 @@ class TestRunToolLoop:
     @pytest.mark.asyncio
     async def test_max_turns_zero_returns_immediately(self):
         """Fix 5: max_turns <= 0 should not crash with unbound response."""
-        from src.orchestrator import _run_tool_loop
         from langchain_core.messages import HumanMessage
+
+        from src.orchestrator import _run_tool_loop
         mock_llm = AsyncMock()
         msg = HumanMessage(content="test")
         response, tokens, log = await _run_tool_loop(mock_llm, [msg], [], max_turns=0, tokens_used=100)

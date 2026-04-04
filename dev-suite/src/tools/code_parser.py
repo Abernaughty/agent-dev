@@ -12,7 +12,6 @@ Pure functions, no side effects, fully testable in isolation.
 from __future__ import annotations
 
 import logging
-import os
 import re
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath

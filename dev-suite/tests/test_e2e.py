@@ -14,8 +14,6 @@ by mocking LLM responses with realistic payloads. They validate:
 No API keys needed -- all LLM calls are mocked.
 """
 
-import json
-import tempfile
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -24,18 +22,13 @@ from src.agents.architect import Blueprint
 from src.agents.qa import FailureReport
 from src.memory.chroma_store import ChromaMemoryStore
 from src.orchestrator import (
-    AgentState,
     MAX_RETRIES,
-    TOKEN_BUDGET,
     WorkflowStatus,
     architect_node,
-    build_graph,
-    create_workflow,
     developer_node,
     qa_node,
     run_task,
 )
-
 
 # -- Fixtures --
 

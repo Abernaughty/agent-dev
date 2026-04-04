@@ -9,7 +9,7 @@ If API_SECRET is not set, auth is disabled (development mode).
 
 import os
 
-from fastapi import Depends, HTTPException, Security
+from fastapi import HTTPException, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 _security = HTTPBearer(auto_error=False)

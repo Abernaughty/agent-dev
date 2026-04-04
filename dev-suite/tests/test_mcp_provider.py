@@ -19,7 +19,6 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from src.tools.provider import ToolDefinition, ToolNotFoundError
 
 from src.tools.mcp_bridge import MCPConfig, MCPConfigError
 from src.tools.mcp_provider import (
@@ -28,6 +27,7 @@ from src.tools.mcp_provider import (
     _expand_env_vars,
     _resolve_command,
 )
+from src.tools.provider import ToolDefinition, ToolNotFoundError
 
 # -- Test helpers / mocks --
 

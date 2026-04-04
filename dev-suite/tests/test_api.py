@@ -21,7 +21,7 @@ Covers:
 
 import os
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -43,7 +43,6 @@ from src.api.models import (
 )
 from src.api.state import StateManager
 from tests.conftest import TEST_WORKSPACE_ROOT
-
 
 # -- Helpers --
 
@@ -114,7 +113,8 @@ def _seed_memory(sm: StateManager) -> None:
 @pytest.fixture()
 def client():
     """Fresh TestClient with empty StateManager."""
-    from src.api import state as state_mod, main as main_mod
+    from src.api import main as main_mod
+    from src.api import state as state_mod
 
     fresh_manager = StateManager()
     state_mod.state_manager = fresh_manager
@@ -126,7 +126,8 @@ def client():
 @pytest.fixture()
 def seeded_client():
     """TestClient with pre-seeded task and memory data."""
-    from src.api import state as state_mod, main as main_mod
+    from src.api import main as main_mod
+    from src.api import state as state_mod
 
     fresh_manager = StateManager()
     _seed_task(fresh_manager)
@@ -140,7 +141,8 @@ def seeded_client():
 @pytest.fixture()
 def auth_client():
     """TestClient with API_SECRET set -- auth is enforced."""
-    from src.api import state as state_mod, main as main_mod
+    from src.api import main as main_mod
+    from src.api import state as state_mod
 
     fresh_manager = StateManager()
     state_mod.state_manager = fresh_manager

@@ -21,13 +21,12 @@ import pytest
 
 from src.agents.architect import Blueprint
 from src.agents.qa import FailureReport
-from src.api.events import EventBus, EventType, SSEEvent, event_bus
+from src.api.events import EventType, event_bus
 from src.api.models import (
     AgentStatus,
     TaskBudget,
     TaskDetail,
     TaskStatus,
-    TimelineEvent,
 )
 from src.api.runner import (
     COST_PER_TOKEN,
@@ -39,7 +38,6 @@ from src.api.runner import (
 )
 from src.api.state import StateManager
 from src.orchestrator import WorkflowStatus
-
 
 # ── Fixtures ──
 

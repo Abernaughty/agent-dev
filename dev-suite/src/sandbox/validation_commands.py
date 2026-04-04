@@ -20,7 +20,6 @@ from enum import Enum
 
 from .e2b_runner import select_template_for_files
 
-
 # -- File Extension Categories --
 
 FRONTEND_EXTENSIONS = {".svelte", ".ts", ".tsx", ".js", ".jsx", ".css", ".vue"}

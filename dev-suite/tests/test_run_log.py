@@ -6,16 +6,14 @@ files that the SvelteKit dashboard can consume.
 
 import json
 import os
-import time
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
+from src.agents.architect import Blueprint
 from src.cli import _write_run_log
 from src.orchestrator import AgentState, WorkflowStatus
-from src.agents.architect import Blueprint
-
 
 # -- Fixtures --
 

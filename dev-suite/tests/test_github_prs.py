@@ -22,7 +22,7 @@ import httpx
 import pytest
 
 from src.api.github_prs import CACHE_TTL, GitHubPRProvider, _CacheEntry
-from src.api.models import PRCheckStatus, PRComment, PRFileChange, PRReview, PRStatus, PRSummary
+from src.api.models import PRStatus, PRSummary
 
 SAMPLE_PR_OPEN = {"number": 52, "title": "feat: orchestrator bridge", "state": "open", "draft": False, "merged_at": None, "mergeable": True, "body": "Adds TaskRunner", "additions": 500, "deletions": 20, "changed_files": 3, "user": {"login": "Abernaughty", "type": "User"}, "head": {"ref": "feat/orchestrator-bridge", "sha": "abc123def", "repo": {"full_name": "Abernaughty/agent-dev", "owner": {"login": "Abernaughty"}}}, "base": {"ref": "main", "repo": {"full_name": "Abernaughty/agent-dev", "owner": {"login": "Abernaughty"}}}}
 SAMPLE_PR_MERGED = {"number": 47, "title": "feat: SSE events", "state": "closed", "draft": False, "merged_at": "2026-03-25T14:00:00Z", "merged": True, "body": "SSE system", "additions": 300, "deletions": 10, "changed_files": 2, "user": {"login": "Abernaughty", "type": "User"}, "head": {"ref": "feat/sse", "sha": "def456", "repo": {"full_name": "Abernaughty/agent-dev", "owner": {"login": "Abernaughty"}}}, "base": {"ref": "main", "repo": {"full_name": "Abernaughty/agent-dev", "owner": {"login": "Abernaughty"}}}}
@@ -314,8 +314,10 @@ class TestAPIEndpoints:
     @pytest.fixture
     def client(self):
         from fastapi.testclient import TestClient
+
+        from src.api import main as main_mod
+        from src.api import state as state_mod
         from src.api.main import app
-        from src.api import state as state_mod, main as main_mod
         from src.api.state import StateManager
         fresh = StateManager()
         state_mod.state_manager = fresh

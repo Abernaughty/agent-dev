@@ -17,10 +17,8 @@ from pathlib import Path
 
 import yaml
 
-from .chroma_store import ChromaMemoryStore
 from .factory import create_memory_store
 from .protocol import MemoryStore
-
 
 YAML_PATH = Path(__file__).parent / "l0_core.yaml"
 
