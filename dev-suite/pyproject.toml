@@ -52,6 +52,7 @@ ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["N806", "F841"]
+"src/api/state.py" = ["E402"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
