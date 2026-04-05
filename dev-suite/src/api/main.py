@@ -271,19 +271,13 @@ async def remove_workspace(path: str = Query(..., min_length=1, description="Abs
 
 @app.post("/workspaces/verify-auth", response_model=ApiResponse)
 async def verify_workspace_auth(body: VerifyWorkspaceAuthRequest, _auth: str | None = Depends(require_auth)):
-    """Verify PIN for a protected workspace.
-
-    Returns whether the workspace is protected and whether the PIN is correct.
-    The dashboard can use this for pre-flight checks before showing the
-    task creation form.
-    """
+    """Verify PIN for a protected workspace."""
     ws_mgr = state_manager.workspace_manager
     is_protected = ws_mgr.is_protected(body.workspace)
     authorized = False
     if is_protected:
         authorized = ws_mgr.verify_pin(body.pin)
     else:
-        # Not protected — no PIN needed
         authorized = True
     return _ok(VerifyWorkspaceAuthResponse(
         workspace=body.workspace,
@@ -367,18 +361,13 @@ async def send_planner_msg(
     body: PlannerMessageRequest,
     _auth: str | None = Depends(require_auth),
 ):
-    """Send a message to the Planner agent in an existing session.
-
-    The Planner validates the task against the readiness checklist,
-    extracts TaskSpec fields from the conversation, and responds
-    with guidance on missing information.
-    """
+    """Send a message to the Planner agent in an existing session."""
     from ..agents.planner import planner_sessions, send_planner_message
 
     session = planner_sessions.get(session_id)
     if not session:
         _error(f"Planner session '{session_id}' not found or expired.", 404)
-        return  # unreachable, but makes type checker happy
+        return
 
     if session.submitted:
         _error("Session already submitted. Start a new session.", 409)
@@ -422,8 +411,9 @@ async def submit_planner_session(
     via the normal POST /tasks flow. The Planner session is marked
     as submitted and cannot be reused.
 
-    Allows submission even if recommended fields are missing (user
-    autonomy), but blocks if required fields are incomplete.
+    Re-validates workspace policy at submit time to prevent TOCTOU:
+    a workspace removed or newly protected after session start will
+    be caught here.
     """
     from ..agents.planner import build_checklist, planner_sessions
     from .runner import task_runner
@@ -450,6 +440,24 @@ async def submit_planner_session(
     # Build description from TaskSpec
     description = session.task_spec.to_description()
     workspace = session.task_spec.workspace
+
+    # Re-validate workspace policy (TOCTOU guard: workspace may have been
+    # removed or newly protected since the session was started).
+    ws_mgr = state_manager.workspace_manager
+    if not ws_mgr.is_allowed(workspace):
+        _error(
+            f"Workspace '{workspace}' is no longer in the allowed directories list. "
+            f"Start a new planner session.",
+            403,
+        )
+        return
+    if ws_mgr.is_protected(workspace):
+        _error(
+            f"Workspace '{workspace}' now requires re-authorization. "
+            f"Start a new planner session with a PIN.",
+            403,
+        )
+        return
 
     # Create task via existing flow
     task_id = await state_manager.create_task(description, workspace=workspace)
@@ -605,7 +613,6 @@ async def merge_pr(pr_number: int, body: MergePRRequest, _auth: str | None = Dep
 
 # -- Filesystem Browse (Issue #106 Phase A) --
 
-# Project marker files — if any exist in a directory, it's flagged as a project.
 _PROJECT_MARKERS = frozenset({
     ".git", "package.json", "pyproject.toml", "Cargo.toml",
     "go.mod", "pom.xml", "build.gradle", "Makefile",
@@ -619,10 +626,6 @@ async def browse_filesystem(
     _auth: str | None = Depends(require_auth),
 ):
     """Browse the local filesystem for directory selection.
-
-    Returns subdirectories at the given path with metadata useful for
-    the workspace selector UI: whether each dir has children and
-    whether it appears to be a project root.
 
     Issue #106 Phase A: directory picker for workspace selector.
     """
@@ -643,7 +646,6 @@ async def browse_filesystem(
             if not show_hidden and child.name.startswith("."):
                 continue
             try:
-                # Single pass: detect project markers and visible subdirectories
                 child_names: set[str] = set()
                 has_children = False
                 for c in child.iterdir():
@@ -652,7 +654,6 @@ async def browse_filesystem(
                         has_children = True
                 is_project = bool(child_names & _PROJECT_MARKERS)
             except (PermissionError, FileNotFoundError, NotADirectoryError):
-                # Unreadable or transient child; skip it.
                 continue
 
             entries.append(BrowseDirectoryEntry(
@@ -666,7 +667,6 @@ async def browse_filesystem(
     except (FileNotFoundError, NotADirectoryError):
         _error(f"Not a directory: {target}", 404)
 
-    # Sort: projects first, then alphabetical
     entries.sort(key=lambda e: (not e.is_project, e.name.lower()))
 
     return _ok(BrowseDirectoryResponse(
