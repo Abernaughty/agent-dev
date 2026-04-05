@@ -6,6 +6,7 @@ dashboard. All endpoints return an ApiResponse envelope.
 Issue #19: Added AuditLogEntry, confidence/sandbox/related_files to MemoryEntryResponse
 Issue #89: Added publish_pr to CreateTaskRequest, pr_url/working_branch/pr_number to TaskSummary
 Issue #105: Added workspace models, workspace field to CreateTaskRequest/TaskSummary
+Issue #106: Added Planner session models (PlannerStartRequest, PlannerMessageRequest, etc.)
 """
 
 from __future__ import annotations
@@ -377,3 +378,84 @@ class BrowseDirectoryResponse(BaseModel):
     current_path: str
     parent_path: str | None = None
     entries: list[BrowseDirectoryEntry] = []
+
+
+# -- Planner Models (Issue #106 Phase B) --
+
+
+class PlannerStartRequest(BaseModel):
+    """Request body for starting a new Planner session."""
+
+    workspace: str = Field(
+        ...,
+        min_length=1,
+        description="Target workspace directory. Must be in allowed list.",
+    )
+    pin: str | None = Field(
+        default=None,
+        description="Admin PIN for protected workspaces.",
+    )
+
+
+class PlannerMessageRequest(BaseModel):
+    """Request body for sending a message to the Planner."""
+
+    message: str = Field(
+        ...,
+        min_length=1,
+        max_length=4000,
+        description="User message to the Planner agent.",
+    )
+
+
+class PlannerChecklistItemResponse(BaseModel):
+    """Single checklist item in the Planner response."""
+
+    field: str
+    priority: str
+    satisfied: bool
+    auto_inferred: bool = False
+    value: str | list[str] | None = None
+
+
+class PlannerChecklistResponse(BaseModel):
+    """Checklist status in the Planner response."""
+
+    items: list[PlannerChecklistItemResponse] = []
+    required_satisfied: bool = False
+    has_warnings: bool = False
+    missing_required: list[str] = []
+    missing_recommended: list[str] = []
+
+
+class PlannerTaskSpecResponse(BaseModel):
+    """TaskSpec as returned in Planner API responses."""
+
+    workspace: str = ""
+    objective: str = ""
+    languages: list[str] = []
+    frameworks: list[str] = []
+    output_type: str | None = None
+    acceptance_criteria: list[str] = []
+    constraints: list[str] = []
+    related_files: list[str] = []
+
+
+class PlannerSessionResponse(BaseModel):
+    """Response for Planner session operations."""
+
+    session_id: str
+    message: str = ""
+    task_spec: PlannerTaskSpecResponse = Field(default_factory=PlannerTaskSpecResponse)
+    checklist: PlannerChecklistResponse = Field(default_factory=PlannerChecklistResponse)
+    ready: bool = False
+    warnings: list[str] = []
+
+
+class PlannerSubmitResponse(BaseModel):
+    """Response for submitting a Planner session to the Architect."""
+
+    session_id: str
+    task_id: str
+    status: TaskStatus = TaskStatus.QUEUED
+    description: str = ""
