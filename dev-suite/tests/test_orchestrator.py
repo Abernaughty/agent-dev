@@ -17,6 +17,7 @@ from src.orchestrator import (
     _infer_module,
     build_graph,
     create_workflow,
+    developer_node,
     flush_memory_node,
     route_after_qa,
 )
@@ -211,3 +212,79 @@ class TestInferModule:
 
     def test_infer_empty(self):
         assert _infer_module([]) == "global"
+
+
+# -- Developer Memory Dedup Tests --
+
+
+class TestDeveloperMemoryDedup:
+    """Verify developer_node deduplicates memory_writes on retries."""
+
+    def _make_blueprint(self):
+        return Blueprint(
+            task_id="test-dedup",
+            target_files=["app.py"],
+            instructions="Build a test app",
+            constraints=["Use Python"],
+            acceptance_criteria=["Prints output"],
+        )
+
+    @patch("src.orchestrator._get_developer_llm")
+    def test_no_duplicate_on_retry(self, mock_get_llm):
+        """On retry, developer should replace its memory entry, not duplicate."""
+        mock_llm = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = "print('hello')"
+        mock_response.usage_metadata = {"total_tokens": 100}
+        mock_llm.invoke.return_value = mock_response
+        mock_get_llm.return_value = mock_llm
+
+        bp = self._make_blueprint()
+
+        # First call (attempt 0)
+        state: GraphState = {
+            "trace": [], "memory_writes": [], "tool_calls_log": [],
+            "retry_count": 0, "tokens_used": 0, "status": WorkflowStatus.BUILDING,
+            "blueprint": bp, "generated_code": "", "failure_report": None,
+        }
+        result1 = developer_node(state, config=None)
+        dev_entries = [w for w in result1["memory_writes"]
+                       if w["source_agent"] == "developer" and w["task_id"] == "test-dedup"]
+        assert len(dev_entries) == 1
+
+        # Second call (retry 1) — pass memory_writes from first call
+        state2: GraphState = {
+            "trace": [], "memory_writes": list(result1["memory_writes"]),
+            "tool_calls_log": [], "retry_count": 1, "tokens_used": 100,
+            "status": WorkflowStatus.BUILDING, "blueprint": bp,
+            "generated_code": "", "failure_report": None,
+        }
+        result2 = developer_node(state2, config=None)
+        dev_entries2 = [w for w in result2["memory_writes"]
+                        if w["source_agent"] == "developer" and w["task_id"] == "test-dedup"]
+        assert len(dev_entries2) == 1, f"Expected 1 developer entry, got {len(dev_entries2)}"
+
+    @patch("src.orchestrator._get_developer_llm")
+    def test_dedup_preserves_other_agents(self, mock_get_llm):
+        """Dedup only affects developer entries for the same task_id."""
+        mock_llm = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = "print('hello')"
+        mock_response.usage_metadata = {"total_tokens": 100}
+        mock_llm.invoke.return_value = mock_response
+        mock_get_llm.return_value = mock_llm
+
+        bp = self._make_blueprint()
+
+        # State with a QA entry already present
+        qa_entry = {"content": "QA passed", "tier": "l2", "module": "global",
+                     "source_agent": "qa", "task_id": "test-dedup"}
+        state: GraphState = {
+            "trace": [], "memory_writes": [qa_entry], "tool_calls_log": [],
+            "retry_count": 0, "tokens_used": 0, "status": WorkflowStatus.BUILDING,
+            "blueprint": bp, "generated_code": "", "failure_report": None,
+        }
+        result = developer_node(state, config=None)
+        assert len(result["memory_writes"]) == 2
+        agents = {w["source_agent"] for w in result["memory_writes"]}
+        assert agents == {"qa", "developer"}

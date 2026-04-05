@@ -246,10 +246,15 @@ class ChromaMemoryStore:
         tiers: list[MemoryTier] | None = None,
         n_results: int = 10,
         task_id: str | None = None,
+        min_score: float | None = None,
     ) -> list[MemoryQueryResult]:
         """Query memory with optional tier, module, and task_id filters.
 
         Returns list of MemoryQueryResult. Automatically excludes expired entries.
+
+        Args:
+            min_score: Minimum similarity score (0.0-1.0) to include. Entries
+                below this threshold are filtered out. None means no filtering.
         """
         where_clauses: list[dict] = []
         if tiers:
@@ -286,6 +291,10 @@ class ChromaMemoryStore:
             if expires > 0 and expires < now:
                 continue
 
+            score = 1 - dist
+            if min_score is not None and score < min_score:
+                continue
+
             entries.append(
                 MemoryQueryResult(
                     content=doc,
@@ -299,7 +308,7 @@ class ChromaMemoryStore:
                     verified=meta.get("verified", True),
                     sandbox_origin=meta.get("sandbox_origin", "none"),
                     mutable=meta.get("mutable", True),
-                    score=1 - dist,
+                    score=score,
                 )
             )
 

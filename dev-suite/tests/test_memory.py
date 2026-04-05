@@ -110,6 +110,36 @@ class TestEnrichedMetadata:
         assert len(results_a) == 1
         assert results_a[0].task_id == "task-a"
 
+    def test_query_min_score_filters_irrelevant(self, store):
+        """min_score param filters out low-relevance entries."""
+        store.add_l1("Python triforce ASCII art pattern printer")
+        store.add_l1("JavaScript greet function with type hints")
+        # Query for triforce — greet entry should be dissimilar
+        all_results = store.query("triforce ASCII art", min_score=None)
+        assert len(all_results) == 2  # both returned without filter
+        # With a score threshold, only the relevant entry should survive
+        filtered = store.query("triforce ASCII art", min_score=0.3)
+        # The triforce entry should score higher than the greet entry
+        assert len(filtered) >= 1
+        assert any("triforce" in r.content.lower() for r in filtered)
+
+    def test_query_min_score_none_returns_all(self, store):
+        """min_score=None (default) returns all results like before."""
+        store.add_l1("Alpha entry about dogs")
+        store.add_l1("Beta entry about cats")
+        store.add_l1("Gamma entry about quantum physics")
+        results_none = store.query("dogs", min_score=None)
+        results_default = store.query("dogs")
+        assert len(results_none) == len(results_default)
+
+    def test_query_min_score_high_threshold(self, store):
+        """Very high min_score filters out most results."""
+        store.add_l1("Specific technical entry about Rust ownership")
+        store.add_l1("Completely unrelated cooking recipe for pasta")
+        results = store.query("Rust ownership borrow checker", min_score=0.99)
+        # At 0.99 threshold, almost nothing should match
+        assert len(results) <= 1
+
 
 class TestBackwardCompatibility:
     def test_add_and_query_l0_core(self, store):
