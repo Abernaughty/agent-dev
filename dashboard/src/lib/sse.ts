@@ -16,13 +16,15 @@
  *
  * Issue #37
  * Issue #85: Added tool_call event handling
+ * Issue #106 Phase B: Added planner_message event handling
  */
 
 import { connection } from '$lib/stores/connection.svelte.js';
 import { agentsStore } from '$lib/stores/agents.svelte.js';
 import { tasksStore } from '$lib/stores/tasks.svelte.js';
 import { memoryStore } from '$lib/stores/memory.svelte.js';
-import type { SSEEventType, ToolCallEvent } from '$lib/types/api.js';
+import { plannerStore } from '$lib/stores/planner.svelte.js';
+import type { SSEEventType, ToolCallEvent, PlannerMessageEvent } from '$lib/types/api.js';
 
 /** Backoff config */
 const INITIAL_DELAY_MS = 1000;
@@ -51,6 +53,21 @@ function isToolCallEvent(payload: Record<string, unknown>): payload is ToolCallE
 		typeof payload.tool === 'string' &&
 		typeof payload.success === 'boolean' &&
 		typeof payload.result_preview === 'string'
+	);
+}
+
+/**
+ * Type guard for PlannerMessageEvent payloads.
+ * Issue #106 Phase B. Validates all required fields including
+ * the warnings array (CodeRabbit fix #2).
+ */
+function isPlannerMessageEvent(payload: Record<string, unknown>): payload is PlannerMessageEvent {
+	return (
+		typeof payload.session_id === 'string' &&
+		typeof payload.message === 'string' &&
+		typeof payload.ready === 'boolean' &&
+		Array.isArray(payload.warnings) &&
+		(payload.warnings as unknown[]).every((w) => typeof w === 'string')
 	);
 }
 
@@ -86,6 +103,12 @@ function dispatch(eventType: SSEEventType, payload: Record<string, unknown>) {
 		case 'tool_call':
 			if (isToolCallEvent(payload)) {
 				tasksStore.handleToolCall(payload);
+			}
+			break;
+
+		case 'planner_message':
+			if (isPlannerMessageEvent(payload)) {
+				plannerStore.handleSSE(payload);
 			}
 			break;
 
@@ -163,7 +186,8 @@ function connect() {
 			'task_complete',
 			'memory_added',
 			'log_line',
-			'tool_call'
+			'tool_call',
+			'planner_message'
 		];
 
 		for (const type of eventTypes) {
