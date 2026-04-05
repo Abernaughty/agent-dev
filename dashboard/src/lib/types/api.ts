@@ -9,6 +9,7 @@
  * Issue #85: Added tool_call SSE event type and ToolCallEvent interface
  * Issue #106: Added workspace types, updated CreateTaskRequest
  * Issue #106 Phase A: Added BrowseDirectoryEntry, BrowseDirectoryResponse
+ * Issue #106 Phase B: Added Planner types, planner_message SSE event
  */
 
 // -- Envelope --
@@ -208,7 +209,8 @@ export type SSEEventType =
 	| 'task_complete'
 	| 'memory_added'
 	| 'log_line'
-	| 'tool_call';
+	| 'tool_call'
+	| 'planner_message';
 
 export interface ToolCallEvent {
 	task_id: string;
@@ -216,6 +218,13 @@ export interface ToolCallEvent {
 	tool: string;
 	success: boolean;
 	result_preview: string;
+}
+
+export interface PlannerMessageEvent {
+	session_id: string;
+	message: string;
+	ready: boolean;
+	warnings: string[];
 }
 
 export interface SSEEventData {
@@ -252,4 +261,49 @@ export interface BrowseDirectoryResponse {
 	current_path: string;
 	parent_path: string | null;
 	entries: BrowseDirectoryEntry[];
+}
+
+// -- Planner (Issue #106 Phase B) --
+
+export interface PlannerChecklistItem {
+	field: string;
+	priority: 'required' | 'recommended' | 'optional';
+	satisfied: boolean;
+	auto_inferred: boolean;
+	value: string | string[] | null;
+}
+
+export interface PlannerChecklist {
+	items: PlannerChecklistItem[];
+	required_satisfied: boolean;
+	has_warnings: boolean;
+	missing_required: string[];
+	missing_recommended: string[];
+}
+
+export interface PlannerTaskSpec {
+	workspace: string;
+	objective: string;
+	languages: string[];
+	frameworks: string[];
+	output_type: string | null;
+	acceptance_criteria: string[];
+	constraints: string[];
+	related_files: string[];
+}
+
+export interface PlannerSessionResponse {
+	session_id: string;
+	message: string;
+	task_spec: PlannerTaskSpec;
+	checklist: PlannerChecklist;
+	ready: boolean;
+	warnings: string[];
+}
+
+export interface PlannerSubmitResponse {
+	session_id: string;
+	task_id: string;
+	status: TaskStatus;
+	description: string;
 }

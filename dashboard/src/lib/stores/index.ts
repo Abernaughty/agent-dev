@@ -5,6 +5,7 @@
  * Issue #38: initAllStores() + destroyAllStores()
  * Issue #51: Removed mock mode — always live
  * Issue #106: Added workspacesStore
+ * Issue #106 Phase B: Added plannerStore
  */
 
 export { agentsStore } from './agents.svelte.js';
@@ -13,12 +14,14 @@ export { memoryStore } from './memory.svelte.js';
 export { prsStore } from './prs.svelte.js';
 export { connection } from './connection.svelte.js';
 export { workspacesStore } from './workspaces.svelte.js';
+export { plannerStore } from './planner.svelte.js';
 
 import { agentsStore } from './agents.svelte.js';
 import { tasksStore } from './tasks.svelte.js';
 import { memoryStore } from './memory.svelte.js';
 import { prsStore } from './prs.svelte.js';
 import { workspacesStore } from './workspaces.svelte.js';
+import { plannerStore } from './planner.svelte.js';
 
 /**
  * Kick off initial data fetch for all stores.
@@ -48,4 +51,5 @@ export function destroyAllStores(): void {
 	memoryStore.reset();
 	prsStore.reset();
 	workspacesStore.reset();
+	plannerStore.reset();
 }
