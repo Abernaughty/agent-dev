@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from enum import Enum
@@ -206,7 +207,9 @@ class PlannerResponse(BaseModel):
 # Workspace auto-inference
 # ---------------------------------------------------------------------------
 
-# Map of file content patterns to languages and frameworks.
+# Exact package name matching for package.json dependencies.
+# Keys are matched exactly against dependency names (not substring).
+# Scoped packages (starting with @) use prefix matching.
 _PACKAGE_JSON_FRAMEWORK_MAP: dict[str, str] = {
     "react": "React",
     "next": "Next.js",
@@ -215,12 +218,16 @@ _PACKAGE_JSON_FRAMEWORK_MAP: dict[str, str] = {
     "svelte": "Svelte",
     "@sveltejs/kit": "SvelteKit",
     "angular": "Angular",
+    "@angular/core": "Angular",
     "express": "Express",
     "fastify": "Fastify",
     "tailwindcss": "TailwindCSS",
-    "@tailwindcss": "TailwindCSS",
+    "@tailwindcss/vite": "TailwindCSS",
+    "@tailwindcss/postcss": "TailwindCSS",
 }
 
+# Whole-token matching for pyproject.toml dependency names.
+# Uses word-boundary regex to avoid substring false positives.
 _PYPROJECT_FRAMEWORK_MAP: dict[str, str] = {
     "fastapi": "FastAPI",
     "django": "Django",
@@ -231,6 +238,17 @@ _PYPROJECT_FRAMEWORK_MAP: dict[str, str] = {
     "pytest": "pytest",
     "pydantic": "Pydantic",
 }
+
+
+def _match_dep_exact(dep_name: str, pattern: str) -> bool:
+    """Check if a dependency name matches a pattern exactly.
+
+    For scoped packages (@scope/name), matches if the dep starts with
+    the pattern. For unscoped packages, requires exact match.
+    """
+    if pattern.startswith("@"):
+        return dep_name == pattern or dep_name.startswith(pattern + "/")
+    return dep_name == pattern
 
 
 def infer_workspace_stack(
@@ -256,20 +274,21 @@ def infer_workspace_stack(
             with open(pkg_json, encoding="utf-8") as f:
                 data = json.load(f)
 
-            # Detect TypeScript
-            all_deps = {}
+            # Collect all dependency names
+            all_deps: dict[str, str] = {}
             for dep_key in ("dependencies", "devDependencies", "peerDependencies"):
                 all_deps.update(data.get(dep_key, {}))
 
+            # Detect TypeScript
             if "typescript" in all_deps or (workspace / "tsconfig.json").is_file():
                 if "TypeScript" not in languages:
                     languages.append("TypeScript")
             if "JavaScript" not in languages:
                 languages.append("JavaScript")
 
-            # Detect frameworks from dependencies
-            for dep_key_name, framework_name in _PACKAGE_JSON_FRAMEWORK_MAP.items():
-                if any(dep_key_name in dep for dep in all_deps):
+            # Detect frameworks using exact dependency name matching
+            for pattern, framework_name in _PACKAGE_JSON_FRAMEWORK_MAP.items():
+                if any(_match_dep_exact(dep, pattern) for dep in all_deps):
                     if framework_name not in frameworks:
                         frameworks.append(framework_name)
 
@@ -283,8 +302,11 @@ def infer_workspace_stack(
             languages.append("Python")
         try:
             content = pyproject.read_text(encoding="utf-8").lower()
+            # Use word-boundary matching to avoid substring false positives
             for dep_pattern, framework_name in _PYPROJECT_FRAMEWORK_MAP.items():
-                if dep_pattern in content and framework_name not in frameworks:
+                # Match as a quoted dependency name or standalone word
+                pattern = rf'(?:^|[\s"\',\[])({re.escape(dep_pattern)})(?:[\s"\',>=<\]\[]|$)'
+                if re.search(pattern, content) and framework_name not in frameworks:
                     frameworks.append(framework_name)
         except OSError as e:
             logger.debug("Failed to read pyproject.toml: %s", e)
@@ -304,15 +326,21 @@ def infer_workspace_stack(
         if "Go" not in languages:
             languages.append("Go")
 
-    # -- pom.xml / build.gradle (Java/Kotlin) --
+    # -- pom.xml (Java) --
     if (workspace / "pom.xml").is_file():
         if "Java" not in languages:
             languages.append("Java")
-    if (workspace / "build.gradle").is_file() or (workspace / "build.gradle.kts").is_file():
-        if "Kotlin" not in languages:
-            languages.append("Kotlin")
+
+    # -- build.gradle / build.gradle.kts (Java/Kotlin) --
+    has_gradle = (workspace / "build.gradle").is_file()
+    has_gradle_kts = (workspace / "build.gradle.kts").is_file()
+    if has_gradle or has_gradle_kts:
         if "Java" not in languages:
             languages.append("Java")
+        # Only detect Kotlin from .kts (Kotlin DSL) — plain build.gradle
+        # alone is not sufficient evidence for Kotlin.
+        if has_gradle_kts and "Kotlin" not in languages:
+            languages.append("Kotlin")
 
     return {"languages": languages, "frameworks": frameworks}
 
@@ -524,8 +552,6 @@ def _extract_task_spec_updates(response_text: str) -> dict[str, Any]:
     The Planner is instructed to include a JSON block at the end of
     its response. This extracts and parses it.
     """
-    import re
-
     # Look for ```json ... ``` block
     pattern = r"```json\s*\n?(.+?)\n?```"
     match = re.search(pattern, response_text, re.DOTALL)
@@ -546,10 +572,20 @@ def _extract_task_spec_updates(response_text: str) -> dict[str, Any]:
     return {}
 
 
+# Fields on TaskSpec that expect list[str] values.
+_LIST_FIELDS = frozenset({
+    "languages", "frameworks", "acceptance_criteria",
+    "constraints", "related_files",
+})
+
+
 def _apply_spec_updates(task_spec: TaskSpec, updates: dict[str, Any]) -> TaskSpec:
     """Apply extracted updates to a TaskSpec, preserving existing values.
 
-    Only overwrites fields that are present in updates and non-empty.
+    Only overwrites fields that are present in updates, non-empty,
+    and pass type validation. List fields accept strings (coerced to
+    single-element lists) or lists of strings. String fields accept
+    only strings.
     """
     valid_fields = set(TaskSpec.model_fields.keys())
 
@@ -560,6 +596,26 @@ def _apply_spec_updates(task_spec: TaskSpec, updates: dict[str, Any]) -> TaskSpe
             continue  # Never override workspace from LLM output
         if value is None or value == "" or value == []:
             continue
+
+        # Type validation: list fields vs string fields
+        if field_name in _LIST_FIELDS:
+            if isinstance(value, str):
+                value = [value]  # Coerce single string to list
+            if not isinstance(value, list) or not all(
+                isinstance(v, str) and v.strip() for v in value
+            ):
+                logger.debug(
+                    "Skipping invalid list value for %s: %s",
+                    field_name, type(value).__name__,
+                )
+                continue
+        elif not isinstance(value, str):
+            logger.debug(
+                "Skipping non-string value for %s: %s",
+                field_name, type(value).__name__,
+            )
+            continue
+
         setattr(task_spec, field_name, value)
 
     return task_spec
@@ -567,8 +623,6 @@ def _apply_spec_updates(task_spec: TaskSpec, updates: dict[str, Any]) -> TaskSpe
 
 def _strip_json_block(text: str) -> str:
     """Remove the JSON block from the Planner's response for display."""
-    import re
-
     # Remove ```json ... ``` blocks
     cleaned = re.sub(r"\n?```json\s*\n?.+?\n?```\s*$", "", text, flags=re.DOTALL)
     return cleaned.strip()

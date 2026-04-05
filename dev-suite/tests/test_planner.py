@@ -8,14 +8,11 @@ from __future__ import annotations
 
 import json
 import time
-from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from src.agents.planner import (
-    ChecklistPriority,
-    PlannerSession,
     PlannerSessionStore,
     TaskSpec,
     _apply_spec_updates,
@@ -261,6 +258,31 @@ class TestInferWorkspaceStack:
         # Should not crash, just skip
         assert isinstance(result["languages"], list)
 
+    def test_preact_not_detected_as_react(self, tmp_path):
+        """Exact matching: preact should NOT trigger React detection."""
+        pkg = tmp_path / "package.json"
+        pkg.write_text(json.dumps({
+            "dependencies": {"preact": "^10.0.0"},
+        }))
+        result = infer_workspace_stack(tmp_path)
+        assert "React" not in result["frameworks"]
+
+    def test_build_gradle_only_detects_java_not_kotlin(self, tmp_path):
+        """build.gradle alone should only detect Java, not Kotlin."""
+        gradle = tmp_path / "build.gradle"
+        gradle.write_text('apply plugin: "java"\n')
+        result = infer_workspace_stack(tmp_path)
+        assert "Java" in result["languages"]
+        assert "Kotlin" not in result["languages"]
+
+    def test_build_gradle_kts_detects_kotlin(self, tmp_path):
+        """build.gradle.kts indicates Kotlin."""
+        gradle = tmp_path / "build.gradle.kts"
+        gradle.write_text('plugins { kotlin("jvm") }\n')
+        result = infer_workspace_stack(tmp_path)
+        assert "Kotlin" in result["languages"]
+        assert "Java" in result["languages"]
+
 
 # =========================================================================
 # JSON extraction tests
@@ -309,7 +331,7 @@ class TestApplySpecUpdates:
         updates = {"unknown_field": "value", "objective": "Real"}
         _apply_spec_updates(spec, updates)
         assert spec.objective == "Real"
-        assert not hasattr(spec, "unknown_field") or True  # No crash
+        assert not hasattr(spec, "unknown_field")
 
     def test_skip_empty_values(self):
         spec = TaskSpec(workspace="/proj", objective="Existing")
@@ -317,6 +339,20 @@ class TestApplySpecUpdates:
         _apply_spec_updates(spec, updates)
         assert spec.objective == "Existing"  # Not overwritten
         assert spec.languages == []  # Stays empty
+
+    def test_string_coerced_to_list(self):
+        """LLM returns string instead of list — should be coerced."""
+        spec = TaskSpec(workspace="/proj")
+        updates = {"languages": "Python"}
+        _apply_spec_updates(spec, updates)
+        assert spec.languages == ["Python"]
+
+    def test_invalid_type_skipped(self):
+        """Non-string, non-list value for list field — should be skipped."""
+        spec = TaskSpec(workspace="/proj", languages=["Python"])
+        updates = {"languages": 42}
+        _apply_spec_updates(spec, updates)
+        assert spec.languages == ["Python"]  # Unchanged
 
 
 class TestStripJsonBlock:
