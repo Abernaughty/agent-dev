@@ -469,6 +469,42 @@ def apply_code_node(state: GraphState) -> dict:
     if not blueprint:
         trace.append("apply_code: no blueprint -- skipping")
         return {"parsed_files": [], "trace": trace}
+
+    # Issue #105: Use per-task workspace from GraphState, fall back to env var
+    ws_from_state = state.get("workspace_root", "")
+    workspace_root = Path(ws_from_state).resolve() if ws_from_state else _get_workspace_root()
+
+    # When the developer used filesystem_write tools, the clean code is already
+    # on disk. Reading from disk avoids re-parsing the LLM's summary text which
+    # often contains markdown fences and prose that corrupt the code.
+    # Trace review (task-ba22eafa) showed 2 wasted retries from this mismatch.
+    tool_calls_log = state.get("tool_calls_log", [])
+    wrote_via_tools = any(
+        tc.get("tool") == "filesystem_write" and tc.get("success")
+        for tc in tool_calls_log
+    )
+
+    if wrote_via_tools and blueprint.target_files:
+        disk_files = []
+        for target_path in blueprint.target_files:
+            full_path = workspace_root / target_path
+            if full_path.is_file():
+                try:
+                    content = full_path.read_text(encoding="utf-8")
+                    disk_files.append({"path": target_path, "content": content})
+                except Exception as e:
+                    logger.warning("[APPLY_CODE] Failed to read tool-written file %s: %s", target_path, e)
+                    trace.append(f"apply_code: failed to read {target_path} from disk -- {e}")
+
+        if disk_files:
+            total_chars = sum(len(f["content"]) for f in disk_files)
+            trace.append(f"apply_code: read {len(disk_files)} file(s) from disk (tool-written, {total_chars:,} chars total)")
+            logger.info("[APPLY_CODE] Read %d tool-written files (%d chars) from %s", len(disk_files), total_chars, workspace_root)
+            return {"parsed_files": disk_files, "trace": trace}
+
+        trace.append("apply_code: tool-written files not found on disk, falling back to parser")
+
+    # Fallback: parse generated_code (single-shot mode or disk read failed)
     try:
         parsed = parse_generated_code(generated_code)
     except CodeParserError as e:
@@ -478,9 +514,6 @@ def apply_code_node(state: GraphState) -> dict:
     if not parsed:
         trace.append("apply_code: parser returned no files")
         return {"parsed_files": [], "trace": trace}
-    # Issue #105: Use per-task workspace from GraphState, fall back to env var
-    ws_from_state = state.get("workspace_root", "")
-    workspace_root = Path(ws_from_state).resolve() if ws_from_state else _get_workspace_root()
     safe_files = validate_paths_for_workspace(parsed, workspace_root)
     if len(safe_files) < len(parsed):
         skipped = len(parsed) - len(safe_files)
@@ -681,18 +714,6 @@ def flush_memory_node(state: GraphState) -> dict:
 
 
 async def _publish_code_async(state: dict) -> dict:
-    """Push parsed files to a branch and open a PR.
-
-    This is an infrastructure node -- no LLM calls. It uses the
-    GitHubPRProvider directly via httpx for branch creation,
-    file push, and PR opening.
-
-    Guard chain (any condition skips gracefully):
-    1. No GITHUB_TOKEN configured
-    2. publish_pr is False (user opted out)
-    3. No parsed_files in state
-    4. No blueprint in state
-    """
     from .api.github_prs import github_pr_provider
 
     trace = list(state.get("trace", []))
@@ -734,13 +755,10 @@ async def _publish_code_async(state: dict) -> dict:
             return {"trace": trace}
 
         trace.append(f"publish_code: pushing {len(parsed_files)} file(s)")
-        # Compute repo-relative paths: if workspace_root is a subdirectory
-        # of the repo, prefix file paths so the PR targets correct locations.
         workspace_root = state.get("workspace_root", "")
         repo_subdir = ""
         if workspace_root:
             ws = Path(workspace_root).resolve()
-            # Walk up to find .git directory — that's the repo root
             for parent in [ws, *ws.parents]:
                 if (parent / ".git").exists():
                     try:
@@ -815,12 +833,7 @@ async def _publish_code_async(state: dict) -> dict:
 
 
 def publish_code_node(state: GraphState) -> dict:
-    """Push files to GitHub branch and open PR after QA passes.
-
-    Issue #89: This is an infrastructure node (no LLM calls).
-    Runs between QA-pass and flush_memory in the graph.
-    Uses _run_async() to bridge sync node execution to async GitHub API.
-    """
+    """Push files to GitHub branch and open PR after QA passes."""
     return _run_async(_publish_code_async(state))
 
 
