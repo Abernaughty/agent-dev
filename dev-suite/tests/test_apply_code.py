@@ -179,3 +179,115 @@ class TestApplyCodeNode:
 
         # status should not be in the result (unchanged)
         assert "status" not in result
+
+
+class TestApplyCodeDiskRead:
+    """Tests for apply_code_node's disk-read path when developer used tools."""
+
+    def _make_state(self, **overrides):
+        from src.agents.architect import Blueprint
+
+        base = {
+            "task_description": "test task",
+            "blueprint": Blueprint(
+                task_id="test-disk",
+                target_files=["app.py"],
+                instructions="build the app",
+                constraints=[],
+                acceptance_criteria=["runs"],
+            ),
+            "generated_code": "## Summary\n\nDone.\n\n# --- FILE: app.py ---\n```python\nprint('hello')\n```\n",
+            "failure_report": None,
+            "status": WorkflowStatus.BUILDING,
+            "retry_count": 0,
+            "tokens_used": 0,
+            "error_message": "",
+            "memory_context": [],
+            "memory_writes": [],
+            "trace": [],
+            "sandbox_result": None,
+            "parsed_files": [],
+            "tool_calls_log": [],
+        }
+        base.update(overrides)
+        return base
+
+    def test_prefers_disk_over_parser_when_tools_used(self, tmp_path):
+        """When filesystem_write was used, read files from disk instead of re-parsing."""
+        from src.orchestrator import apply_code_node
+
+        # Write clean code to disk (simulating what filesystem_write did)
+        (tmp_path / "app.py").write_text("print('hello from disk')\n")
+
+        # generated_code has fences that would corrupt parsing
+        state = self._make_state(
+            workspace_root=str(tmp_path),
+            tool_calls_log=[
+                {"agent": "developer", "turn": 1, "tool": "filesystem_write",
+                 "args_preview": "{}", "result_preview": "ok", "success": True},
+            ],
+        )
+
+        result = apply_code_node(state)
+
+        assert len(result["parsed_files"]) == 1
+        assert result["parsed_files"][0]["path"] == "app.py"
+        assert result["parsed_files"][0]["content"] == "print('hello from disk')\n"
+        assert any("tool-written" in t for t in result["trace"])
+
+    def test_falls_back_to_parser_without_tools(self, tmp_path):
+        """Without filesystem_write calls, uses the parser as before."""
+        from src.orchestrator import apply_code_node
+
+        state = self._make_state(
+            workspace_root=str(tmp_path),
+            generated_code="# --- FILE: app.py ---\nprint('from parser')\n",
+            tool_calls_log=[],
+        )
+
+        with patch("src.orchestrator._get_workspace_root", return_value=tmp_path):
+            result = apply_code_node(state)
+
+        assert len(result["parsed_files"]) == 1
+        assert "from parser" in result["parsed_files"][0]["content"]
+        assert not any("tool-written" in t for t in result["trace"])
+
+    def test_falls_back_when_disk_files_missing(self, tmp_path):
+        """If tool-written files aren't on disk, falls back to parser."""
+        from src.orchestrator import apply_code_node
+
+        # Don't write anything to disk
+        state = self._make_state(
+            workspace_root=str(tmp_path),
+            generated_code="# --- FILE: app.py ---\nprint('fallback')\n",
+            tool_calls_log=[
+                {"agent": "developer", "turn": 1, "tool": "filesystem_write",
+                 "args_preview": "{}", "result_preview": "ok", "success": True},
+            ],
+        )
+
+        result = apply_code_node(state)
+
+        assert len(result["parsed_files"]) == 1
+        assert "fallback" in result["parsed_files"][0]["content"]
+        assert any("falling back" in t for t in result["trace"])
+
+    def test_ignores_failed_filesystem_write(self, tmp_path):
+        """Failed filesystem_write calls don't trigger disk-read path."""
+        from src.orchestrator import apply_code_node
+
+        state = self._make_state(
+            workspace_root=str(tmp_path),
+            generated_code="# --- FILE: app.py ---\nprint('parsed')\n",
+            tool_calls_log=[
+                {"agent": "developer", "turn": 1, "tool": "filesystem_write",
+                 "args_preview": "{}", "result_preview": "Error", "success": False},
+            ],
+        )
+
+        with patch("src.orchestrator._get_workspace_root", return_value=tmp_path):
+            result = apply_code_node(state)
+
+        # Should use parser path since the write failed
+        assert len(result["parsed_files"]) == 1
+        assert "parsed" in result["parsed_files"][0]["content"]
