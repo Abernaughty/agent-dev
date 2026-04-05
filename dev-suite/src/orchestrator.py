@@ -212,7 +212,7 @@ def _get_memory_store() -> MemoryStore:
 def _fetch_memory_context(task_description: str) -> list[str]:
     try:
         store = _get_memory_store()
-        results = store.query(task_description, n_results=10)
+        results = store.query(task_description, n_results=10, min_score=0.3)
         return [r.content for r in results]
     except Exception:
         return []
@@ -444,7 +444,17 @@ Write clean, well-documented code."""
     content = _extract_text_content(response.content)
     trace.append(f"developer: code generated ({len(content)} chars)")
     logger.info("[DEV] done. tokens_used now=%d", tokens_used)
-    memory_writes.append({"content": f"Implemented blueprint {blueprint.task_id}: {blueprint.instructions[:200]}", "tier": "l1", "module": _infer_module(blueprint.target_files), "source_agent": "developer", "confidence": 1.0, "sandbox_origin": "locked-down", "related_files": ",".join(blueprint.target_files), "task_id": blueprint.task_id})
+    # Deduplicate: on retries, replace existing developer entry for this task_id
+    # rather than appending duplicates (trace review showed 3x identical entries).
+    new_entry = {"content": f"Implemented blueprint {blueprint.task_id}: {blueprint.instructions[:200]}", "tier": "l1", "module": _infer_module(blueprint.target_files), "source_agent": "developer", "confidence": 1.0, "sandbox_origin": "locked-down", "related_files": ",".join(blueprint.target_files), "task_id": blueprint.task_id}
+    replaced = False
+    for i, existing in enumerate(memory_writes):
+        if existing.get("task_id") == blueprint.task_id and existing.get("source_agent") == "developer":
+            memory_writes[i] = new_entry
+            replaced = True
+            break
+    if not replaced:
+        memory_writes.append(new_entry)
     return {"generated_code": content, "status": WorkflowStatus.REVIEWING, "tokens_used": tokens_used, "trace": trace, "memory_writes": memory_writes, "tool_calls_log": tool_calls_log}
 
 
