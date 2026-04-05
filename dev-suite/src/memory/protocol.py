@@ -160,8 +160,13 @@ class MemoryStore(Protocol):
         tiers: list[MemoryTier] | None = None,
         n_results: int = 10,
         task_id: str | None = None,
+        min_score: float | None = None,
     ) -> list[MemoryQueryResult]:
-        """Query memory with optional filters. Excludes expired entries."""
+        """Query memory with optional filters. Excludes expired entries.
+
+        Args:
+            min_score: Minimum similarity score (0.0-1.0). None = no filtering.
+        """
         ...
 
     def get_pending_approvals(self) -> list[dict]:
