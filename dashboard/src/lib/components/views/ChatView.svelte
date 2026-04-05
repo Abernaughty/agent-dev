@@ -105,8 +105,6 @@
 			return;
 		}
 
-		input = '';
-
 		if (plannerStore.phase === 'idle' || plannerStore.phase === 'submitted') {
 			// Start new session + send first message
 			const options = workspacesStore.isSelectedProtected && workspacesStore.verifiedPin
@@ -122,11 +120,11 @@
 				workspacesStore.selected,
 				options
 			);
-			if (started) {
-				// Send the first message (the objective)
-				await plannerStore.sendMessage(text);
-			}
+			if (!started) return;
+			input = '';
+			await plannerStore.sendMessage(text);
 		} else if (plannerStore.canSend) {
+			input = '';
 			await plannerStore.sendMessage(text);
 		}
 	}

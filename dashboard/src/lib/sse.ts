@@ -58,13 +58,16 @@ function isToolCallEvent(payload: Record<string, unknown>): payload is ToolCallE
 
 /**
  * Type guard for PlannerMessageEvent payloads.
- * Issue #106 Phase B.
+ * Issue #106 Phase B. Validates all required fields including
+ * the warnings array (CodeRabbit fix #2).
  */
 function isPlannerMessageEvent(payload: Record<string, unknown>): payload is PlannerMessageEvent {
 	return (
 		typeof payload.session_id === 'string' &&
 		typeof payload.message === 'string' &&
-		typeof payload.ready === 'boolean'
+		typeof payload.ready === 'boolean' &&
+		Array.isArray(payload.warnings) &&
+		(payload.warnings as unknown[]).every((w) => typeof w === 'string')
 	);
 }
 

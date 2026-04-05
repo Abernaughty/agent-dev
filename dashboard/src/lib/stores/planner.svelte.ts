@@ -49,6 +49,15 @@ let warnings = $state<string[]>([]);
 let error = $state<string | null>(null);
 let submittedTaskId = $state<string | null>(null);
 
+/**
+ * Generation counter for stale-response detection.
+ * Incremented on reset() and startSession(). Any async method
+ * captures the current value before awaiting and bails if it
+ * changed by the time the response arrives.
+ * (CodeRabbit fix #3)
+ */
+let requestGeneration = $state(0);
+
 /** Format current time as HH:MM. */
 function nowTime(): string {
 	return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -104,6 +113,7 @@ export const plannerStore = {
 		workspace: string,
 		options?: { pin?: string }
 	): Promise<boolean> {
+		const generation = ++requestGeneration;
 		error = null;
 		phase = 'starting';
 
@@ -126,6 +136,9 @@ export const plannerStore = {
 			});
 			const body = await res.json();
 
+			// Stale-response guard (CodeRabbit fix #3)
+			if (generation !== requestGeneration) return false;
+
 			if (res.ok && body.data) {
 				const resp = body.data as PlannerSessionResponse;
 				applySession(resp);
@@ -147,6 +160,7 @@ export const plannerStore = {
 			phase = 'idle';
 			return false;
 		} catch (err) {
+			if (generation !== requestGeneration) return false;
 			error = err instanceof Error ? err.message : 'Network error';
 			phase = 'idle';
 			return false;
@@ -163,6 +177,8 @@ export const plannerStore = {
 	async sendMessage(text: string): Promise<boolean> {
 		if (!sessionId || phase !== 'chatting') return false;
 
+		const generation = requestGeneration;
+		const currentSessionId = sessionId;
 		error = null;
 
 		// Add user message immediately
@@ -175,12 +191,15 @@ export const plannerStore = {
 		phase = 'sending';
 
 		try {
-			const res = await fetch(`/api/planner/${sessionId}/message`, {
+			const res = await fetch(`/api/planner/${currentSessionId}/message`, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({ message: text })
 			});
 			const body = await res.json();
+
+			// Stale-response guard (CodeRabbit fix #3)
+			if (generation !== requestGeneration || currentSessionId !== sessionId) return false;
 
 			if (res.ok && body.data) {
 				const resp = body.data as PlannerSessionResponse;
@@ -219,6 +238,7 @@ export const plannerStore = {
 			}];
 			return false;
 		} catch (err) {
+			if (generation !== requestGeneration || currentSessionId !== sessionId) return false;
 			error = err instanceof Error ? err.message : 'Network error';
 			phase = 'chatting'; // Allow retry
 			messages = [...messages, {
@@ -239,14 +259,19 @@ export const plannerStore = {
 	async submit(): Promise<string | null> {
 		if (!sessionId || !ready) return null;
 
+		const generation = requestGeneration;
+		const currentSessionId = sessionId;
 		error = null;
 		phase = 'submitting';
 
 		try {
-			const res = await fetch(`/api/planner/${sessionId}/submit`, {
+			const res = await fetch(`/api/planner/${currentSessionId}/submit`, {
 				method: 'POST'
 			});
 			const body = await res.json();
+
+			// Stale-response guard (CodeRabbit fix #3)
+			if (generation !== requestGeneration || currentSessionId !== sessionId) return null;
 
 			if (res.ok && body.data) {
 				const resp = body.data as PlannerSubmitResponse;
@@ -271,6 +296,7 @@ export const plannerStore = {
 			}];
 			return null;
 		} catch (err) {
+			if (generation !== requestGeneration || currentSessionId !== sessionId) return null;
 			error = err instanceof Error ? err.message : 'Network error';
 			phase = 'chatting'; // Allow retry
 			messages = [...messages, {
@@ -301,8 +327,10 @@ export const plannerStore = {
 
 	/**
 	 * Reset to idle state. Discards the current session.
+	 * Increments requestGeneration to invalidate any in-flight responses.
 	 */
 	reset() {
+		requestGeneration++;
 		sessionId = null;
 		phase = 'idle';
 		messages = [];

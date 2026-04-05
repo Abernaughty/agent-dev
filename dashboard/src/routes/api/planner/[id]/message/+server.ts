@@ -11,7 +11,12 @@ import type { PlannerSessionResponse } from '$lib/types/api.js';
 import type { RequestHandler } from './$types.js';
 
 export const POST: RequestHandler = async ({ request, params }) => {
-	const body = await request.json();
+	let body: unknown;
+	try {
+		body = await request.json();
+	} catch {
+		return json({ data: null, errors: ['Invalid JSON body'] }, { status: 400 });
+	}
 	const result = await apiFetch<PlannerSessionResponse>(
 		`/tasks/plan/${params.id}/message`,
 		{
