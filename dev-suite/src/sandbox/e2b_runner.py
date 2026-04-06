@@ -290,7 +290,7 @@ class E2BRunner:
             tests_passed=test_info["tests_passed"],
             tests_failed=test_info["tests_failed"],
             errors=errors,
-            output_summary=safe_summary.strip(),
+            output_summary=safe_summary,
             timed_out=timed_out,
         )
 
