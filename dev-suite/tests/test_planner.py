@@ -17,7 +17,7 @@ from src.agents.planner import (
     TaskSpec,
     _apply_spec_updates,
     _extract_task_spec_updates,
-    _strip_json_block,
+    _strip_code_blocks,
     build_checklist,
     create_planner_session,
     infer_workspace_stack,
@@ -365,14 +365,27 @@ class TestApplySpecUpdates:
         assert spec.languages == ["Python"]  # Unchanged
 
 
-class TestStripJsonBlock:
+class TestStripCodeBlocks:
     def test_strip_fenced_block(self):
         text = 'Analysis here.\n\n```json\n{"a": 1}\n```'
-        assert _strip_json_block(text) == "Analysis here."
+        assert _strip_code_blocks(text) == "Analysis here."
 
     def test_no_block(self):
         text = "Just text."
-        assert _strip_json_block(text) == "Just text."
+        assert _strip_code_blocks(text) == "Just text."
+
+    def test_strip_non_json_fenced_block(self):
+        """Strips python, bash, or unlabelled fenced blocks too."""
+        text = 'Here is code:\n\n```python\nprint("hello")\n```'
+        assert _strip_code_blocks(text) == "Here is code:"
+
+    def test_strip_multiple_blocks(self):
+        """Strips all fenced blocks, not just the last one."""
+        text = 'First:\n\n```json\n{"a": 1}\n```\n\nSecond:\n\n```python\nprint(1)\n```'
+        result = _strip_code_blocks(text)
+        assert "```" not in result
+        assert "First:" in result
+        assert "Second:" in result
 
 
 # =========================================================================
