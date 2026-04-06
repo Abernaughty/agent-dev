@@ -23,6 +23,7 @@
 	- Graceful degradation: workspace error shows unavailable state
 
 	Issue #106 Phase B: ChatView planner UI
+	Tweak: Move expand/collapse arrow beside READY badge for clarity
 -->
 <script lang="ts">
 	import { plannerStore, type PlannerChatMessage } from '$lib/stores/planner.svelte.js';
@@ -325,19 +326,30 @@
 
 			<div class="flex-1"></div>
 
-			<!-- Status badge -->
-			<span
-				class="rounded-sm px-1.5 py-px text-[8px] font-semibold uppercase"
-				style="
-					color: {headerStatusColor};
-					background: {headerStatusColor}12;
-					letter-spacing: 0.3px;
-				"
-			>
-				{headerStatus}
-			</span>
+			<!-- Status badge + expand/collapse toggle grouped together -->
+			<div class="flex items-center gap-1">
+				<span
+					class="rounded-sm px-1.5 py-px text-[8px] font-semibold uppercase"
+					style="
+						color: {headerStatusColor};
+						background: {headerStatusColor}12;
+						letter-spacing: 0.3px;
+					"
+				>
+					{headerStatus}
+				</span>
 
-			<!-- Submit button (shown when ready, inside header) -->
+				<!-- Expand/collapse toggle — beside READY badge for visual association -->
+				<button
+					onclick={() => headerExpanded = !headerExpanded}
+					class="cursor-pointer rounded px-1 py-0.5 text-[10px] transition-opacity hover:opacity-80"
+					style="color: var(--color-text-dim); background: transparent; border: none;"
+				>
+					{headerExpanded ? '\u25B2' : '\u25BC'}
+				</button>
+			</div>
+
+			<!-- Submit button (shown when ready, after the status group) -->
 			{#if submitEnabled}
 				<button
 					onclick={handleSubmit}
@@ -363,15 +375,6 @@
 					New Task
 				</button>
 			{/if}
-
-			<!-- Expand/collapse toggle -->
-			<button
-				onclick={() => headerExpanded = !headerExpanded}
-				class="cursor-pointer rounded px-1 py-0.5 text-[10px] transition-opacity hover:opacity-80"
-				style="color: var(--color-text-dim); background: transparent; border: none;"
-			>
-				{headerExpanded ? '\u25B2' : '\u25BC'}
-			</button>
 		</div>
 
 		<!-- Expanded detail panel -->
