@@ -6,10 +6,12 @@
 
 	Issue #38: Data Integration — PR3
 	Issue #85: Added tool_call event rendering
+	Issue #107: Sandbox stdout/stderr collapsible output blocks
 -->
 <script lang="ts">
 	import { tasksStore } from '$lib/stores/tasks.svelte.js';
 	import { agentsStore } from '$lib/stores/agents.svelte.js';
+	import { redactSecrets } from '$lib/utils/redact.js';
 	import type { TimelineEvent, TaskBudget } from '$lib/types/api.js';
 
 	const currentTask = $derived(() => {
@@ -55,6 +57,55 @@
 	function isToolCall(event: TimelineEvent): boolean {
 		return event.type === 'tool_call';
 	}
+
+	/** Issue #107: Track which sandbox output blocks are expanded. */
+	let expandedOutputs = $state<Set<number>>(new Set());
+
+	/** Check if a timeline event has sandbox output to display. */
+	function hasSandboxOutput(event: TimelineEvent): boolean {
+		return !!(event.output_summary?.trim() || (event.errors && event.errors.length > 0));
+	}
+
+	/** Count lines in output text. */
+	function lineCount(text: string): number {
+		return text.split('\n').length;
+	}
+
+	/** Truncate output to N lines. */
+	function truncateOutput(text: string, maxLines: number): string {
+		const lines = text.split('\n');
+		if (lines.length <= maxLines) return text;
+		return lines.slice(0, maxLines).join('\n');
+	}
+
+	/** Toggle expanded state for a sandbox output block. */
+	function toggleOutput(index: number) {
+		const next = new Set(expandedOutputs);
+		if (next.has(index)) {
+			next.delete(index);
+		} else {
+			next.add(index);
+		}
+		expandedOutputs = next;
+	}
+
+	/** Copy text to clipboard. */
+	async function copyToClipboard(text: string) {
+		try {
+			await navigator.clipboard.writeText(text);
+		} catch {
+			// Fallback: ignore silently
+		}
+	}
+
+	/** Auto-expand failed sandbox outputs. */
+	function isAutoExpanded(event: TimelineEvent, index: number): boolean {
+		if (expandedOutputs.has(index)) return true;
+		// Auto-expand on failure
+		return event.exit_code !== undefined && event.exit_code !== 0;
+	}
+
+	const MAX_COLLAPSED_LINES = 50;
 </script>
 
 <div class="p-4 pl-6" style="font-family: var(--font-mono);">
@@ -167,6 +218,63 @@
 					>
 						{event.action}
 					</div>
+
+					<!-- Issue #107: Sandbox output block -->
+					{#if hasSandboxOutput(event)}
+						{@const expanded = isAutoExpanded(event, i)}
+						{@const rawOutput = redactSecrets(event.output_summary)}
+						{@const totalLines = rawOutput ? lineCount(rawOutput) : 0}
+						{@const needsTruncation = totalLines > MAX_COLLAPSED_LINES && !expandedOutputs.has(i)}
+						{@const displayOutput = needsTruncation ? truncateOutput(rawOutput, MAX_COLLAPSED_LINES) : rawOutput}
+
+						<!-- Errors block (above stdout, red-tinted) -->
+						{#if event.errors && event.errors.length > 0}
+							<div class="mt-2 rounded border-l-2 px-2.5 py-1.5" style="background: var(--color-accent-red, #ef4444)10; border-color: var(--color-accent-red, #ef4444);">
+								{#each event.errors as err}
+									<div class="text-[10px] leading-relaxed" style="color: var(--color-accent-red, #ef4444); font-family: var(--font-mono);">{redactSecrets(err)}</div>
+								{/each}
+							</div>
+						{/if}
+
+						<!-- Collapsible stdout block -->
+						{#if rawOutput}
+							<div class="mt-1.5">
+								<button
+									onclick={() => toggleOutput(i)}
+									class="mb-1 flex cursor-pointer items-center gap-1.5 border-none bg-transparent p-0 text-[9px]"
+									style="color: var(--color-text-dim); font-family: var(--font-mono);"
+								>
+									<span style="font-size: 8px;">{expanded ? '▼' : '▶'}</span>
+									{expanded ? 'Hide output' : `Show output (${totalLines} lines)`}
+								</button>
+
+								{#if expanded}
+									<div class="relative rounded border" style="background: var(--color-bg-activity, #0a0c10); border-color: var(--color-border);">
+										<!-- Copy button -->
+										<button
+											onclick={() => copyToClipboard(rawOutput)}
+											class="absolute right-1.5 top-1.5 cursor-pointer rounded border px-1.5 py-0.5 text-[8px] opacity-60 transition-opacity hover:opacity-100"
+											style="background: var(--color-bg-surface); border-color: var(--color-border); color: var(--color-text-dim); font-family: var(--font-mono);"
+										>
+											Copy
+										</button>
+
+										<pre class="overflow-x-auto p-2.5 pr-14 text-[10px] leading-relaxed" style="color: var(--color-text-muted); font-family: var(--font-mono); margin: 0; white-space: pre-wrap; word-break: break-word;">{displayOutput}</pre>
+
+										{#if needsTruncation}
+											<button
+												onclick={() => toggleOutput(i)}
+												class="w-full cursor-pointer border-t border-none py-1.5 text-center text-[9px]"
+												style="background: var(--color-bg-activity, #0a0c10); border-color: var(--color-border); color: var(--color-accent-cyan, #22d3ee); font-family: var(--font-mono);"
+											>
+												Show all ({totalLines} lines)
+											</button>
+										{/if}
+									</div>
+								{/if}
+							</div>
+						{/if}
+					{/if}
 				</div>
 			</div>
 		{/each}

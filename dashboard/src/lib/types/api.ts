@@ -10,6 +10,7 @@
  * Issue #106: Added workspace types, updated CreateTaskRequest
  * Issue #106 Phase A: Added BrowseDirectoryEntry, BrowseDirectoryResponse
  * Issue #106 Phase B: Added Planner types, planner_message SSE event
+ * Issue #107: Added sandbox output fields to TimelineEvent
  */
 
 // -- Envelope --
@@ -56,6 +57,10 @@ export interface TimelineEvent {
 	action: string;
 	type: string;
 	sandbox: string;
+	// Issue #107: Sandbox output fields (present on sandbox_validated events)
+	output_summary?: string;
+	errors?: string[];
+	exit_code?: number;
 }
 
 export interface Blueprint {
