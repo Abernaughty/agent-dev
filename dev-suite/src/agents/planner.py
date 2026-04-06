@@ -445,19 +445,25 @@ def create_planner_session(
         checklist=checklist,
     )
 
-    # System message with pre-populated context
-    context_parts = [f"Workspace: {workspace}"]
+    # System message with pre-populated context — formatted with clear
+    # separation between workspace info and the user-facing prompt.
+    context_lines = [f"**Workspace:** `{workspace}`"]
     if languages:
-        context_parts.append(f"Detected languages: {', '.join(languages)}")
+        context_lines.append(
+            f"**Detected languages:** {', '.join(languages)}"
+        )
     if frameworks:
-        context_parts.append(f"Detected frameworks: {', '.join(frameworks)}")
-    context_parts.append(
+        context_lines.append(
+            f"**Detected frameworks:** {', '.join(frameworks)}"
+        )
+    context_lines.append("")
+    context_lines.append(
         "Describe what you'd like the agents to accomplish. "
         "I'll help ensure the task specification is complete."
     )
 
     session.messages.append(
-        PlannerMessage(role="system", content="\n".join(context_parts))
+        PlannerMessage(role="system", content="\n".join(context_lines))
     )
 
     logger.info(
@@ -486,10 +492,17 @@ work with information the user provides and any auto-detected project context.
 Your responsibilities:
 1. Understand the user's objective
 2. Validate the task against the readiness checklist
-3. Ask for missing REQUIRED fields (workspace, objective, languages)
-4. Warn about missing RECOMMENDED fields (frameworks, output_type, \
-   acceptance_criteria) but don't block on them
-5. When the task spec is complete, present a summary for confirmation
+3. Ask for missing REQUIRED fields (workspace, objective, languages) if \
+   they are not already satisfied
+4. After the user's initial message, ask about any missing information \
+   that you judge to be important for the task's success. Only ask about \
+   fields that are contextually relevant — for example, acceptance criteria \
+   matter for a complex feature but not for a simple script.
+5. If the user does not provide the additional info in their response, \
+   fill in recommended fields yourself where you can make a reasonable \
+   inference, and move on. Do not repeatedly ask for the same field.
+6. When the task spec is complete, present a brief summary and ask \
+   "Ready to submit to the Architect?"
 
 Current task specification state (JSON):
 {task_spec_json}
@@ -501,15 +514,19 @@ Checklist status:
 
 Rules:
 - Be concise and conversational — not robotic
+- Use **bold** for emphasis, `backticks` for file paths and code references, \
+  and numbered lists when asking multiple questions
 - If the user gives you enough info, extract fields directly (don't ask \
   obvious questions)
 - When auto-inferred fields exist, confirm them briefly: "I see this is a \
   TypeScript/SvelteKit project — does that look right?"
-- When ready, present the full spec summary and ask "Ready to submit to the \
-  Architect?"
 - If the task doesn't require a framework (e.g., standalone scripts), that's \
-  perfectly fine — frameworks is recommended, not required
-- ALWAYS respond with valid JSON at the end of your message in a fenced block:
+  perfectly fine — do not warn about missing frameworks
+- Do NOT include a JSON specification block or code fences in your \
+  conversational response — the system extracts fields automatically. \
+  Keep your response purely conversational.
+- ALWAYS include a hidden JSON extraction block at the very end of your \
+  message, separated by a blank line, in this exact format:
   ```json
   {{
     "objective": "...",
@@ -523,6 +540,7 @@ Rules:
   ```
   Include only fields you can extract from the conversation so far.
   Omit fields you don't have information for.
+  This block is stripped before display — the user never sees it.
 """
 
 
@@ -630,10 +648,20 @@ def _apply_spec_updates(task_spec: TaskSpec, updates: dict[str, Any]) -> TaskSpe
     return task_spec
 
 
-def _strip_json_block(text: str) -> str:
-    """Remove the JSON block from the Planner's response for display."""
-    # Remove ```json ... ``` blocks
-    cleaned = re.sub(r"\n?```json\s*\n?.+?\n?```\s*$", "", text, flags=re.DOTALL)
+def _strip_code_blocks(text: str) -> str:
+    """Remove ALL fenced code blocks from the Planner's response for display.
+
+    Strips any ```...``` blocks (json, python, or unlabelled). The TaskSpec
+    JSON is extracted separately and shown in the checklist header preview,
+    so code blocks in chat are redundant noise.
+    """
+    # Remove all fenced code blocks (``` optionally followed by a language tag)
+    cleaned = re.sub(
+        r"\n?```[a-zA-Z]*\s*\n?.+?\n?```\s*",
+        "",
+        text,
+        flags=re.DOTALL,
+    )
     return cleaned.strip()
 
 
@@ -674,8 +702,12 @@ async def send_planner_message(
     # Update checklist
     session.checklist = build_checklist(session.task_spec)
 
-    # Store assistant response (without JSON block for display)
-    display_text = _strip_json_block(response_text)
+    # Store assistant response (without code blocks for display).
+    # Guard against blank display_text if the LLM returned only a
+    # fenced code block with no conversational text.
+    display_text = _strip_code_blocks(response_text) or (
+        "Task specification updated."
+    )
     session.messages.append(
         PlannerMessage(role="assistant", content=display_text)
     )
