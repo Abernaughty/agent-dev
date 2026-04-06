@@ -702,8 +702,12 @@ async def send_planner_message(
     # Update checklist
     session.checklist = build_checklist(session.task_spec)
 
-    # Store assistant response (without code blocks for display)
-    display_text = _strip_code_blocks(response_text)
+    # Store assistant response (without code blocks for display).
+    # Guard against blank display_text if the LLM returned only a
+    # fenced code block with no conversational text.
+    display_text = _strip_code_blocks(response_text) or (
+        "Task specification updated."
+    )
     session.messages.append(
         PlannerMessage(role="assistant", content=display_text)
     )

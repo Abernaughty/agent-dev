@@ -20,6 +20,7 @@
 	- Task ID in submission message links to Agent Dashboard
 	- Dim dot → pulse → check state transitions (no red X)
 	- PlannerMessage component renders markdown subset for planner/system
+	- Graceful degradation: workspace error shows unavailable state
 
 	Issue #106 Phase B: ChatView planner UI
 -->
@@ -243,6 +244,11 @@
 	function navigateToTask(taskId: string) {
 		dashboardCtx.handlePanelSwitch('agents');
 		dashboardCtx.handleSelect(`task-${taskId}`);
+	}
+
+	/** Retry loading workspaces after an error. */
+	function handleRetryWorkspaces() {
+		workspacesStore.refresh();
 	}
 
 	// -- Message styling helpers --
@@ -475,16 +481,43 @@
 		<!-- Empty state -->
 		{#if plannerStore.messages.length === 0}
 			<div class="flex flex-col items-center justify-center py-16 text-center">
-				<div class="mb-3 text-[24px]" style="color: var(--color-text-dim); opacity: 0.3;">
-					&#9672;
-				</div>
-				<div class="mb-1 text-[13px]" style="color: var(--color-text-muted);">
-					Plan a task for the agent team
-				</div>
-				<div class="max-w-[360px] text-[11px] leading-relaxed" style="color: var(--color-text-dim);">
-					Describe what you want built. The Planner will help ensure
-					the task is clear enough for the agents to succeed.
-				</div>
+				{#if workspacesStore.error}
+					<!-- Backend unavailable — graceful degradation -->
+					<div class="mb-3 text-[24px]" style="color: var(--color-accent-amber); opacity: 0.4;">
+						&#9888;
+					</div>
+					<div class="mb-1 text-[13px]" style="color: var(--color-text-muted);">
+						Workspace service unavailable
+					</div>
+					<div class="mb-4 max-w-[360px] text-[11px] leading-relaxed" style="color: var(--color-text-dim);">
+						Unable to connect to the backend. Check that the dev-suite server is running.
+					</div>
+					<button
+						onclick={handleRetryWorkspaces}
+						class="cursor-pointer rounded-md border px-4 py-1.5 text-[10px] uppercase transition-opacity hover:opacity-80"
+						style="
+							background: var(--color-accent-amber)10;
+							border-color: var(--color-accent-amber)20;
+							color: var(--color-accent-amber);
+							font-family: var(--font-mono);
+							letter-spacing: 0.5px;
+						"
+					>
+						Retry
+					</button>
+				{:else}
+					<!-- Normal empty state -->
+					<div class="mb-3 text-[24px]" style="color: var(--color-text-dim); opacity: 0.3;">
+						&#9672;
+					</div>
+					<div class="mb-1 text-[13px]" style="color: var(--color-text-muted);">
+						Plan a task for the agent team
+					</div>
+					<div class="max-w-[360px] text-[11px] leading-relaxed" style="color: var(--color-text-dim);">
+						Describe what you want built. The Planner will help ensure
+						the task is clear enough for the agents to succeed.
+					</div>
+				{/if}
 			</div>
 		{/if}
 
