@@ -16,7 +16,7 @@ const SECRET_PATTERNS: RegExp[] = [
 	/ghs_[a-zA-Z0-9]{36}/g, // GitHub App token
 	/e2b_[a-zA-Z0-9]{20,}/g, // E2B
 	/npm_[a-zA-Z0-9]{36}/g, // npm token
-	/(password|secret|token|key)\s*[=:]\s*\S+/gi // Generic key=value
+	/["']?(password|secret|token|key)["']?\s*[=:]\s*["']?\S+["']?/gi // Generic key=value (quoted & unquoted)
 ];
 
 /**
