@@ -263,7 +263,14 @@ class TaskRunner:
                 final_status = task.status
                 for agent_id in ("arch", "dev", "qa"):
                     await state_manager.update_agent_status(agent_id, AgentStatus.IDLE)
-                await self._emit_complete(task_id, final_status.value, f"Task completed in {elapsed:.1f}s -- {final_status.value}")
+
+                # Include error_message in completion detail for failed tasks
+                if final_status == TaskStatus.FAILED and task.error_message:
+                    completion_detail = f"Task failed: {task.error_message}"
+                else:
+                    completion_detail = f"Task completed in {elapsed:.1f}s -- {final_status.value}"
+
+                await self._emit_complete(task_id, final_status.value, completion_detail)
                 await self._emit_log(f"[orchestrator] Task {task_id} finished: {final_status.value} ({elapsed:.1f}s, {task.budget.tokens_used} tokens, ${task.budget.cost_used:.2f})")
 
                 add_trace_event(
@@ -326,6 +333,12 @@ class TaskRunner:
                 task.status = new_task_status
                 if new_task_status in (TaskStatus.PASSED, TaskStatus.FAILED):
                     task.completed_at = datetime.now(timezone.utc)
+
+        # Surface error_message from node output to the in-memory TaskDetail
+        # so GET /api/tasks/{id} and SSE task_complete carry the real reason.
+        error_message = node_output.get("error_message")
+        if error_message:
+            task.error_message = error_message
 
         tokens_used = node_output.get("tokens_used", task.budget.tokens_used)
         retry_count = node_output.get("retry_count", task.budget.retries_used)

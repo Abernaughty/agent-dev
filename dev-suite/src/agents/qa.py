@@ -58,16 +58,21 @@ class FailureReport(BaseModel):
     Issue #125 additions:
     - fix_complexity: How hard the fix is (trivial/moderate/complex).
     - exact_fix_hint: Specific instruction for what to change.
+
+    Defensive defaults: LLMs may return null for fields that are
+    irrelevant on passing reviews (recommendation, errors, failed_files,
+    tests_passed, tests_failed). Defaults prevent Pydantic validation
+    from crashing the workflow on a perfectly valid QA pass.
     """
 
     task_id: str
     status: str  # "pass" | "fail" | "escalate"
-    tests_passed: int
-    tests_failed: int
-    errors: list[str]
-    failed_files: list[str]
-    is_architectural: bool  # If True, escalate to Architect
-    recommendation: str
+    tests_passed: int = 0
+    tests_failed: int = 0
+    errors: list[str] = []
+    failed_files: list[str] = []
+    is_architectural: bool = False  # If True, escalate to Architect
+    recommendation: str = ""  # Empty on pass, populated on fail/escalate
     failure_type: FailureType | None = None
     # Issue #125: Retry guidance fields
     fix_complexity: FixComplexity | None = None
