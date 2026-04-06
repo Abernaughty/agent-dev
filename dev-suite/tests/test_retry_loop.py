@@ -10,10 +10,9 @@ Covers:
 from unittest.mock import MagicMock, patch
 
 import pytest
+
 from src.agents.architect import Blueprint
 from src.agents.qa import FailureReport, FailureType, FixComplexity
-from src.sandbox.e2b_runner import SandboxResult
-
 from src.orchestrator import (
     GraphState,
     WorkflowStatus,
@@ -22,7 +21,7 @@ from src.orchestrator import (
     developer_node,
     qa_node,
 )
-
+from src.sandbox.e2b_runner import SandboxResult
 
 # ---------------------------------------------------------------------------
 # FailureReport: new fields (fix_complexity, exact_fix_hint)
