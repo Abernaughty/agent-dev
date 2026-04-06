@@ -201,7 +201,9 @@ class TestE2ERetryPath:
         dev_calls = mock_dev_llm.return_value.invoke.call_args_list
         assert len(dev_calls) == 2
         retry_msg = dev_calls[1][0][0][1].content
-        assert "PREVIOUS ATTEMPT FAILED" in retry_msg
+        # Issue #125: retry prompt now uses structured RETRY CONTEXT format
+        assert "RETRY CONTEXT" in retry_msg
+        assert "QA FAILURE REPORT" in retry_msg
         assert "Missing edge case for empty string" in retry_msg
 
 
