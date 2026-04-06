@@ -8,8 +8,10 @@
 	Issue #108: Click-to-expand task detail view
 	CR fixes: neutral acceptance criteria indicators, sandbox output in timeline,
 	          per-task loading/error checks, redacted copy/JSON, $derived.by()
+	Hotfix: untrack fetchDetail in $effect to prevent infinite loop
 -->
 <script lang="ts">
+	import { untrack } from 'svelte';
 	import { tasksStore } from '$lib/stores/tasks.svelte.js';
 	import { agentsStore } from '$lib/stores/agents.svelte.js';
 	import { redactSecrets } from '$lib/utils/redact.js';
@@ -21,7 +23,7 @@
 
 	let { taskId }: Props = $props();
 
-	// CR nitpick #2: Use $derived.by() for idiomatic Svelte 5
+	// Use $derived.by() for idiomatic Svelte 5
 	const summary = $derived.by(() => tasksStore.list.find((t) => t.id === taskId) ?? null);
 	const detail = $derived.by(() => tasksStore.getDetail(taskId));
 
@@ -33,10 +35,14 @@
 		return map;
 	});
 
-	// Fetch detail when taskId changes
+	// Fetch detail when taskId changes.
+	// CRITICAL: untrack the fetch call so this effect only depends on taskId,
+	// not on the reactive state that fetchDetail mutates (detailCache, detailLoadingMap, etc).
+	// Without untrack, fetchDetail writes → $derived reads → $effect re-runs → infinite loop.
 	$effect(() => {
-		if (taskId) {
-			tasksStore.fetchDetail(taskId);
+		const id = taskId; // Subscribe to taskId
+		if (id) {
+			untrack(() => tasksStore.fetchDetail(id));
 		}
 	});
 
@@ -84,13 +90,13 @@
 		tasksStore.fetchDetail(taskId, true);
 	}
 
-	// CR nitpick #1: Simplified with optional chaining
+	// Simplified with optional chaining
 	function hasSandboxOutput(event: TimelineEvent): boolean {
 		return !!(event.output_summary?.trim() || event.errors?.length);
 	}
 
 	/**
-	 * CR fix M2: Build a redacted copy of task data for JSON display.
+	 * Build a redacted copy of task data for JSON display.
 	 * All string fields that could contain secrets are piped through redactSecrets().
 	 */
 	function buildRedactedJson(s: TaskSummary, d: TaskDetail | null): string {
@@ -248,7 +254,7 @@
 				{#if showCode}
 					{@const redactedCode = redactSecrets(d.generated_code)}
 					<div class="relative rounded-md border" style="background: #08090e; border-color: var(--color-border);">
-						<!-- CR fix M1: Copy redacted text, not raw -->
+						<!-- Copy redacted text, not raw -->
 						<button
 							onclick={() => copyToClipboard(redactedCode)}
 							class="absolute right-2 top-2 cursor-pointer rounded border px-2 py-0.5 text-[8px] opacity-60 transition-opacity hover:opacity-100"
@@ -327,7 +333,7 @@
 			{/if}
 		{/if}
 
-		<!-- ===== RAW JSON (collapsible) — CR fix M2: redacted output ===== -->
+		<!-- ===== RAW JSON (collapsible) — redacted output ===== -->
 		<button
 			onclick={() => showJson = !showJson}
 			class="mb-1 flex cursor-pointer items-center gap-1.5 border-none bg-transparent p-0 text-[10px]"
