@@ -13,10 +13,13 @@
 
 	Chat rework:
 	- Readiness checklist pinned as collapsible header (not inline in chat)
+	- Dynamic checklist: only shows fields with values. Required fields
+	  always shown; recommended/optional appear once provided/inferred.
 	- Warnings removed from chat stream (header communicates state)
 	- SUBMIT button relocated to readiness header
 	- Task ID in submission message links to Agent Dashboard
 	- Dim dot → pulse → check state transitions (no red X)
+	- PlannerMessage component renders markdown subset for planner/system
 
 	Issue #106 Phase B: ChatView planner UI
 -->
@@ -26,6 +29,7 @@
 	import { tasksStore } from '$lib/stores/tasks.svelte.js';
 	import { getDashboardContext } from '$lib/stores/dashboard.svelte.js';
 	import WorkspaceSelector from '$lib/components/WorkspaceSelector.svelte';
+	import PlannerMessage from '$lib/components/PlannerMessage.svelte';
 	import { tick } from 'svelte';
 
 	const dashboardCtx = getDashboardContext();
@@ -152,24 +156,37 @@
 		return 'var(--color-accent-amber)';
 	});
 
-	// -- Default checklist items (shown before session starts) --
-	// Wrapped in $derived() so workspace field reactively updates
-	// when workspaceReady or workspacesStore.selected changes.
+	// -- Dynamic checklist items --
+	// Required fields are always shown. Recommended/optional fields
+	// only appear once the user or Planner has provided/inferred them.
+
+	const requiredFields = new Set(['workspace', 'objective', 'languages']);
 
 	const defaultChecklistItems = $derived([
 		{ field: 'workspace', priority: 'required', satisfied: workspaceReady, auto_inferred: false, value: workspaceReady ? workspacesStore.selected : null },
 		{ field: 'objective', priority: 'required', satisfied: false, auto_inferred: false, value: null },
 		{ field: 'languages', priority: 'required', satisfied: false, auto_inferred: false, value: null },
-		{ field: 'frameworks', priority: 'recommended', satisfied: false, auto_inferred: false, value: null },
-		{ field: 'output_type', priority: 'recommended', satisfied: false, auto_inferred: false, value: null },
-		{ field: 'acceptance_criteria', priority: 'recommended', satisfied: false, auto_inferred: false, value: null },
-		{ field: 'constraints', priority: 'optional', satisfied: false, auto_inferred: false, value: null },
-		{ field: 'related_files', priority: 'optional', satisfied: false, auto_inferred: false, value: null },
 	]);
 
-	const checklistItems = $derived(
+	/** Filter checklist items: always show required, show others only if satisfied. */
+	const visibleChecklistItems = $derived.by(() => {
+		const source = plannerStore.checklist?.items ?? defaultChecklistItems;
+		return source.filter(item =>
+			requiredFields.has(item.field) || item.satisfied
+		);
+	});
+
+	/** Full checklist items for expanded detail view. */
+	const allChecklistItems = $derived(
 		plannerStore.checklist?.items ?? defaultChecklistItems
 	);
+
+	/** Expanded view also filters to required + satisfied only. */
+	const visibleExpandedItems = $derived.by(() => {
+		return allChecklistItems.filter(item =>
+			requiredFields.has(item.field) || item.satisfied
+		);
+	});
 
 	// -- Actions --
 
@@ -248,19 +265,10 @@
 		}
 	}
 
-	function msgLabel(msg: PlannerChatMessage): string {
-		switch (msg.role) {
-			case 'user': return 'You';
-			case 'planner': return 'Planner';
-			case 'system': return 'System';
-			default: return '';
-		}
-	}
-
 	function msgLabelColor(msg: PlannerChatMessage): string {
 		switch (msg.role) {
 			case 'user': return 'var(--color-accent-cyan)';
-			case 'planner': return 'var(--color-accent-purple)';
+			case 'planner': return 'var(--color-accent-amber)';
 			case 'system': return 'var(--color-text-dim)';
 			default: return 'var(--color-text-dim)';
 		}
@@ -286,9 +294,9 @@
 				Task Readiness
 			</span>
 
-			<!-- Compact status chips -->
+			<!-- Compact status chips (dynamic: only show fields with values) -->
 			<div class="flex flex-wrap items-center gap-1">
-				{#each checklistItems as item (item.field)}
+				{#each visibleChecklistItems as item (item.field)}
 					{@const state = getItemState(item)}
 					<span
 						class="flex items-center gap-1 rounded px-1.5 py-px text-[9px]"
@@ -363,7 +371,7 @@
 		<!-- Expanded detail panel -->
 		{#if headerExpanded}
 			<div class="border-t px-4 py-2" style="border-color: var(--color-border);">
-				{#each checklistItems as item (item.field)}
+				{#each visibleExpandedItems as item (item.field)}
 					{@const state = getItemState(item)}
 					{@const isReq = item.priority === 'required'}
 					{@const isRec = item.priority === 'recommended'}
@@ -474,8 +482,8 @@
 					Plan a task for the agent team
 				</div>
 				<div class="max-w-[360px] text-[11px] leading-relaxed" style="color: var(--color-text-dim);">
-					Describe what you want built. The checklist above shows
-					what information helps the agents succeed.
+					Describe what you want built. The Planner will help ensure
+					the task is clear enough for the agents to succeed.
 				</div>
 			</div>
 		{/if}
@@ -493,20 +501,37 @@
 						border-color: {msgBorder(msg)};
 						color: {msg.role === 'event' ? 'var(--color-text-muted)' : 'var(--color-text-bright)'};
 						{msg.role === 'event' ? 'font-style: italic;' : ''}
+						overflow-wrap: break-word;
 					"
 				>
+					<!-- Message header: avatar + label -->
 					{#if msg.role !== 'event'}
 						<div
-							class="mb-1 text-[9px] uppercase"
-							style="color: {msgLabelColor(msg)}; letter-spacing: 0.5px;"
+							class="mb-1.5 flex items-center gap-2 text-[9px] uppercase"
+							style="letter-spacing: 0.5px;"
 						>
-							{msgLabel(msg)} | {msg.time}
+							{#if msg.role === 'planner'}
+								<!-- Planner avatar badge -->
+								<span
+									class="flex h-4 w-4 items-center justify-center rounded text-[8px] font-semibold"
+									style="
+										background: var(--color-accent-amber)18;
+										color: var(--color-accent-amber);
+										border: 1px solid var(--color-accent-amber)25;
+									"
+								>P</span>
+							{/if}
+							<span style="color: {msgLabelColor(msg)};">
+								{msg.role === 'user' ? 'You' : msg.role === 'planner' ? 'Planner' : 'System'}
+							</span>
+							<span style="color: var(--color-text-dim);">|</span>
+							<span style="color: var(--color-text-dim);">{msg.time}</span>
 						</div>
 					{/if}
 
-					<!-- Render messages with task ID link -->
+					<!-- Message content -->
 					{#if msg.taskId}
-						{msg.text}
+						<PlannerMessage {msg} />
 						<button
 							onclick={() => navigateToTask(msg.taskId!)}
 							class="ml-1 cursor-pointer border-none text-[12px] underline underline-offset-2 transition-opacity hover:opacity-80"
@@ -514,17 +539,8 @@
 						>
 							{msg.taskId} &#8594;
 						</button>
-					{:else if msg.role === 'planner'}
-						<!-- Render planner messages with line breaks preserved -->
-						{#each msg.text.split('\n') as line, li (li)}
-							{#if line.trim() === ''}
-								<br />
-							{:else}
-								<p class="mb-1">{line}</p>
-							{/if}
-						{/each}
 					{:else}
-						{msg.text}
+						<PlannerMessage {msg} />
 					{/if}
 				</div>
 			</div>
