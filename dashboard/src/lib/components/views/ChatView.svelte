@@ -153,8 +153,10 @@
 	});
 
 	// -- Default checklist items (shown before session starts) --
+	// Wrapped in $derived() so workspace field reactively updates
+	// when workspaceReady or workspacesStore.selected changes.
 
-	const defaultChecklistItems = [
+	const defaultChecklistItems = $derived([
 		{ field: 'workspace', priority: 'required', satisfied: workspaceReady, auto_inferred: false, value: workspaceReady ? workspacesStore.selected : null },
 		{ field: 'objective', priority: 'required', satisfied: false, auto_inferred: false, value: null },
 		{ field: 'languages', priority: 'required', satisfied: false, auto_inferred: false, value: null },
@@ -163,7 +165,7 @@
 		{ field: 'acceptance_criteria', priority: 'recommended', satisfied: false, auto_inferred: false, value: null },
 		{ field: 'constraints', priority: 'optional', satisfied: false, auto_inferred: false, value: null },
 		{ field: 'related_files', priority: 'optional', satisfied: false, auto_inferred: false, value: null },
-	];
+	]);
 
 	const checklistItems = $derived(
 		plannerStore.checklist?.items ?? defaultChecklistItems
