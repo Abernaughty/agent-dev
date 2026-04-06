@@ -72,14 +72,13 @@ class TestChecklist:
         spec = TaskSpec()
         checklist = build_checklist(spec)
         assert not checklist.required_satisfied
-        assert len(checklist.missing_required) == 4  # workspace, objective, languages, frameworks
+        assert len(checklist.missing_required) == 3  # workspace, objective, languages
 
     def test_required_fields_satisfied(self):
         spec = TaskSpec(
             workspace="/my/project",
             objective="Add auth",
             languages=["Python"],
-            frameworks=["FastAPI"],
         )
         checklist = build_checklist(spec)
         assert checklist.required_satisfied
@@ -90,10 +89,10 @@ class TestChecklist:
             workspace="/my/project",
             objective="Add auth",
             languages=["Python"],
-            frameworks=["FastAPI"],
         )
         checklist = build_checklist(spec)
         assert checklist.has_warnings
+        assert "frameworks" in checklist.missing_recommended
         assert "output_type" in checklist.missing_recommended
         assert "acceptance_criteria" in checklist.missing_recommended
 
@@ -113,12 +112,24 @@ class TestChecklist:
         spec = TaskSpec(
             workspace="/my/project",
             objective="Add auth",
-            # languages and frameworks missing
+            # languages missing
         )
         checklist = build_checklist(spec)
         assert not checklist.required_satisfied
         assert "languages" in checklist.missing_required
-        assert "frameworks" in checklist.missing_required
+
+    def test_frameworks_is_recommended_not_required(self):
+        """frameworks should not block submission when empty."""
+        spec = TaskSpec(
+            workspace="/my/project",
+            objective="Print triforce",
+            languages=["Python"],
+            # No frameworks — this is fine for a standalone script
+        )
+        checklist = build_checklist(spec)
+        assert checklist.required_satisfied  # Should be ready!
+        assert "frameworks" not in checklist.missing_required
+        assert "frameworks" in checklist.missing_recommended
 
     def test_auto_inferred_flag(self):
         spec = TaskSpec(
@@ -465,8 +476,34 @@ class TestSendPlannerMessage:
 
         assert response.task_spec.objective == "Add auth middleware"
         assert "Tests pass" in response.task_spec.acceptance_criteria
-        assert response.ready  # workspace + objective + languages + frameworks = all required
+        assert response.ready  # workspace + objective + languages = all required
         assert len(session.messages) == 3  # system + user + assistant
+
+    @pytest.mark.asyncio
+    async def test_message_with_json_response_no_frameworks(self):
+        """Task without frameworks should still be submittable."""
+        session = create_planner_session(
+            workspace="/my/project",
+            languages=["Python"],
+            # No frameworks
+        )
+
+        mock_response = (
+            "Got it, a standalone Python script.\n\n"
+            '```json\n'
+            '{"objective": "Print the triforce"}\n'
+            '```'
+        )
+
+        with patch(
+            "src.agents.planner._call_planner_llm",
+            new_callable=AsyncMock,
+            return_value=mock_response,
+        ):
+            response = await send_planner_message(session, "Print the triforce")
+
+        assert response.task_spec.objective == "Print the triforce"
+        assert response.ready  # frameworks not required
 
     @pytest.mark.asyncio
     async def test_message_without_json(self):

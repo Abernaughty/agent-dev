@@ -355,6 +355,13 @@ def build_checklist(task_spec: TaskSpec) -> ChecklistStatus:
 
     Evaluates each field against the Required/Recommended/Optional tiers
     defined in the Dashboard Workflow Roadmap Section 2.3.
+
+    Required: workspace, objective, languages
+    Recommended: frameworks, output_type, acceptance_criteria
+    Optional: constraints, related_files
+
+    Note: frameworks is RECOMMENDED (not required) because many valid
+    tasks (scripts, CLI tools, data processing) don't use any framework.
     """
     items = [
         ChecklistItem(
@@ -378,7 +385,7 @@ def build_checklist(task_spec: TaskSpec) -> ChecklistStatus:
         ),
         ChecklistItem(
             field="frameworks",
-            priority=ChecklistPriority.REQUIRED,
+            priority=ChecklistPriority.RECOMMENDED,
             satisfied=bool(task_spec.frameworks),
             value=task_spec.frameworks or None,
             auto_inferred=bool(task_spec.frameworks),
@@ -479,9 +486,9 @@ work with information the user provides and any auto-detected project context.
 Your responsibilities:
 1. Understand the user's objective
 2. Validate the task against the readiness checklist
-3. Ask for missing REQUIRED fields (workspace, objective, languages, frameworks)
-4. Warn about missing RECOMMENDED fields (output_type, acceptance_criteria) \
-   but don't block on them
+3. Ask for missing REQUIRED fields (workspace, objective, languages)
+4. Warn about missing RECOMMENDED fields (frameworks, output_type, \
+   acceptance_criteria) but don't block on them
 5. When the task spec is complete, present a summary for confirmation
 
 Current task specification state (JSON):
@@ -500,6 +507,8 @@ Rules:
   TypeScript/SvelteKit project — does that look right?"
 - When ready, present the full spec summary and ask "Ready to submit to the \
   Architect?"
+- If the task doesn't require a framework (e.g., standalone scripts), that's \
+  perfectly fine — frameworks is recommended, not required
 - ALWAYS respond with valid JSON at the end of your message in a fenced block:
   ```json
   {{
