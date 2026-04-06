@@ -3,6 +3,10 @@
 Produces structured failure reports for retry context.
 Can escalate architectural failures back to Architect via
 failure_type classification.
+
+Issue #125: Added fix_complexity and exact_fix_hint fields
+to help the Lead Dev make targeted fixes on retry instead
+of regenerating code from scratch.
 """
 
 import logging
@@ -27,6 +31,20 @@ class FailureType(str, Enum):
     ARCHITECTURAL = "architectural"
 
 
+class FixComplexity(str, Enum):
+    """How complex the fix is, from QA's perspective.
+
+    Used by the orchestrator to tailor the retry prompt:
+    - TRIVIAL: One-line fix (spacing, typo, missing import, off-by-one).
+    - MODERATE: Multi-line fix within the same function/block.
+    - COMPLEX: Structural changes across multiple functions or files.
+    """
+
+    TRIVIAL = "trivial"
+    MODERATE = "moderate"
+    COMPLEX = "complex"
+
+
 class FailureReport(BaseModel):
     """Structured report passed back on QA failure.
 
@@ -36,6 +54,10 @@ class FailureReport(BaseModel):
     The failure_type field is the primary classifier. The is_architectural
     bool is kept for backward compatibility and stays in sync via the
     model validator.
+
+    Issue #125 additions:
+    - fix_complexity: How hard the fix is (trivial/moderate/complex).
+    - exact_fix_hint: Specific instruction for what to change.
     """
 
     task_id: str
@@ -47,6 +69,9 @@ class FailureReport(BaseModel):
     is_architectural: bool  # If True, escalate to Architect
     recommendation: str
     failure_type: FailureType | None = None
+    # Issue #125: Retry guidance fields
+    fix_complexity: FixComplexity | None = None
+    exact_fix_hint: str | None = None
 
     @field_validator("failure_type", mode="before")
     @classmethod
@@ -67,6 +92,26 @@ class FailureReport(BaseModel):
                 logger.warning(
                     "Unknown failure_type '%s' from LLM output, "
                     "falling back to is_architectural/status",
+                    v,
+                )
+            return None
+        return v
+
+    @field_validator("fix_complexity", mode="before")
+    @classmethod
+    def normalize_fix_complexity(cls, v: object) -> object:
+        """Accept case-insensitive fix_complexity values from LLM output.
+
+        Coerce unknown values to None rather than crashing.
+        """
+        if isinstance(v, str):
+            normalized = v.strip().lower()
+            if normalized in ("trivial", "moderate", "complex"):
+                return normalized
+            if normalized:
+                logger.warning(
+                    "Unknown fix_complexity '%s' from LLM output, "
+                    "defaulting to None",
                     v,
                 )
             return None

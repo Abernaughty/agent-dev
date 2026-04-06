@@ -16,6 +16,10 @@ gracefully when GITHUB_TOKEN is missing, no files exist, or user opts out.
 
 Issue #105: Workspace security -- GraphState carries workspace_root,
 apply_code_node uses per-task workspace instead of global env var.
+
+Issue #125: Retry loop fix -- On retry, developer_node now receives
+current file contents from disk, sandbox stdout, and a targeted
+"fix, don't rewrite" system prompt. QA leniency for empty criteria.
 """
 
 import asyncio
@@ -73,6 +77,9 @@ def _safe_int(env_key: str, default: int) -> int:
 MAX_RETRIES = _safe_int("MAX_RETRIES", 3)
 TOKEN_BUDGET = _safe_int("TOKEN_BUDGET", 50000)
 MAX_TOOL_TURNS = _safe_int("MAX_TOOL_TURNS", 10)
+# Issue #125: Max chars of file content to inject into retry prompt
+# to prevent context window exhaustion on large files.
+MAX_RETRY_FILE_CHARS = _safe_int("MAX_RETRY_FILE_CHARS", 30000)
 
 
 def _get_workspace_root() -> Path:
@@ -327,6 +334,90 @@ def _run_async(coro):
         return asyncio.run(coro)
 
 
+# -- Issue #125: Retry Context Builder --
+
+
+def _build_retry_file_context(
+    failure_report: FailureReport,
+    blueprint: Blueprint,
+    workspace_root: Path,
+    max_chars: int = MAX_RETRY_FILE_CHARS,
+) -> str:
+    """Read current file contents from disk for failed files.
+
+    Only reads files listed in failure_report.failed_files to keep
+    context budget manageable. Falls back to all target_files if
+    failed_files is empty. Respects workspace_root boundary.
+
+    Returns a formatted string block for injection into the retry prompt.
+    """
+    # Determine which files to include
+    files_to_read = failure_report.failed_files or blueprint.target_files
+    if not files_to_read:
+        return ""
+
+    parts = []
+    total_chars = 0
+
+    for file_path in files_to_read:
+        # Security: resolve and validate path stays within workspace
+        try:
+            full_path = (workspace_root / file_path).resolve()
+            if not str(full_path).startswith(str(workspace_root)):
+                logger.warning(
+                    "[RETRY] Path traversal blocked: %s", file_path
+                )
+                continue
+        except (ValueError, OSError):
+            continue
+
+        if not full_path.is_file():
+            parts.append(f"\n--- FILE: {file_path} (not found on disk) ---")
+            continue
+
+        try:
+            content = full_path.read_text(encoding="utf-8")
+        except Exception as e:
+            parts.append(f"\n--- FILE: {file_path} (read error: {e}) ---")
+            continue
+
+        # Budget check: skip if adding this file would exceed limit
+        if total_chars + len(content) > max_chars:
+            parts.append(
+                f"\n--- FILE: {file_path} (skipped: would exceed "
+                f"{max_chars} char context budget) ---"
+            )
+            continue
+
+        parts.append(f"\n--- FILE: {file_path} ---\n{content}")
+        total_chars += len(content)
+
+    if not parts:
+        return ""
+
+    return "\n\nCURRENT FILES ON DISK (your previous output):\n" + "\n".join(parts)
+
+
+def _build_retry_sandbox_context(sandbox_result: SandboxResult | None) -> str:
+    """Format sandbox execution output for the retry prompt."""
+    if sandbox_result is None:
+        return ""
+
+    parts = ["\n\nSANDBOX EXECUTION RESULTS (what your code actually produced):"]
+    parts.append(f"  Exit code: {sandbox_result.exit_code}")
+
+    if sandbox_result.tests_passed is not None:
+        parts.append(f"  Tests passed: {sandbox_result.tests_passed}")
+    if sandbox_result.tests_failed is not None:
+        parts.append(f"  Tests failed: {sandbox_result.tests_failed}")
+    if sandbox_result.errors:
+        parts.append(f"  Errors: {', '.join(sandbox_result.errors)}")
+    if sandbox_result.output_summary:
+        parts.append(f"  Output:\n{sandbox_result.output_summary}")
+
+    return "\n".join(parts)
+
+
 # -- Node Functions --
 
 def architect_node(state: GraphState) -> dict:
@@ -389,11 +480,40 @@ def developer_node(state: GraphState, config: RunnableConfig | None = None) -> d
     if not blueprint:
         trace.append("developer: no blueprint provided")
         return {"status": WorkflowStatus.FAILED, "error_message": "Developer received no Blueprint", "trace": trace}
+
+    # Issue #125: Detect retry vs first attempt
+    failure_report = state.get("failure_report")
+    is_retry = failure_report is not None and not failure_report.is_architectural
+
     tools = _get_agent_tools(config, DEV_TOOL_NAMES)
     has_tools = len(tools) > 0
-    if has_tools:
-        tool_names = [t.name for t in tools]
-        trace.append(f"developer: {len(tools)} tools available: {', '.join(tool_names)}")
+
+    # -- Build system prompt (different for retry vs first attempt) --
+    if is_retry:
+        # Issue #125: Retry-specific system prompt
+        system_prompt = """You are the Lead Dev agent. You previously implemented this Blueprint but QA found issues.
+
+IMPORTANT RETRY RULES:
+1. Your previous code is shown below under "CURRENT FILES ON DISK". READ IT CAREFULLY.
+2. The QA failure report describes EXACTLY what is wrong.
+3. Apply the MINIMUM change needed to fix the reported issue.
+4. Do NOT rewrite files from scratch. Only modify the specific lines that need fixing.
+5. If a fix hint is provided, follow it precisely.
+"""
+        if has_tools:
+            system_prompt += """\nYou have workspace tools available. Use filesystem_read to verify the current state if needed,
+then use filesystem_write to apply your targeted fix.
+After writing, provide a summary of ONLY what you changed.
+
+Also include the complete fixed code using the format:
+# --- FILE: path/to/file.py ---
+(file contents)"""
+        else:
+            system_prompt += """\nRespond with ONLY the fixed code. Include file paths as comments:
+# --- FILE: path/to/file.py ---
+
+Only output files that need changes. Do not repeat unchanged files."""
+    elif has_tools:
         system_prompt = """You are the Lead Dev agent. You receive a structured Blueprint and implement it using the tools available to you.
 
 WORKFLOW:
@@ -412,7 +532,6 @@ IMPORTANT:
   # --- FILE: path/to/file.py ---
   (file contents)"""
     else:
-        trace.append("developer: no tools available, using single-shot mode")
         system_prompt = """You are the Lead Dev agent. You receive a structured Blueprint
 and write the code to implement it.
 
@@ -422,16 +541,55 @@ at the top of each file section, like:
 
 Follow the Blueprint exactly. Respect all constraints.
 Write clean, well-documented code."""
+
+    # -- Build user message --
     user_msg = f"Blueprint:\n{blueprint.model_dump_json(indent=2)}"
-    failure_report = state.get("failure_report")
-    if failure_report and not failure_report.is_architectural:
-        user_msg += "\n\nPREVIOUS ATTEMPT FAILED:\n"
-        user_msg += f"Tests passed: {failure_report.tests_passed}\n"
-        user_msg += f"Tests failed: {failure_report.tests_failed}\n"
-        user_msg += f"Errors: {', '.join(failure_report.errors)}\n"
-        user_msg += f"Failed files: {', '.join(failure_report.failed_files)}\n"
-        user_msg += f"Recommendation: {failure_report.recommendation}\n"
-        user_msg += "\nFix the issues and regenerate the code."
+
+    if is_retry:
+        # Issue #125: Structured retry context
+        user_msg += "\n\n" + "=" * 60
+        user_msg += "\nRETRY CONTEXT (attempt #{})\n".format(retry_count + 1)
+        user_msg += "=" * 60
+
+        # QA failure details
+        user_msg += "\n\nQA FAILURE REPORT:"
+        user_msg += f"\n  Tests passed: {failure_report.tests_passed}"
+        user_msg += f"\n  Tests failed: {failure_report.tests_failed}"
+        user_msg += f"\n  Errors: {', '.join(failure_report.errors)}"
+        user_msg += f"\n  Failed files: {', '.join(failure_report.failed_files)}"
+        user_msg += f"\n  Recommendation: {failure_report.recommendation}"
+
+        # Issue #125: Fix complexity and hint
+        if failure_report.fix_complexity:
+            user_msg += f"\n  Fix complexity: {failure_report.fix_complexity}"
+        if failure_report.exact_fix_hint:
+            user_msg += f"\n\n  EXACT FIX HINT: {failure_report.exact_fix_hint}"
+
+        # Issue #125: Current file contents from disk
+        ws_from_state = state.get("workspace_root", "")
+        workspace_root = (
+            Path(ws_from_state).resolve() if ws_from_state
+            else _get_workspace_root()
+        )
+        file_context = _build_retry_file_context(
+            failure_report, blueprint, workspace_root
+        )
+        if file_context:
+            user_msg += file_context
+            trace.append(
+                f"developer: retry -- injected file context "
+                f"({len(file_context)} chars)"
+            )
+        else:
+            trace.append("developer: retry -- no file context available")
+
+        # Issue #125: Sandbox output
+        sandbox_result = state.get("sandbox_result")
+        sandbox_context = _build_retry_sandbox_context(sandbox_result)
+        if sandbox_context:
+            user_msg += sandbox_context
+            trace.append("developer: retry -- injected sandbox output")
+
     messages = [SystemMessage(content=system_prompt), HumanMessage(content=user_msg)]
     llm = _get_developer_llm()
     if has_tools:
@@ -557,7 +715,18 @@ def qa_node(state: GraphState, config: RunnableConfig | None = None) -> dict:
     system_prompt = "You are the QA agent. You review code against a Blueprint's acceptance criteria.\n\n"
     if has_tools:
         system_prompt += "You have tools to read files from the workspace. Use filesystem_read to inspect the actual files that were written, and filesystem_list to check the project structure.\n\n"
-    system_prompt += 'Respond with ONLY a valid JSON object matching this schema:\n{\n  "task_id": "string (from the Blueprint)",\n  "status": "pass" or "fail" or "escalate",\n  "tests_passed": number,\n  "tests_failed": number,\n  "errors": ["list of specific error descriptions"],\n  "failed_files": ["list of files with issues"],\n  "is_architectural": true/false,\n  "failure_type": "code" or "architectural" or null (if pass),\n  "recommendation": "what to fix or why it should escalate"\n}\n\nFAILURE CLASSIFICATION (critical for correct routing):\n\nSet failure_type to "code" (status: "fail") when:\n- Implementation has bugs, syntax errors, or type errors\n- Tests fail due to logic errors in the code\n- Code does not follow the Blueprint\'s constraints\n- Missing error handling or edge cases\nAction: Lead Dev will retry with the same Blueprint.\n\nSet failure_type to "architectural" (status: "escalate") when:\n- Blueprint targets the WRONG files (code is in the wrong place)\n- A required dependency or import is missing from the Blueprint\n- The design approach is fundamentally flawed\n- Acceptance criteria are impossible to meet with current targets\n- The task requires files not listed in target_files\nAction: Architect will generate a completely NEW Blueprint.\n\nBe strict but fair. Only pass code that meets ALL acceptance criteria.\nDo not include any text before or after the JSON.'
+    system_prompt += 'Respond with ONLY a valid JSON object matching this schema:\n{\n  "task_id": "string (from the Blueprint)",\n  "status": "pass" or "fail" or "escalate",\n  "tests_passed": number,\n  "tests_failed": number,\n  "errors": ["list of specific error descriptions"],\n  "failed_files": ["list of files with issues"],\n  "is_architectural": true/false,\n  "failure_type": "code" or "architectural" or null (if pass),\n  "fix_complexity": "trivial" or "moderate" or "complex" or null (if pass),\n  "exact_fix_hint": "specific instruction for what to change, e.g. Line 5: add 6 spaces before /\\\\" or null,\n  "recommendation": "what to fix or why it should escalate"\n}\n\nFAILURE CLASSIFICATION (critical for correct routing):\n\nSet failure_type to "code" (status: "fail") when:\n- Implementation has bugs, syntax errors, or type errors\n- Tests fail due to logic errors in the code\n- Code does not follow the Blueprint\'s constraints\n- Missing error handling or edge cases\nAction: Lead Dev will retry with the same Blueprint.\n\nSet failure_type to "architectural" (status: "escalate") when:\n- Blueprint targets the WRONG files (code is in the wrong place)\n- A required dependency or import is missing from the Blueprint\n- The design approach is fundamentally flawed\n- Acceptance criteria are impossible to meet with current targets\n- The task requires files not listed in target_files\nAction: Architect will generate a completely NEW Blueprint.\n\nFIX COMPLEXITY CLASSIFICATION (helps Lead Dev on retry):\n- "trivial": One-line fix (spacing, typo, missing import, off-by-one error)\n- "moderate": Multi-line fix within the same function or code block\n- "complex": Structural changes across multiple functions or files\n\nEXACT FIX HINT: When fix_complexity is "trivial" or "moderate", provide a specific\ninstruction describing EXACTLY what to change (e.g., "Line 1: add 6 leading spaces\nbefore the /\\\\ character" or "Add `import os` at line 3"). This helps the Lead Dev\nmake a targeted fix instead of rewriting the entire file.\n\nBe strict but fair. Only pass code that meets ALL acceptance criteria.\nDo not include any text before or after the JSON.'
+
+    # Issue #125: QA leniency when acceptance criteria are empty
+    if not blueprint.acceptance_criteria:
+        system_prompt += """\n\nIMPORTANT - NO ACCEPTANCE CRITERIA PROVIDED:
+The user did not specify acceptance criteria for this task. In this case:
+1. Prioritize FUNCTIONAL correctness: the code runs without errors.
+2. If the sandbox executed successfully (exit_code=0), bias toward PASS.
+3. Do NOT invent strict formatting or cosmetic requirements.
+4. Only FAIL for genuine bugs, syntax errors, or logic errors.
+5. Subjective quality issues (indentation style, variable naming) are NOT failures."""
+
     bp_json = blueprint.model_dump_json(indent=2)
     user_msg = f"Blueprint:\n{bp_json}\n\nGenerated Code:\n{generated_code}"
     sandbox_result = state.get("sandbox_result")
