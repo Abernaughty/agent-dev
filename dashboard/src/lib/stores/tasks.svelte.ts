@@ -12,13 +12,24 @@
  *            handleComplete() sets completed_at
  * Issue #106: create() accepts workspace, pin, publish_pr
  * Issue #107: handleProgress() attaches sandbox output fields for sandbox_validated events
+ * Issue #108: fetchDetail() for on-demand TaskDetail loading;
+ *            handleComplete() stores completion_detail;
+ *            detail cache map for TaskDetail responses
  */
 
-import type { TaskSummary, TaskStatus, CreateTaskResponse, ToolCallEvent, TimelineEvent } from '$lib/types/api.js';
+import type { TaskSummary, TaskDetail, TaskStatus, CreateTaskResponse, ToolCallEvent, TimelineEvent } from '$lib/types/api.js';
 
 let tasks = $state<TaskSummary[]>([]);
 let loading = $state(false);
 let error = $state<string | null>(null);
+
+/**
+ * Issue #108: Cache of TaskDetail responses keyed by task_id.
+ * Populated on-demand when a user clicks a task in the sidebar.
+ */
+let detailCache = $state<Map<string, TaskDetail>>(new Map());
+let detailLoading = $state<string | null>(null);
+let detailError = $state<string | null>(null);
 
 /**
  * Buffer for tool call events that arrive before the task exists in memory
@@ -87,6 +98,69 @@ export const tasksStore = {
 	get activeTasks() {
 		const active: TaskStatus[] = ['queued', 'planning', 'building', 'reviewing'];
 		return tasks.filter((t) => active.includes(t.status));
+	},
+
+	// -- Issue #108: TaskDetail access --
+
+	/** Get cached TaskDetail for a given task_id, or null if not fetched yet. */
+	getDetail(taskId: string): TaskDetail | null {
+		return detailCache.get(taskId) ?? null;
+	},
+
+	/** Whether a detail fetch is currently in progress. */
+	get detailLoading() {
+		return detailLoading;
+	},
+
+	/** Error from the most recent detail fetch, if any. */
+	get detailError() {
+		return detailError;
+	},
+
+	/**
+	 * Fetch full TaskDetail from GET /api/tasks/{id}.
+	 * Caches the result. Subsequent calls for the same ID return the cache
+	 * unless force=true is passed.
+	 *
+	 * Issue #108: On-demand detail loading for click-to-expand.
+	 */
+	async fetchDetail(taskId: string, force = false): Promise<TaskDetail | null> {
+		if (!force && detailCache.has(taskId)) {
+			return detailCache.get(taskId)!;
+		}
+
+		detailLoading = taskId;
+		detailError = null;
+		try {
+			const res = await fetch(`/api/tasks/${taskId}`);
+			const body = await res.json();
+			if (res.ok && body.data) {
+				const detail = body.data as TaskDetail;
+				const next = new Map(detailCache);
+				next.set(taskId, detail);
+				detailCache = next;
+				return detail;
+			}
+			detailError = body.errors?.[0] ?? 'Failed to fetch task detail';
+			return null;
+		} catch (err) {
+			detailError = err instanceof Error ? err.message : 'Network error';
+			return null;
+		} finally {
+			detailLoading = null;
+		}
+	},
+
+	/**
+	 * Invalidate cached detail for a task (e.g. after a retry or new events).
+	 * The next getDetail() call will re-fetch from the API.
+	 */
+	invalidateDetail(taskId: string) {
+		if (detailCache.has(taskId)) {
+			const next = new Map(detailCache);
+			next.delete(taskId);
+			detailCache = next;
+		}
 	},
 
 	/**
@@ -194,6 +268,8 @@ export const tasksStore = {
 		try {
 			const res = await fetch(`/api/tasks/${taskId}/retry`, { method: 'POST' });
 			if (res.ok) {
+				// Invalidate cached detail so it's re-fetched with new state
+				this.invalidateDetail(taskId);
 				tasks = tasks.map((t) => (t.id === taskId ? { ...t, status: 'queued' as const } : t));
 				return true;
 			}
@@ -273,6 +349,9 @@ export const tasksStore = {
 		if (typeof data.max_retries === 'number') newBudget.max_retries = data.max_retries;
 		if (typeof data.cost_budget === 'number') newBudget.cost_budget = data.cost_budget;
 
+		// Issue #108: Invalidate detail cache when new progress events arrive
+		this.invalidateDetail(data.task_id);
+
 		tasks = tasks.map((t, i) =>
 			i === idx ? { ...t, timeline: newTimeline, budget: newBudget } : t
 		);
@@ -281,11 +360,21 @@ export const tasksStore = {
 	/**
 	 * Apply an SSE task_complete event.
 	 * Issue #92: Also sets completed_at for debrief status detection.
+	 * Issue #108: Stores completion detail for quick display before
+	 *            full TaskDetail is fetched.
 	 */
 	handleComplete(data: { task_id: string; status: string; detail: string }) {
+		// Issue #108: Invalidate detail cache so next click re-fetches
+		this.invalidateDetail(data.task_id);
+
 		tasks = tasks.map((t) =>
 			t.id === data.task_id
-				? { ...t, status: data.status as TaskStatus, completed_at: new Date().toISOString() }
+				? {
+						...t,
+						status: data.status as TaskStatus,
+						completed_at: new Date().toISOString(),
+						completion_detail: data.detail
+					}
 				: t
 		);
 	},
@@ -321,6 +410,9 @@ export const tasksStore = {
 	reset() {
 		tasks = [];
 		error = null;
+		detailCache = new Map();
+		detailLoading = null;
+		detailError = null;
 		pendingToolCalls.clear();
 	}
 };

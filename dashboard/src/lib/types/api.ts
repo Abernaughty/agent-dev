@@ -11,6 +11,7 @@
  * Issue #106 Phase A: Added BrowseDirectoryEntry, BrowseDirectoryResponse
  * Issue #106 Phase B: Added Planner types, planner_message SSE event
  * Issue #107: Added sandbox output fields to TimelineEvent
+ * Issue #108: Added completion_detail to TaskSummary, ensured TaskDetail has all fields
  */
 
 // -- Envelope --
@@ -92,6 +93,8 @@ export interface TaskSummary {
 	pr_url?: string | null;
 	pr_number?: number | null;
 	working_branch?: string | null;
+	// Issue #108: Completion detail from task_complete SSE event
+	completion_detail?: string;
 }
 
 export interface TaskDetail extends TaskSummary {

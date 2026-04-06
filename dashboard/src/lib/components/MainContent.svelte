@@ -5,6 +5,7 @@
 	Issue #38: Data Integration — PR3
 	Issue #19: Added batch approve/reject buttons, audit log viewer
 	Updated: Added ChatView, SessionDebrief, CostView
+	Issue #108: Replaced BlueprintView with TaskDetailView for task-{id}
 -->
 <script lang="ts">
 	import { agentsStore } from '$lib/stores/agents.svelte.js';
@@ -15,7 +16,7 @@
 	import AgentDetailView from './views/AgentDetailView.svelte';
 	import MemoryDetailView from './views/MemoryDetailView.svelte';
 	import PRDetailView from './views/PRDetailView.svelte';
-	import BlueprintView from './views/BlueprintView.svelte';
+	import TaskDetailView from './views/TaskDetailView.svelte';
 	import ChatView from './views/ChatView.svelte';
 	import SessionDebrief from './views/SessionDebrief.svelte';
 	import CostView from './views/CostView.svelte';
@@ -75,7 +76,8 @@
 			<AgentDetailView {agent} />
 		{/if}
 	{:else if selectedId.startsWith('task-')}
-		<BlueprintView taskId={selectedId.replace('task-', '')} />
+		<!-- Issue #108: TaskDetailView replaces BlueprintView -->
+		<TaskDetailView taskId={selectedId.replace('task-', '')} />
 	{:else if selectedId === '__debrief'}
 		<SessionDebrief />
 	{:else if selectedId === '__costs'}
