@@ -9,6 +9,7 @@
 	CR fixes: neutral acceptance criteria indicators, sandbox output in timeline,
 	          per-task loading/error checks, redacted copy/JSON, $derived.by()
 	Hotfix: untrack fetchDetail in $effect to prevent infinite loop
+	Hotfix: bullet character rendering in acceptance criteria
 -->
 <script lang="ts">
 	import { untrack } from 'svelte';
@@ -223,7 +224,7 @@
 				<div class="mb-5 flex flex-col gap-1">
 					{#each bp.acceptance_criteria as c}
 						<div class="flex items-start gap-2 rounded border px-2.5 py-1.5 text-[11px] leading-relaxed" style="color: var(--color-text-muted); background: var(--color-bg-activity); border-color: var(--color-border);">
-							<span class="mt-px shrink-0" style="color: var(--color-text-dim);">\u2022</span>
+							<span class="mt-px shrink-0" style="color: var(--color-text-dim);">&#8226;</span>
 							<span>{c}</span>
 						</div>
 					{/each}
