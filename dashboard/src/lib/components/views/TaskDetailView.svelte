@@ -6,6 +6,8 @@
 	Replaces the old BlueprintView for task-{id} selections.
 
 	Issue #108: Click-to-expand task detail view
+	CR fixes: neutral acceptance criteria indicators, sandbox output in timeline,
+	          per-task loading/error checks
 -->
 <script lang="ts">
 	import { tasksStore } from '$lib/stores/tasks.svelte.js';
@@ -83,6 +85,11 @@
 	function refreshDetail() {
 		tasksStore.fetchDetail(taskId, true);
 	}
+
+	/** Check if a timeline event has sandbox output to display. */
+	function hasSandboxOutput(event: TimelineEvent): boolean {
+		return !!(event.output_summary?.trim() || (event.errors && event.errors.length > 0));
+	}
 </script>
 
 <div class="max-w-[800px] p-5 pl-6" style="font-family: var(--font-mono);">
@@ -91,7 +98,8 @@
 		{@const d = detail()}
 		{@const sColor = statusColors[s.status] || 'var(--color-text-dim)'}
 		{@const isFailed = s.status === 'failed'}
-		{@const isPassed = s.status === 'passed'}
+		{@const isLoading = tasksStore.isDetailLoading(taskId)}
+		{@const fetchError = tasksStore.getDetailError(taskId)}
 
 		<!-- ===== STATUS HEADER ===== -->
 		<div class="mb-1.5 flex items-center gap-2.5">
@@ -120,7 +128,7 @@
 		</div>
 
 		<!-- ===== LOADING STATE ===== -->
-		{#if tasksStore.detailLoading === taskId}
+		{#if isLoading}
 			<div class="mb-4 rounded-md border px-3 py-2 text-[11px]" style="background: var(--color-bg-activity); border-color: var(--color-border); color: var(--color-text-dim);">
 				Loading task details...
 			</div>
@@ -128,7 +136,7 @@
 
 		<!-- ===== ERROR MESSAGE (prominent for failed tasks) ===== -->
 		{#if isFailed}
-			{@const errorMsg = d?.error_message || s.completion_detail || 'Task failed — no error details available. Check terminal output for more info.'}
+			{@const errorMsg = d?.error_message || s.completion_detail || 'Task failed \u2014 no error details available. Check terminal output for more info.'}
 			<div
 				class="mb-5 rounded-md border p-4"
 				style="background: var(--color-accent-red, #ef4444)08; border-color: var(--color-accent-red, #ef4444)30; border-left: 3px solid var(--color-accent-red, #ef4444);"
@@ -141,9 +149,9 @@
 		{/if}
 
 		<!-- ===== DETAIL FETCH ERROR ===== -->
-		{#if tasksStore.detailError && tasksStore.detailLoading !== taskId}
+		{#if fetchError && !isLoading}
 			<div class="mb-4 rounded-md border px-3 py-2 text-[11px]" style="background: var(--color-accent-red)08; border-color: var(--color-accent-red)20; color: var(--color-accent-red);">
-				Failed to load details: {tasksStore.detailError}
+				Failed to load details: {fetchError}
 			</div>
 		{/if}
 
@@ -181,19 +189,19 @@
 				</div>
 			{/if}
 
-			<!-- Acceptance Criteria -->
+			<!-- Acceptance Criteria — CR fix #1: neutral indicator, no fabricated per-criterion status -->
 			{#if bp.acceptance_criteria.length > 0}
 				<div class="mb-1 text-[9px]" style="color: var(--color-text-dim); letter-spacing: 0.5px;">ACCEPTANCE CRITERIA</div>
 				<div class="mb-5 flex flex-col gap-1">
 					{#each bp.acceptance_criteria as c}
-						<div class="flex items-start gap-2 rounded border px-2.5 py-1.5 text-[11px] leading-relaxed" style="color: var(--color-accent-green); background: var(--color-accent-green)08; border-color: var(--color-accent-green)15;">
-							<span class="mt-px shrink-0">{isPassed ? '[PASS]' : isFailed ? '[FAIL]' : '[    ]'}</span>
+						<div class="flex items-start gap-2 rounded border px-2.5 py-1.5 text-[11px] leading-relaxed" style="color: var(--color-text-muted); background: var(--color-bg-activity); border-color: var(--color-border);">
+							<span class="mt-px shrink-0" style="color: var(--color-text-dim);">\u2022</span>
 							<span>{c}</span>
 						</div>
 					{/each}
 				</div>
 			{/if}
-		{:else if !d && !tasksStore.detailLoading}
+		{:else if !d && !isLoading}
 			<!-- Fallback: show description as instructions when no detail loaded -->
 			<div class="mb-2 text-[10px]" style="color: var(--color-text-dim); letter-spacing: 1px;">INSTRUCTIONS</div>
 			<div
@@ -212,7 +220,7 @@
 					class="mb-1 flex cursor-pointer items-center gap-1.5 border-none bg-transparent p-0 text-[10px]"
 					style="color: var(--color-text-dim); font-family: var(--font-mono); letter-spacing: 1px;"
 				>
-					<span style="font-size: 8px;">{showCode ? '▼' : '▶'}</span>
+					<span style="font-size: 8px;">{showCode ? '\u25bc' : '\u25b6'}</span>
 					GENERATED CODE ({d.generated_code.split('\n').length} lines)
 				</button>
 				{#if showCode}
@@ -250,7 +258,7 @@
 				class="mb-1 flex cursor-pointer items-center gap-1.5 border-none bg-transparent p-0 text-[10px]"
 				style="color: var(--color-text-dim); font-family: var(--font-mono); letter-spacing: 1px;"
 			>
-				<span style="font-size: 8px;">{showTimeline ? '▼' : '▶'}</span>
+				<span style="font-size: 8px;">{showTimeline ? '\u25bc' : '\u25b6'}</span>
 				TIMELINE ({s.timeline.length} events)
 			</button>
 			{#if showTimeline}
@@ -259,16 +267,36 @@
 						{@const agent = agentInfo(event.agent)}
 						{@const style = eventStyles[event.type] ?? { color: 'var(--color-text-dim)', label: '?' }}
 						{@const isTool = event.type === 'tool_call'}
-						<div class="flex items-start gap-2" class:mb-1.5={i < s.timeline.length - 1} class:opacity-70={isTool}>
-							<span class="shrink-0 text-[9px]" style="color: var(--color-text-faint); min-width: 34px; padding-top: 1px;">{event.time}</span>
-							<span class="shrink-0 text-[10px] font-semibold" style="color: {agent.color}; min-width: 20px;">{agent.name.charAt(0)}</span>
-							<span
-								class="shrink-0 rounded-sm px-1 py-px text-center font-semibold"
-								class:text-[7px]={isTool}
-								class:text-[8px]={!isTool}
-								style="color: {style.color}; background: {style.color}18; letter-spacing: 0.5px; min-width: 32px;"
-							>{style.label}</span>
-							<span class="text-[10px] leading-relaxed" style="color: var(--color-text-muted);">{event.action}</span>
+						<div class:mb-1.5={i < s.timeline.length - 1}>
+							<div class="flex items-start gap-2" class:opacity-70={isTool}>
+								<span class="shrink-0 text-[9px]" style="color: var(--color-text-faint); min-width: 34px; padding-top: 1px;">{event.time}</span>
+								<span class="shrink-0 text-[10px] font-semibold" style="color: {agent.color}; min-width: 20px;">{agent.name.charAt(0)}</span>
+								<span
+									class="shrink-0 rounded-sm px-1 py-px text-center font-semibold"
+									class:text-[7px]={isTool}
+									class:text-[8px]={!isTool}
+									style="color: {style.color}; background: {style.color}18; letter-spacing: 0.5px; min-width: 32px;"
+								>{style.label}</span>
+								<span class="text-[10px] leading-relaxed" style="color: var(--color-text-muted);">{event.action}</span>
+							</div>
+							<!-- CR fix #2: Surface sandbox validation payload -->
+							{#if hasSandboxOutput(event)}
+								<div class="ml-[88px] mt-1">
+									{#if event.errors && event.errors.length > 0}
+										<div class="rounded border-l-2 px-2 py-1" style="background: var(--color-accent-red)08; border-color: var(--color-accent-red);">
+											{#each event.errors as err}
+												<div class="text-[9px] leading-relaxed" style="color: var(--color-accent-red);">{redactSecrets(err)}</div>
+											{/each}
+										</div>
+									{/if}
+									{#if event.output_summary?.trim()}
+										<pre class="mt-0.5 max-h-[120px] overflow-y-auto rounded px-2 py-1 text-[9px] leading-relaxed" style="background: var(--color-bg-activity); color: var(--color-text-dim); margin: 0; white-space: pre-wrap; word-break: break-word;">{redactSecrets(event.output_summary)}</pre>
+									{/if}
+									{#if event.exit_code !== undefined}
+										<div class="mt-0.5 text-[8px]" style="color: {event.exit_code === 0 ? 'var(--color-accent-green)' : 'var(--color-accent-red)'};">exit code: {event.exit_code}</div>
+									{/if}
+								</div>
+							{/if}
 						</div>
 					{/each}
 				</div>
@@ -281,7 +309,7 @@
 			class="mb-1 flex cursor-pointer items-center gap-1.5 border-none bg-transparent p-0 text-[10px]"
 			style="color: var(--color-text-dim); font-family: var(--font-mono); letter-spacing: 1px;"
 		>
-			<span style="font-size: 8px;">{showJson ? '▼' : '▶'}</span>
+			<span style="font-size: 8px;">{showJson ? '\u25bc' : '\u25b6'}</span>
 			TASK JSON
 		</button>
 		{#if showJson}

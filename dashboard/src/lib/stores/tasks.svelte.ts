@@ -15,6 +15,9 @@
  * Issue #108: fetchDetail() for on-demand TaskDetail loading;
  *            handleComplete() stores completion_detail;
  *            detail cache map for TaskDetail responses
+ * Issue #108 CR fixes: per-task detailLoading/detailError maps;
+ *            mark-stale + re-fetch instead of evict on progress/complete;
+ *            race condition guard on fetch responses
  */
 
 import type { TaskSummary, TaskDetail, TaskStatus, CreateTaskResponse, ToolCallEvent, TimelineEvent } from '$lib/types/api.js';
@@ -28,8 +31,19 @@ let error = $state<string | null>(null);
  * Populated on-demand when a user clicks a task in the sidebar.
  */
 let detailCache = $state<Map<string, TaskDetail>>(new Map());
-let detailLoading = $state<string | null>(null);
-let detailError = $state<string | null>(null);
+
+/**
+ * Issue #108 CR fix #3: Per-task loading and error state.
+ * Keyed by task_id to prevent stale errors from task A showing on task B.
+ */
+let detailLoadingMap = $state<Map<string, boolean>>(new Map());
+let detailErrorMap = $state<Map<string, string>>(new Map());
+
+/**
+ * Issue #108 CR fix #3: Race condition guard.
+ * Tracks the latest fetch request ID per task to ignore stale responses.
+ */
+let fetchGeneration = new Map<string, number>();
 
 /**
  * Buffer for tool call events that arrive before the task exists in memory
@@ -107,14 +121,14 @@ export const tasksStore = {
 		return detailCache.get(taskId) ?? null;
 	},
 
-	/** Whether a detail fetch is currently in progress. */
-	get detailLoading() {
-		return detailLoading;
+	/** Whether a detail fetch is currently in progress for a given task. */
+	isDetailLoading(taskId: string): boolean {
+		return detailLoadingMap.get(taskId) ?? false;
 	},
 
-	/** Error from the most recent detail fetch, if any. */
-	get detailError() {
-		return detailError;
+	/** Error from the most recent detail fetch for a given task, if any. */
+	getDetailError(taskId: string): string | null {
+		return detailErrorMap.get(taskId) ?? null;
 	},
 
 	/**
@@ -123,37 +137,84 @@ export const tasksStore = {
 	 * unless force=true is passed.
 	 *
 	 * Issue #108: On-demand detail loading for click-to-expand.
+	 * CR fix #3: Per-task loading/error state + race condition guard.
 	 */
 	async fetchDetail(taskId: string, force = false): Promise<TaskDetail | null> {
 		if (!force && detailCache.has(taskId)) {
 			return detailCache.get(taskId)!;
 		}
 
-		detailLoading = taskId;
-		detailError = null;
+		// Race condition guard: increment generation counter
+		const gen = (fetchGeneration.get(taskId) ?? 0) + 1;
+		fetchGeneration.set(taskId, gen);
+
+		// Set per-task loading state
+		const nextLoading = new Map(detailLoadingMap);
+		nextLoading.set(taskId, true);
+		detailLoadingMap = nextLoading;
+
+		// Clear per-task error
+		const nextError = new Map(detailErrorMap);
+		nextError.delete(taskId);
+		detailErrorMap = nextError;
+
 		try {
 			const res = await fetch(`/api/tasks/${taskId}`);
 			const body = await res.json();
+
+			// Race condition guard: ignore stale responses
+			if (fetchGeneration.get(taskId) !== gen) {
+				return null;
+			}
+
 			if (res.ok && body.data) {
 				const detail = body.data as TaskDetail;
-				const next = new Map(detailCache);
-				next.set(taskId, detail);
-				detailCache = next;
+				const nextCache = new Map(detailCache);
+				nextCache.set(taskId, detail);
+				detailCache = nextCache;
 				return detail;
 			}
-			detailError = body.errors?.[0] ?? 'Failed to fetch task detail';
+			const errMsg = body.errors?.[0] ?? 'Failed to fetch task detail';
+			const errMap = new Map(detailErrorMap);
+			errMap.set(taskId, errMsg);
+			detailErrorMap = errMap;
 			return null;
 		} catch (err) {
-			detailError = err instanceof Error ? err.message : 'Network error';
+			// Race condition guard
+			if (fetchGeneration.get(taskId) !== gen) return null;
+
+			const errMsg = err instanceof Error ? err.message : 'Network error';
+			const errMap = new Map(detailErrorMap);
+			errMap.set(taskId, errMsg);
+			detailErrorMap = errMap;
 			return null;
 		} finally {
-			detailLoading = null;
+			// Only clear loading if this is still the latest request
+			if (fetchGeneration.get(taskId) === gen) {
+				const loadMap = new Map(detailLoadingMap);
+				loadMap.delete(taskId);
+				detailLoadingMap = loadMap;
+			}
 		}
 	},
 
 	/**
-	 * Invalidate cached detail for a task (e.g. after a retry or new events).
+	 * CR fix #4: Mark cached detail as stale and trigger background re-fetch.
+	 * Unlike invalidateDetail(), this keeps stale data visible in the UI
+	 * while the fresh data loads, preventing sections from vanishing.
+	 */
+	refreshDetailInBackground(taskId: string) {
+		if (detailCache.has(taskId)) {
+			// Keep stale data in cache, re-fetch in background
+			this.fetchDetail(taskId, true);
+		}
+		// If not cached, nothing to refresh — next click will fetch
+	},
+
+	/**
+	 * Invalidate cached detail for a task (e.g. after a retry).
 	 * The next getDetail() call will re-fetch from the API.
+	 * Only use for destructive state changes (retry) where stale data is wrong.
 	 */
 	invalidateDetail(taskId: string) {
 		if (detailCache.has(taskId)) {
@@ -263,12 +324,12 @@ export const tasksStore = {
 		}
 	},
 
-	/** Retry a failed task. */
+	/** Retry a failed task. CR fix #4: invalidate (not refresh) since state resets. */
 	async retry(taskId: string): Promise<boolean> {
 		try {
 			const res = await fetch(`/api/tasks/${taskId}/retry`, { method: 'POST' });
 			if (res.ok) {
-				// Invalidate cached detail so it's re-fetched with new state
+				// Retry resets state — stale detail is wrong, must evict
 				this.invalidateDetail(taskId);
 				tasks = tasks.map((t) => (t.id === taskId ? { ...t, status: 'queued' as const } : t));
 				return true;
@@ -286,7 +347,7 @@ export const tasksStore = {
 	 * Apply an SSE task_progress event.
 	 *
 	 * Issue #92: Now pushes timeline events AND updates budget.
-	 * Previously this was a no-op that just re-spread the array.
+	 * CR fix #4: Background re-fetch instead of evict to keep UI populated.
 	 */
 	handleProgress(data: {
 		task_id: string;
@@ -313,7 +374,6 @@ export const tasksStore = {
 			: data.agent ?? 'system';
 
 		// Only add timeline entry if we have meaningful detail
-		// Skip generic events like task_queued that don't add info
 		const skipEvents = new Set(['task_queued', 'task_started']);
 		// Issue #107: Extract sandbox output fields for sandbox_validated events
 		const sandboxExtra: Record<string, unknown> = {};
@@ -349,8 +409,8 @@ export const tasksStore = {
 		if (typeof data.max_retries === 'number') newBudget.max_retries = data.max_retries;
 		if (typeof data.cost_budget === 'number') newBudget.cost_budget = data.cost_budget;
 
-		// Issue #108: Invalidate detail cache when new progress events arrive
-		this.invalidateDetail(data.task_id);
+		// CR fix #4: Background re-fetch keeps stale data visible during load
+		this.refreshDetailInBackground(data.task_id);
 
 		tasks = tasks.map((t, i) =>
 			i === idx ? { ...t, timeline: newTimeline, budget: newBudget } : t
@@ -360,12 +420,12 @@ export const tasksStore = {
 	/**
 	 * Apply an SSE task_complete event.
 	 * Issue #92: Also sets completed_at for debrief status detection.
-	 * Issue #108: Stores completion detail for quick display before
-	 *            full TaskDetail is fetched.
+	 * Issue #108: Stores completion detail for quick display.
+	 * CR fix #4: Background re-fetch instead of evict.
 	 */
 	handleComplete(data: { task_id: string; status: string; detail: string }) {
-		// Issue #108: Invalidate detail cache so next click re-fetches
-		this.invalidateDetail(data.task_id);
+		// CR fix #4: Background re-fetch keeps stale data visible
+		this.refreshDetailInBackground(data.task_id);
 
 		tasks = tasks.map((t) =>
 			t.id === data.task_id
@@ -381,17 +441,12 @@ export const tasksStore = {
 
 	/**
 	 * Apply an SSE tool_call event (Issue #85).
-	 *
-	 * Appends tool calls as timeline events on the matching task.
-	 * If the task isn't in memory yet (e.g. during reconnect refresh),
-	 * buffers the event for replay once refresh() completes (CodeRabbit fix #2).
 	 */
 	handleToolCall(data: ToolCallEvent) {
 		const timelineEvent = toolCallToTimeline(data);
 
 		const idx = tasks.findIndex((t) => t.id === data.task_id);
 		if (idx < 0) {
-			// Task not in memory — buffer for replay after refresh()
 			const existing = pendingToolCalls.get(data.task_id) ?? [];
 			existing.push(timelineEvent);
 			pendingToolCalls.set(data.task_id, existing);
@@ -411,8 +466,9 @@ export const tasksStore = {
 		tasks = [];
 		error = null;
 		detailCache = new Map();
-		detailLoading = null;
-		detailError = null;
+		detailLoadingMap = new Map();
+		detailErrorMap = new Map();
+		fetchGeneration = new Map();
 		pendingToolCalls.clear();
 	}
 };
