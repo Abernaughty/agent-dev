@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 
 # Default model for the Planner agent — lightweight and cheap.
 # Override via PLANNER_MODEL env var.
-DEFAULT_PLANNER_MODEL = "gemini-2.0-flash-lite"
+DEFAULT_PLANNER_MODEL = "gemini-3.1-flash-lite-preview"
 
 # Session TTL in seconds (30 minutes idle timeout)
 SESSION_TTL_SECONDS = 30 * 60
