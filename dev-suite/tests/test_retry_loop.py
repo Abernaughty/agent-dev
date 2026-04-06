@@ -7,8 +7,6 @@ Covers:
 - _build_retry_file_context and _build_retry_sandbox_context helpers
 """
 
-import textwrap
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -294,7 +292,8 @@ class TestBuildRetrySandboxContext:
         result = _build_retry_sandbox_context(sr)
 
         assert "Exit code: 0" in result
-        assert "Output" not in result
+        # output_summary defaults to "" which is falsy, so no Output line
+        assert "Output:" not in result
 
 
 # ---------------------------------------------------------------------------
