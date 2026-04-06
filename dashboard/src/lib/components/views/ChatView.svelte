@@ -11,17 +11,29 @@
 	The interface feels conversational, but builds a structured
 	TaskSpec behind the scenes via the Planner agent.
 
+	Chat rework:
+	- Readiness checklist pinned as collapsible header (not inline in chat)
+	- Warnings removed from chat stream (header communicates state)
+	- SUBMIT button relocated to readiness header
+	- Task ID in submission message links to Agent Dashboard
+	- Dim dot → pulse → check state transitions (no red X)
+
 	Issue #106 Phase B: ChatView planner UI
 -->
 <script lang="ts">
 	import { plannerStore, type PlannerChatMessage } from '$lib/stores/planner.svelte.js';
 	import { workspacesStore } from '$lib/stores/workspaces.svelte.js';
 	import { tasksStore } from '$lib/stores/tasks.svelte.js';
+	import { getDashboardContext } from '$lib/stores/dashboard.svelte.js';
 	import WorkspaceSelector from '$lib/components/WorkspaceSelector.svelte';
 	import { tick } from 'svelte';
 
+	const dashboardCtx = getDashboardContext();
+
 	let input = $state('');
 	let scrollContainer: HTMLDivElement | undefined = $state();
+	let headerExpanded = $state(false);
+	let specPreviewExpanded = $state(false);
 
 	// -- Scroll to bottom when messages change --
 
@@ -47,11 +59,6 @@
 
 	// -- Computed display state --
 
-	const showChecklist = $derived(
-		plannerStore.checklist !== null &&
-		plannerStore.hasActiveSession
-	);
-
 	const submitEnabled = $derived(plannerStore.canSubmit);
 	const inputDisabled = $derived(
 		plannerStore.phase === 'sending' ||
@@ -60,13 +67,50 @@
 		plannerStore.phase === 'starting'
 	);
 
-	// -- Phase labels for status indicator --
+	// -- Checklist item state logic --
+	// Determines icon/color for each checklist field:
+	// - Before Planner responds: dim dot (not yet filled)
+	// - While Planner is thinking: pulsing circle
+	// - Satisfied: green check
+	// - Required + unsatisfied AFTER Planner responded: amber warning
+
+	type ItemState = 'empty' | 'inferring' | 'satisfied' | 'warning';
+
+	function getItemState(item: { satisfied: boolean; priority: string }): ItemState {
+		if (item.satisfied) return 'satisfied';
+		// Planner is actively thinking — show spinner
+		if (plannerStore.phase === 'sending' || plannerStore.phase === 'starting') return 'inferring';
+		// Planner has responded but field still unsatisfied
+		if (plannerStore.checklist !== null && item.priority === 'required') return 'warning';
+		// Not yet filled, no response yet
+		return 'empty';
+	}
+
+	function itemIcon(state: ItemState): string {
+		switch (state) {
+			case 'satisfied': return '\u2713';
+			case 'warning': return '!';
+			case 'inferring': return '\u25CE';
+			default: return '\u00b7';
+		}
+	}
+
+	function itemColor(state: ItemState): string {
+		switch (state) {
+			case 'satisfied': return 'var(--color-accent-green)';
+			case 'warning': return 'var(--color-accent-amber)';
+			case 'inferring': return 'var(--color-accent-amber)';
+			default: return 'var(--color-text-dim)';
+		}
+	}
+
+	// -- Phase indicator (slim bar below header) --
 
 	const phaseLabel = $derived.by(() => {
 		switch (plannerStore.phase) {
 			case 'idle': return '';
 			case 'starting': return 'Starting session...';
-			case 'chatting': return plannerStore.ready ? 'Ready to submit' : 'Planning...';
+			case 'chatting': return plannerStore.ready ? '' : 'Planning...';
 			case 'sending': return 'Planner thinking...';
 			case 'submitting': return 'Submitting to Architect...';
 			case 'submitted': return 'Task submitted';
@@ -88,11 +132,42 @@
 
 	const placeholder = $derived.by(() => {
 		if (!workspaceReady) return 'Select a workspace above to begin...';
-		if (plannerStore.phase === 'idle') return 'Describe what you want the agents to do...';
+		if (plannerStore.phase === 'idle') return "Describe what you'd like to build...";
 		if (plannerStore.phase === 'submitted') return 'Start a new task...';
 		if (plannerStore.phase === 'sending') return 'Waiting for Planner...';
 		return 'Reply to the Planner...';
 	});
+
+	// -- Readiness header status --
+
+	const headerStatus = $derived.by(() => {
+		if (!plannerStore.checklist) return 'CHECKLIST';
+		if (plannerStore.checklist.required_satisfied) return 'READY';
+		return 'INCOMPLETE';
+	});
+
+	const headerStatusColor = $derived.by(() => {
+		if (!plannerStore.checklist) return 'var(--color-text-dim)';
+		if (plannerStore.checklist.required_satisfied) return 'var(--color-accent-green)';
+		return 'var(--color-accent-amber)';
+	});
+
+	// -- Default checklist items (shown before session starts) --
+
+	const defaultChecklistItems = [
+		{ field: 'workspace', priority: 'required', satisfied: workspaceReady, auto_inferred: false, value: workspaceReady ? workspacesStore.selected : null },
+		{ field: 'objective', priority: 'required', satisfied: false, auto_inferred: false, value: null },
+		{ field: 'languages', priority: 'required', satisfied: false, auto_inferred: false, value: null },
+		{ field: 'frameworks', priority: 'recommended', satisfied: false, auto_inferred: false, value: null },
+		{ field: 'output_type', priority: 'recommended', satisfied: false, auto_inferred: false, value: null },
+		{ field: 'acceptance_criteria', priority: 'recommended', satisfied: false, auto_inferred: false, value: null },
+		{ field: 'constraints', priority: 'optional', satisfied: false, auto_inferred: false, value: null },
+		{ field: 'related_files', priority: 'optional', satisfied: false, auto_inferred: false, value: null },
+	];
+
+	const checklistItems = $derived(
+		plannerStore.checklist?.items ?? defaultChecklistItems
+	);
 
 	// -- Actions --
 
@@ -100,18 +175,13 @@
 		const text = input.trim();
 		if (!text) return;
 
-		// Workspace validation
-		if (!workspaceReady) {
-			return;
-		}
+		if (!workspaceReady) return;
 
 		if (plannerStore.phase === 'idle' || plannerStore.phase === 'submitted') {
-			// Start new session + send first message
 			const options = workspacesStore.isSelectedProtected && workspacesStore.verifiedPin
 				? { pin: workspacesStore.verifiedPin }
 				: undefined;
 
-			// If coming from submitted state, reset first
 			if (plannerStore.phase === 'submitted') {
 				plannerStore.reset();
 			}
@@ -133,13 +203,14 @@
 		if (!plannerStore.canSubmit) return;
 		const taskId = await plannerStore.submit();
 		if (taskId) {
-			// Refresh tasks store to pick up the new task
 			tasksStore.refresh();
 		}
 	}
 
 	function handleNewTask() {
 		plannerStore.reset();
+		headerExpanded = false;
+		specPreviewExpanded = false;
 	}
 
 	function handleKeydown(e: KeyboardEvent) {
@@ -147,6 +218,12 @@
 			e.preventDefault();
 			handleSend();
 		}
+	}
+
+	/** Navigate to task timeline in Agent Dashboard. */
+	function navigateToTask(taskId: string) {
+		dashboardCtx.handlePanelSwitch('agents');
+		dashboardCtx.handleSelect(`task-${taskId}`);
 	}
 
 	// -- Message styling helpers --
@@ -192,7 +269,183 @@
 	<!-- Workspace selector -->
 	<WorkspaceSelector />
 
-	<!-- Phase indicator bar -->
+	<!-- ═══ Pinned Readiness Header ═══ -->
+	<div
+		class="shrink-0 border-b"
+		style="
+			border-color: {plannerStore.ready ? 'var(--color-accent-green)20' : 'var(--color-border)'};
+			background: {plannerStore.ready ? 'var(--color-accent-green)05' : 'var(--color-bg-activity)'};
+		"
+	>
+		<!-- Collapsed row: status chips + expand toggle + submit button -->
+		<div class="flex items-center gap-1.5 px-4 py-2">
+			<!-- Header label -->
+			<span class="mr-1 text-[9px] uppercase" style="color: var(--color-text-dim); letter-spacing: 1px;">
+				Task Readiness
+			</span>
+
+			<!-- Compact status chips -->
+			<div class="flex flex-wrap items-center gap-1">
+				{#each checklistItems as item (item.field)}
+					{@const state = getItemState(item)}
+					<span
+						class="flex items-center gap-1 rounded px-1.5 py-px text-[9px]"
+						style="
+							color: {itemColor(state)};
+							background: {itemColor(state)}08;
+							opacity: {state === 'empty' ? 0.5 : 1};
+						"
+					>
+						<span
+							class="text-[8px]"
+							style="{state === 'inferring' ? 'animation: pulse 1.5s ease-in-out infinite;' : ''}"
+						>
+							{itemIcon(state)}
+						</span>
+						{item.field}
+					</span>
+				{/each}
+			</div>
+
+			<div class="flex-1"></div>
+
+			<!-- Status badge -->
+			<span
+				class="rounded-sm px-1.5 py-px text-[8px] font-semibold uppercase"
+				style="
+					color: {headerStatusColor};
+					background: {headerStatusColor}12;
+					letter-spacing: 0.3px;
+				"
+			>
+				{headerStatus}
+			</span>
+
+			<!-- Submit button (shown when ready, inside header) -->
+			{#if submitEnabled}
+				<button
+					onclick={handleSubmit}
+					disabled={plannerStore.phase === 'submitting'}
+					class="cursor-pointer rounded-md border px-3 py-1 text-[10px] font-medium transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+					style="
+						background: var(--color-accent-green)18;
+						border-color: var(--color-accent-green)35;
+						color: var(--color-accent-green);
+					"
+				>
+					{plannerStore.phase === 'submitting' ? 'SUBMITTING...' : 'SUBMIT TO ARCHITECT'}
+				</button>
+			{/if}
+
+			<!-- New Task button (shown when submitted) -->
+			{#if plannerStore.phase === 'submitted'}
+				<button
+					onclick={handleNewTask}
+					class="cursor-pointer rounded-md border px-2.5 py-1 text-[9px] uppercase transition-opacity hover:opacity-80"
+					style="background: var(--color-accent-cyan)10; border-color: var(--color-accent-cyan)20; color: var(--color-accent-cyan); letter-spacing: 0.5px;"
+				>
+					New Task
+				</button>
+			{/if}
+
+			<!-- Expand/collapse toggle -->
+			<button
+				onclick={() => headerExpanded = !headerExpanded}
+				class="cursor-pointer rounded px-1 py-0.5 text-[10px] transition-opacity hover:opacity-80"
+				style="color: var(--color-text-dim); background: transparent; border: none;"
+			>
+				{headerExpanded ? '\u25B2' : '\u25BC'}
+			</button>
+		</div>
+
+		<!-- Expanded detail panel -->
+		{#if headerExpanded}
+			<div class="border-t px-4 py-2" style="border-color: var(--color-border);">
+				{#each checklistItems as item (item.field)}
+					{@const state = getItemState(item)}
+					{@const isReq = item.priority === 'required'}
+					{@const isRec = item.priority === 'recommended'}
+					<div class="flex items-center gap-2 py-1">
+						<!-- Status indicator -->
+						<span
+							class="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-sm text-[8px]"
+							style="
+								background: {itemColor(state)}15;
+								color: {itemColor(state)};
+								{state === 'inferring' ? 'animation: pulse 1.5s ease-in-out infinite;' : ''}
+							"
+						>
+							{itemIcon(state)}
+						</span>
+
+						<!-- Field name -->
+						<span class="text-[10px]" style="color: var(--color-text-muted); min-width: 100px;">
+							{item.field}
+						</span>
+
+						<!-- Priority badge -->
+						<span
+							class="rounded-sm px-1 py-px text-[7px] uppercase"
+							style="
+								color: {isReq ? 'var(--color-accent-amber)' : isRec ? 'var(--color-accent-amber)' : 'var(--color-text-dim)'};
+								background: {isReq ? 'var(--color-accent-amber)' : isRec ? 'var(--color-accent-amber)' : 'var(--color-text-dim)'}10;
+								letter-spacing: 0.3px;
+							"
+						>
+							{item.priority}
+						</span>
+
+						<!-- Value preview -->
+						{#if item.satisfied && item.value}
+							<span class="flex-1 truncate text-[9px]" style="color: var(--color-text-dim);">
+								{#if Array.isArray(item.value)}
+									{item.value.join(', ')}
+								{:else}
+									{typeof item.value === 'string' && item.value.length > 60
+										? item.value.slice(0, 60) + '...'
+										: item.value}
+								{/if}
+							</span>
+						{/if}
+
+						<!-- Auto-inferred badge -->
+						{#if item.auto_inferred}
+							<span
+								class="shrink-0 rounded-sm px-1 py-px text-[7px] uppercase"
+								style="color: var(--color-accent-cyan); background: var(--color-accent-cyan)10; letter-spacing: 0.3px;"
+							>
+								auto
+							</span>
+						{/if}
+					</div>
+				{/each}
+
+				<!-- TaskSpec JSON Preview (shown when ready) -->
+				{#if plannerStore.ready && plannerStore.taskSpec}
+					<div class="mt-2 border-t pt-2" style="border-color: var(--color-border);">
+						<button
+							onclick={() => specPreviewExpanded = !specPreviewExpanded}
+							class="flex w-full cursor-pointer items-center gap-1.5 text-left"
+							style="background: transparent; border: none;"
+						>
+							<span class="text-[9px] uppercase" style="color: var(--color-text-dim); letter-spacing: 1px;">TaskSpec Preview</span>
+							<span class="text-[8px]" style="color: var(--color-text-dim);">{specPreviewExpanded ? '\u25B2' : '\u25BC'}</span>
+						</button>
+						{#if specPreviewExpanded}
+							<div
+								class="mt-1.5 overflow-x-auto rounded border p-2.5"
+								style="background: var(--color-bg-primary); border-color: var(--color-border);"
+							>
+								<pre class="m-0 text-[10px] leading-relaxed" style="color: var(--color-text-muted); white-space: pre-wrap;">{JSON.stringify(plannerStore.taskSpec, null, 2)}</pre>
+							</div>
+						{/if}
+					</div>
+				{/if}
+			</div>
+		{/if}
+	</div>
+
+	<!-- Phase indicator bar (only shown for transient states) -->
 	{#if phaseLabel}
 		<div
 			class="flex items-center gap-2 border-b px-6 py-1.5"
@@ -204,16 +457,6 @@
 				<span class="inline-block h-1.5 w-1.5 rounded-full" style="background: {phaseColor};"></span>
 			{/if}
 			<span class="text-[10px]" style="color: {phaseColor};">{phaseLabel}</span>
-
-			{#if plannerStore.phase === 'submitted'}
-				<button
-					onclick={handleNewTask}
-					class="ml-auto cursor-pointer rounded border px-2.5 py-0.5 text-[9px] uppercase transition-opacity hover:opacity-80"
-					style="background: var(--color-accent-cyan)10; border-color: var(--color-accent-cyan)20; color: var(--color-accent-cyan); letter-spacing: 0.5px;"
-				>
-					New Task
-				</button>
-			{/if}
 		</div>
 	{/if}
 
@@ -229,8 +472,8 @@
 					Plan a task for the agent team
 				</div>
 				<div class="max-w-[360px] text-[11px] leading-relaxed" style="color: var(--color-text-dim);">
-					Describe what you want built. The Planner will validate your request and ensure the
-					task spec is complete before routing to the Architect.
+					Describe what you want built. The checklist above shows
+					what information helps the agents succeed.
 				</div>
 			</div>
 		{/if}
@@ -258,8 +501,19 @@
 							{msgLabel(msg)} | {msg.time}
 						</div>
 					{/if}
-					<!-- Render planner messages with line breaks preserved -->
-					{#if msg.role === 'planner'}
+
+					<!-- Render messages with task ID link -->
+					{#if msg.taskId}
+						{msg.text}
+						<button
+							onclick={() => navigateToTask(msg.taskId!)}
+							class="ml-1 cursor-pointer border-none text-[12px] underline underline-offset-2 transition-opacity hover:opacity-80"
+							style="background: transparent; color: var(--color-accent-cyan); font-family: var(--font-mono);"
+						>
+							{msg.taskId} &#8594;
+						</button>
+					{:else if msg.role === 'planner'}
+						<!-- Render planner messages with line breaks preserved -->
 						{#each msg.text.split('\n') as line, li (li)}
 							{#if line.trim() === ''}
 								<br />
@@ -273,127 +527,7 @@
 				</div>
 			</div>
 		{/each}
-
-		<!-- Inline checklist (shown below messages when active) -->
-		{#if showChecklist && plannerStore.checklist}
-			{@const cl = plannerStore.checklist}
-			<div
-				class="mb-3 max-w-[600px] rounded-lg border"
-				style="background: var(--color-bg-activity); border-color: var(--color-border);"
-			>
-				<div
-					class="flex items-center justify-between border-b px-3.5 py-2"
-					style="border-color: var(--color-border);"
-				>
-					<span class="text-[9px] uppercase" style="color: var(--color-text-dim); letter-spacing: 1px;">
-						Task Readiness
-					</span>
-					<span
-						class="rounded-sm px-1.5 py-px text-[8px] font-semibold uppercase"
-						style="
-							color: {cl.required_satisfied ? 'var(--color-accent-green)' : 'var(--color-accent-amber)'};
-							background: {cl.required_satisfied ? 'var(--color-accent-green)' : 'var(--color-accent-amber)'}12;
-							letter-spacing: 0.3px;
-						"
-					>
-						{cl.required_satisfied ? 'READY' : 'INCOMPLETE'}
-					</span>
-				</div>
-				<div class="px-3.5 py-2">
-					{#each cl.items as item (item.field)}
-						{@const isReq = item.priority === 'required'}
-						{@const isRec = item.priority === 'recommended'}
-						<div class="flex items-center gap-2 py-1">
-							<!-- Status indicator -->
-							<span
-								class="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-sm text-[8px]"
-								style="
-									background: {item.satisfied
-										? 'var(--color-accent-green)15'
-										: isReq
-											? 'var(--color-accent-red)15'
-											: 'var(--color-text-dim)10'
-									};
-									color: {item.satisfied
-										? 'var(--color-accent-green)'
-										: isReq
-											? 'var(--color-accent-red)'
-											: 'var(--color-text-dim)'
-									};
-								"
-							>
-								{item.satisfied ? '\u2713' : isReq ? '!' : '\u00b7'}
-							</span>
-
-							<!-- Field name -->
-							<span class="text-[10px]" style="color: var(--color-text-muted); min-width: 100px;">
-								{item.field}
-							</span>
-
-							<!-- Priority badge -->
-							<span
-								class="rounded-sm px-1 py-px text-[7px] uppercase"
-								style="
-									color: {isReq ? 'var(--color-accent-red)' : isRec ? 'var(--color-accent-amber)' : 'var(--color-text-dim)'};
-									background: {isReq ? 'var(--color-accent-red)' : isRec ? 'var(--color-accent-amber)' : 'var(--color-text-dim)'}10;
-									letter-spacing: 0.3px;
-								"
-							>
-								{item.priority}
-							</span>
-
-							<!-- Value preview -->
-							{#if item.satisfied && item.value}
-								<span class="flex-1 truncate text-[9px]" style="color: var(--color-text-dim);">
-									{#if Array.isArray(item.value)}
-										{item.value.join(', ')}
-									{:else}
-										{typeof item.value === 'string' && item.value.length > 60
-											? item.value.slice(0, 60) + '...'
-											: item.value}
-									{/if}
-								</span>
-							{/if}
-
-							<!-- Auto-inferred badge -->
-							{#if item.auto_inferred}
-								<span
-									class="shrink-0 rounded-sm px-1 py-px text-[7px] uppercase"
-									style="color: var(--color-accent-cyan); background: var(--color-accent-cyan)10; letter-spacing: 0.3px;"
-								>
-									auto
-								</span>
-							{/if}
-						</div>
-					{/each}
-				</div>
-			</div>
-		{/if}
 	</div>
-
-	<!-- Submit bar (shown when ready) -->
-	{#if submitEnabled}
-		<div
-			class="flex items-center gap-3 border-t px-6 py-2.5"
-			style="border-color: var(--color-accent-green)20; background: var(--color-accent-green)05;"
-		>
-			<span class="flex-1 text-[11px]" style="color: var(--color-accent-green);">
-				Task spec complete — ready to submit to Architect
-			</span>
-			<button
-				onclick={handleSubmit}
-				disabled={plannerStore.phase === 'submitting'}
-				class="cursor-pointer rounded-md border px-5 py-1.5 text-[11px] font-medium transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
-				style="
-					background: var(--color-accent-green)18;
-					border-color: var(--color-accent-green)35;
-					color: var(--color-accent-green);
-				"
-			>
-				{plannerStore.phase === 'submitting' ? 'SUBMITTING...' : 'SUBMIT TO ARCHITECT'}
-			</button>
-		</div>
-	{/if}
 
 	<!-- Input area -->
 	<div class="flex gap-2 border-t p-2 px-6" style="border-color: var(--color-border);">

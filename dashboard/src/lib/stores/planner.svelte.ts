@@ -9,6 +9,8 @@
  * Updated in real-time from SSE `planner_message` events.
  *
  * Issue #106 Phase B: ChatView planner UI
+ * Chat rework: warnings no longer injected as event messages,
+ * taskId field added for cross-blade navigation.
  */
 
 import type {
@@ -25,6 +27,8 @@ export interface PlannerChatMessage {
 	role: 'user' | 'planner' | 'system' | 'event';
 	text: string;
 	time: string;
+	/** Optional task ID for cross-blade navigation (set on submission messages). */
+	taskId?: string;
 }
 
 // -- Planner session phases --
@@ -173,6 +177,9 @@ export const plannerStore = {
 	 * Adds the user message to chat immediately, then calls
 	 * POST /api/planner/{id}/message. On success, adds the
 	 * Planner's response and updates checklist state.
+	 *
+	 * Warnings are stored in the store but NO LONGER injected
+	 * as event messages — the pinned readiness header displays them.
 	 */
 	async sendMessage(text: string): Promise<boolean> {
 		if (!sessionId || phase !== 'chatting') return false;
@@ -215,16 +222,9 @@ export const plannerStore = {
 					}];
 				}
 
-				// Add warnings as event messages
-				if (resp.warnings?.length) {
-					for (const w of resp.warnings) {
-						messages = [...messages, {
-							role: 'event',
-							text: w,
-							time: nowTime()
-						}];
-					}
-				}
+				// Warnings are stored via applySession() but NOT
+				// injected as chat event messages. The pinned
+				// readiness header communicates checklist state.
 
 				return true;
 			}
@@ -280,8 +280,9 @@ export const plannerStore = {
 
 				messages = [...messages, {
 					role: 'system',
-					text: `Task submitted (${resp.task_id}). Routing to Architect for blueprint generation...`,
-					time: nowTime()
+					text: `Task submitted. Routing to Architect for blueprint generation...`,
+					time: nowTime(),
+					taskId: resp.task_id
 				}];
 
 				return resp.task_id;
