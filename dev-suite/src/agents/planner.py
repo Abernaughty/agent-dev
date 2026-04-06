@@ -719,6 +719,36 @@ async def _call_planner_llm(
         return await _call_langchain_generic(model_name, messages)
 
 
+def _extract_text_from_content(content: Any) -> str:
+    """Extract plain text from LLM response content.
+
+    Handles multiple response formats:
+    - str: returned as-is (Gemini 2.x, most models)
+    - list of content blocks: concatenates text from all blocks
+      with type='text' (Gemini 3.x, some Anthropic responses)
+      e.g. [{'type': 'text', 'text': '...', 'extras': {...}}]
+    - other: falls back to str() conversion
+    """
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        text_parts = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                text_parts.append(block.get("text", ""))
+            elif isinstance(block, str):
+                text_parts.append(block)
+        if text_parts:
+            return "\n".join(text_parts)
+
+    # Last resort — should not normally reach here
+    logger.warning(
+        "Unexpected LLM response content type: %s", type(content).__name__
+    )
+    return str(content)
+
+
 async def _call_gemini(
     model_name: str,
     messages: list[dict[str, str]],
@@ -733,7 +763,7 @@ async def _call_gemini(
     )
     lc_messages = _to_langchain_messages(messages)
     response = await llm.ainvoke(lc_messages)
-    return response.content if isinstance(response.content, str) else str(response.content)
+    return _extract_text_from_content(response.content)
 
 
 async def _call_anthropic(
@@ -750,7 +780,7 @@ async def _call_anthropic(
     )
     lc_messages = _to_langchain_messages(messages)
     response = await llm.ainvoke(lc_messages)
-    return response.content if isinstance(response.content, str) else str(response.content)
+    return _extract_text_from_content(response.content)
 
 
 async def _call_langchain_generic(
@@ -767,7 +797,7 @@ async def _call_langchain_generic(
     )
     lc_messages = _to_langchain_messages(messages)
     response = await llm.ainvoke(lc_messages)
-    return response.content if isinstance(response.content, str) else str(response.content)
+    return _extract_text_from_content(response.content)
 
 
 def _to_langchain_messages(
