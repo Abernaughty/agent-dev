@@ -363,7 +363,7 @@ def _build_retry_file_context(
         # Security: resolve and validate path stays within workspace
         try:
             full_path = (workspace_root / file_path).resolve()
-            if not str(full_path).startswith(str(workspace_root)):
+            if not full_path.is_relative_to(workspace_root):
                 logger.warning(
                     "[RETRY] Path traversal blocked: %s", file_path
                 )
@@ -548,7 +548,7 @@ Write clean, well-documented code."""
     if is_retry:
         # Issue #125: Structured retry context
         user_msg += "\n\n" + "=" * 60
-        user_msg += "\nRETRY CONTEXT (attempt #{})\n".format(retry_count + 1)
+        user_msg += f"\nRETRY CONTEXT (attempt #{retry_count + 1})\n"
         user_msg += "=" * 60
 
         # QA failure details

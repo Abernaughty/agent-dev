@@ -14,11 +14,12 @@ import pytest
 from src.agents.architect import Blueprint
 from src.agents.qa import FailureReport, FailureType, FixComplexity
 from src.orchestrator import (
-    GraphState,
-    WorkflowStatus,
     _build_retry_file_context,
     _build_retry_sandbox_context,
+    GraphState,
+    WorkflowStatus,
     developer_node,
+    qa_node,
 )
 from src.sandbox.e2b_runner import SandboxResult
 
@@ -158,7 +159,7 @@ class TestBuildRetryFileContext:
     def _make_blueprint(self, target_files=None):
         return Blueprint(
             task_id="test-retry",
-            target_files=target_files or ["app.py"],
+            target_files=target_files if target_files is not None else ["app.py"],
             instructions="Build a test app",
             constraints=[],
             acceptance_criteria=[],
@@ -171,7 +172,7 @@ class TestBuildRetryFileContext:
             tests_passed=0,
             tests_failed=1,
             errors=["spacing error"],
-            failed_files=failed_files or ["app.py"],
+            failed_files=failed_files if failed_files is not None else ["app.py"],
             is_architectural=False,
             recommendation="fix spacing",
         )
@@ -242,8 +243,8 @@ class TestBuildRetryFileContext:
 
         result = _build_retry_file_context(fr, bp, tmp_path)
 
-        # Should not contain the file content (blocked)
-        assert "etc/passwd" not in result or "not found" in result
+        # Path traversal is blocked: file is skipped entirely
+        assert "etc/passwd" not in result
 
     def test_returns_empty_for_no_files(self, tmp_path):
         """No files to read returns empty string."""
@@ -501,34 +502,69 @@ class TestDeveloperRetryPrompt:
 class TestQALeniency:
     """Issue #125: QA should be lenient when no acceptance criteria exist."""
 
-    def test_qa_prompt_includes_leniency_for_empty_criteria(self):
-        """Verify the leniency text is part of the QA system prompt
-        when acceptance_criteria is empty. We test this by inspecting
-        the prompt construction logic directly."""
-        bp = Blueprint(
-            task_id="test-lenient",
-            target_files=["script.py"],
-            instructions="Print hello world",
-            constraints=[],
-            acceptance_criteria=[],  # Empty!
-        )
+    @patch("src.orchestrator._get_qa_llm")
+    def test_qa_prompt_includes_leniency_for_empty_criteria(self, mock_get_llm):
+        """QA system prompt should include leniency text when criteria are empty."""
+        mock_llm = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = '{"task_id": "t1", "status": "pass", "tests_passed": 1, "tests_failed": 0, "errors": [], "failed_files": [], "is_architectural": false, "recommendation": ""}'
+        mock_response.usage_metadata = {"total_tokens": 100}
+        mock_llm.invoke.return_value = mock_response
+        mock_get_llm.return_value = mock_llm
 
-        # The leniency block should be added when criteria are empty
-        assert not bp.acceptance_criteria
+        state: GraphState = {
+            "trace": [],
+            "memory_writes": [],
+            "tool_calls_log": [],
+            "retry_count": 0,
+            "tokens_used": 0,
+            "status": WorkflowStatus.REVIEWING,
+            "blueprint": Blueprint(
+                task_id="test-lenient",
+                target_files=["script.py"],
+                instructions="Print hello world",
+                constraints=[],
+                acceptance_criteria=[],  # Empty!
+            ),
+            "generated_code": "print('hello world')",
+        }
 
-        # Simulate what qa_node does: check if criteria trigger leniency
-        leniency_needed = not bp.acceptance_criteria
-        assert leniency_needed
+        qa_node(state, config=None)
 
-    def test_qa_prompt_no_leniency_with_criteria(self):
+        call_args = mock_llm.invoke.call_args[0][0]
+        system_msg = call_args[0].content
+        assert "NO ACCEPTANCE CRITERIA PROVIDED" in system_msg
+        assert "Do NOT invent strict formatting" in system_msg
+
+    @patch("src.orchestrator._get_qa_llm")
+    def test_qa_prompt_no_leniency_with_criteria(self, mock_get_llm):
         """Leniency should NOT be added when criteria exist."""
-        bp = Blueprint(
-            task_id="test-strict",
-            target_files=["script.py"],
-            instructions="Print hello world",
-            constraints=[],
-            acceptance_criteria=["Output says hello world"],
-        )
+        mock_llm = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = '{"task_id": "t1", "status": "pass", "tests_passed": 1, "tests_failed": 0, "errors": [], "failed_files": [], "is_architectural": false, "recommendation": ""}'
+        mock_response.usage_metadata = {"total_tokens": 100}
+        mock_llm.invoke.return_value = mock_response
+        mock_get_llm.return_value = mock_llm
 
-        leniency_needed = not bp.acceptance_criteria
-        assert not leniency_needed
+        state: GraphState = {
+            "trace": [],
+            "memory_writes": [],
+            "tool_calls_log": [],
+            "retry_count": 0,
+            "tokens_used": 0,
+            "status": WorkflowStatus.REVIEWING,
+            "blueprint": Blueprint(
+                task_id="test-strict",
+                target_files=["script.py"],
+                instructions="Print hello world",
+                constraints=[],
+                acceptance_criteria=["Output says hello world"],
+            ),
+            "generated_code": "print('hello world')",
+        }
+
+        qa_node(state, config=None)
+
+        call_args = mock_llm.invoke.call_args[0][0]
+        system_msg = call_args[0].content
+        assert "NO ACCEPTANCE CRITERIA PROVIDED" not in system_msg
