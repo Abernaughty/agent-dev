@@ -7,7 +7,7 @@
 
 	Issue #108: Click-to-expand task detail view
 	CR fixes: neutral acceptance criteria indicators, sandbox output in timeline,
-	          per-task loading/error checks
+	          per-task loading/error checks, redacted copy/JSON, $derived.by()
 -->
 <script lang="ts">
 	import { tasksStore } from '$lib/stores/tasks.svelte.js';
@@ -21,11 +21,17 @@
 
 	let { taskId }: Props = $props();
 
-	// Summary from the list store (always available)
-	const summary = $derived(() => tasksStore.list.find((t) => t.id === taskId) ?? null);
+	// CR nitpick #2: Use $derived.by() for idiomatic Svelte 5
+	const summary = $derived.by(() => tasksStore.list.find((t) => t.id === taskId) ?? null);
+	const detail = $derived.by(() => tasksStore.getDetail(taskId));
 
-	// Full detail (fetched on-demand)
-	const detail = $derived(() => tasksStore.getDetail(taskId));
+	const agentMap = $derived.by(() => {
+		const map: Record<string, { name: string; color: string }> = {};
+		for (const a of agentsStore.list) {
+			map[a.id] = { name: a.name, color: a.color };
+		}
+		return map;
+	});
 
 	// Fetch detail when taskId changes
 	$effect(() => {
@@ -34,16 +40,8 @@
 		}
 	});
 
-	const agentMap = $derived(() => {
-		const map: Record<string, { name: string; color: string }> = {};
-		for (const a of agentsStore.list) {
-			map[a.id] = { name: a.name, color: a.color };
-		}
-		return map;
-	});
-
 	function agentInfo(agentId: string) {
-		return agentMap()[agentId] ?? { name: agentId, color: 'var(--color-text-dim)' };
+		return agentMap[agentId] ?? { name: agentId, color: 'var(--color-text-dim)' };
 	}
 
 	const eventStyles: Record<string, { color: string; label: string }> = {
@@ -86,16 +84,40 @@
 		tasksStore.fetchDetail(taskId, true);
 	}
 
-	/** Check if a timeline event has sandbox output to display. */
+	// CR nitpick #1: Simplified with optional chaining
 	function hasSandboxOutput(event: TimelineEvent): boolean {
-		return !!(event.output_summary?.trim() || (event.errors && event.errors.length > 0));
+		return !!(event.output_summary?.trim() || event.errors?.length);
+	}
+
+	/**
+	 * CR fix M2: Build a redacted copy of task data for JSON display.
+	 * All string fields that could contain secrets are piped through redactSecrets().
+	 */
+	function buildRedactedJson(s: TaskSummary, d: TaskDetail | null): string {
+		const obj: Record<string, unknown> = {
+			task_id: s.id,
+			description: redactSecrets(s.description),
+			status: s.status,
+			workspace: s.workspace,
+			budget: s.budget
+		};
+		if (d) {
+			if (d.error_message) obj.error_message = redactSecrets(d.error_message);
+			if (d.blueprint) {
+				obj.blueprint = {
+					...d.blueprint,
+					instructions: redactSecrets(d.blueprint.instructions)
+				};
+			}
+		}
+		return JSON.stringify(obj, null, 2);
 	}
 </script>
 
 <div class="max-w-[800px] p-5 pl-6" style="font-family: var(--font-mono);">
-	{#if summary()}
-		{@const s = summary()!}
-		{@const d = detail()}
+	{#if summary}
+		{@const s = summary}
+		{@const d = detail}
 		{@const sColor = statusColors[s.status] || 'var(--color-text-dim)'}
 		{@const isFailed = s.status === 'failed'}
 		{@const isLoading = tasksStore.isDetailLoading(taskId)}
@@ -189,7 +211,7 @@
 				</div>
 			{/if}
 
-			<!-- Acceptance Criteria — CR fix #1: neutral indicator, no fabricated per-criterion status -->
+			<!-- Acceptance Criteria — neutral indicator, no fabricated per-criterion status -->
 			{#if bp.acceptance_criteria.length > 0}
 				<div class="mb-1 text-[9px]" style="color: var(--color-text-dim); letter-spacing: 0.5px;">ACCEPTANCE CRITERIA</div>
 				<div class="mb-5 flex flex-col gap-1">
@@ -224,13 +246,15 @@
 					GENERATED CODE ({d.generated_code.split('\n').length} lines)
 				</button>
 				{#if showCode}
+					{@const redactedCode = redactSecrets(d.generated_code)}
 					<div class="relative rounded-md border" style="background: #08090e; border-color: var(--color-border);">
+						<!-- CR fix M1: Copy redacted text, not raw -->
 						<button
-							onclick={() => copyToClipboard(d.generated_code)}
+							onclick={() => copyToClipboard(redactedCode)}
 							class="absolute right-2 top-2 cursor-pointer rounded border px-2 py-0.5 text-[8px] opacity-60 transition-opacity hover:opacity-100"
 							style="background: var(--color-bg-surface); border-color: var(--color-border); color: var(--color-text-dim);"
 						>Copy</button>
-						<pre class="overflow-x-auto p-3.5 pr-16 text-[10px] leading-relaxed" style="color: var(--color-text-muted); font-family: var(--font-mono); margin: 0; white-space: pre-wrap; word-break: break-word;">{redactSecrets(d.generated_code)}</pre>
+						<pre class="overflow-x-auto p-3.5 pr-16 text-[10px] leading-relaxed" style="color: var(--color-text-muted); font-family: var(--font-mono); margin: 0; white-space: pre-wrap; word-break: break-word;">{redactedCode}</pre>
 					</div>
 				{/if}
 			</div>
@@ -279,10 +303,10 @@
 								>{style.label}</span>
 								<span class="text-[10px] leading-relaxed" style="color: var(--color-text-muted);">{event.action}</span>
 							</div>
-							<!-- CR fix #2: Surface sandbox validation payload -->
+							<!-- Sandbox validation payload -->
 							{#if hasSandboxOutput(event)}
 								<div class="ml-[88px] mt-1">
-									{#if event.errors && event.errors.length > 0}
+									{#if event.errors?.length}
 										<div class="rounded border-l-2 px-2 py-1" style="background: var(--color-accent-red)08; border-color: var(--color-accent-red);">
 											{#each event.errors as err}
 												<div class="text-[9px] leading-relaxed" style="color: var(--color-accent-red);">{redactSecrets(err)}</div>
@@ -303,7 +327,7 @@
 			{/if}
 		{/if}
 
-		<!-- ===== RAW JSON (collapsible) ===== -->
+		<!-- ===== RAW JSON (collapsible) — CR fix M2: redacted output ===== -->
 		<button
 			onclick={() => showJson = !showJson}
 			class="mb-1 flex cursor-pointer items-center gap-1.5 border-none bg-transparent p-0 text-[10px]"
@@ -314,17 +338,7 @@
 		</button>
 		{#if showJson}
 			<div class="overflow-x-auto rounded-md border p-3.5" style="background: #08090e; border-color: var(--color-border);">
-				<pre class="m-0 text-[11px] leading-relaxed" style="color: var(--color-text-muted);">{JSON.stringify({
-					task_id: s.id,
-					description: s.description,
-					status: s.status,
-					workspace: s.workspace,
-					budget: s.budget,
-					...(d ? {
-						error_message: d.error_message || undefined,
-						blueprint: d.blueprint || undefined
-					} : {})
-				}, null, 2)}</pre>
+				<pre class="m-0 text-[11px] leading-relaxed" style="color: var(--color-text-muted);">{buildRedactedJson(s, d)}</pre>
 			</div>
 		{/if}
 
