@@ -7,6 +7,7 @@ Issue #19: Added AuditLogEntry, confidence/sandbox/related_files to MemoryEntryR
 Issue #89: Added publish_pr to CreateTaskRequest, pr_url/working_branch/pr_number to TaskSummary
 Issue #105: Added workspace models, workspace field to CreateTaskRequest/TaskSummary
 Issue #106: Added Planner session models (PlannerStartRequest, PlannerMessageRequest, etc.)
+Issue #107: Added sandbox output fields to TimelineEvent
 """
 
 from __future__ import annotations
@@ -79,6 +80,10 @@ class TimelineEvent(BaseModel):
     action: str
     type: str
     sandbox: str = "locked"
+    # Issue #107: Sandbox output fields (present on sandbox_validated events)
+    output_summary: str = ""
+    errors: list[str] = []
+    exit_code: int | None = None
 
 
 class BlueprintResponse(BaseModel):

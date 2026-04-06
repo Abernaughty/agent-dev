@@ -11,6 +11,7 @@
  * Issue #92: handleProgress() now pushes timeline events + budget updates;
  *            handleComplete() sets completed_at
  * Issue #106: create() accepts workspace, pin, publish_pr
+ * Issue #107: handleProgress() attaches sandbox output fields for sandbox_validated events
  */
 
 import type { TaskSummary, TaskStatus, CreateTaskResponse, ToolCallEvent, TimelineEvent } from '$lib/types/api.js';
@@ -238,6 +239,20 @@ export const tasksStore = {
 		// Only add timeline entry if we have meaningful detail
 		// Skip generic events like task_queued that don't add info
 		const skipEvents = new Set(['task_queued', 'task_started']);
+		// Issue #107: Extract sandbox output fields for sandbox_validated events
+		const sandboxExtra: Record<string, unknown> = {};
+		if (data.event === 'sandbox_validated') {
+			if (typeof (data as Record<string, unknown>).output_summary === 'string') {
+				sandboxExtra.output_summary = (data as Record<string, unknown>).output_summary;
+			}
+			if (Array.isArray((data as Record<string, unknown>).errors)) {
+				sandboxExtra.errors = (data as Record<string, unknown>).errors;
+			}
+			if (typeof (data as Record<string, unknown>).exit_code === 'number') {
+				sandboxExtra.exit_code = (data as Record<string, unknown>).exit_code;
+			}
+		}
+
 		const newTimeline = skipEvents.has(data.event)
 			? task.timeline
 			: [...task.timeline, {
@@ -245,7 +260,8 @@ export const tasksStore = {
 				agent: agentId,
 				action: data.detail,
 				type: timelineType,
-				sandbox: 'locked'
+				sandbox: 'locked',
+				...sandboxExtra
 			}];
 
 		// Update budget if included in the SSE payload (Issue #92 fix 4)

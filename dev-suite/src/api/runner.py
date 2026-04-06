@@ -9,6 +9,8 @@ Issue #97: Langfuse tracing -- wires create_trace_config + callbacks +
            propagation_context into the astream loop, mirroring CLI parity.
 Issue #105: Workspace-aware task execution -- workspace_root in GraphState,
             per-task init_tools_config scoping, WorkspaceManager validation.
+Issue #107: Sandbox stdout/stderr in timeline -- output_summary, errors,
+            exit_code included in sandbox_validated SSE event payload.
 
 Uses LangGraph's astream() to iterate node completions and emit SSE events
 in real time. Runs entirely on the async event loop -- no threading needed.
@@ -376,9 +378,19 @@ class TaskRunner:
                     action = f"Sandbox: {failed or '?'} test(s) failed"
                     await self._emit_log(f"[sandbox:locked] Validation: {passed or '?'} passed, {failed or '?'} failed")
                 task.timeline.append(TimelineEvent(
-                    time=_now_str(), agent="qa", action=action, type="exec",
+                    time=_now_str(),
+                    agent="qa",
+                    action=action,
+                    type="exec",
+                    output_summary=sandbox_result.output_summary or "",
+                    errors=sandbox_result.errors or [],
+                    exit_code=sandbox_result.exit_code,
                 ))
-                await self._emit_progress(task_id, "sandbox_validated", "qa", action)
+                await self._emit_progress(task_id, "sandbox_validated", "qa", action, extra={
+                    "output_summary": sandbox_result.output_summary or "",
+                    "errors": sandbox_result.errors or [],
+                    "exit_code": sandbox_result.exit_code,
+                })
             else:
                 await self._emit_log("[sandbox] Validation skipped (no E2B key or no code files)")
 
@@ -506,7 +518,7 @@ class TaskRunner:
         await self._emit_progress(task_id, "qa_complete", "qa", action, task=task)
         await state_manager.update_agent_status("qa", AgentStatus.IDLE, task_id)
 
-    async def _emit_progress(self, task_id, event, agent, detail, task=None):
+    async def _emit_progress(self, task_id, event, agent, detail, task=None, extra=None):
         try:
             payload = {
                 "task_id": task_id,
@@ -514,6 +526,8 @@ class TaskRunner:
                 "agent": agent,
                 "detail": detail,
             }
+            if extra:
+                payload.update(extra)
             if task is not None:
                 payload["tokens_used"] = task.budget.tokens_used
                 payload["retries_used"] = task.budget.retries_used
