@@ -7,7 +7,7 @@
 
 	Issue #38: Data Integration — PR3
 	Issue #19: Memory entries grouped by module via memoryStore.groupedByModule
-	Updated: Added Session Debrief + Cost Tracker entries
+	Issue #143: P4 — status indicators use shape + color + text label (not color-only dots)
 -->
 <script lang="ts">
 	import { agentsStore } from '$lib/stores/agents.svelte.js';
@@ -32,13 +32,14 @@
 		chat: 'Task Chat'
 	};
 
-	const statusColors: Record<string, string> = {
-		idle: 'var(--color-text-dim)',
-		planning: 'var(--color-accent-cyan)',
-		coding: 'var(--color-accent-purple)',
-		reviewing: 'var(--color-accent-yellow)',
-		waiting: 'var(--color-accent-yellow)',
-		error: 'var(--color-accent-red)'
+	/** P4: Status indicator config — shape glyph + color per status. */
+	const statusConfig: Record<string, { color: string; glyph: string }> = {
+		idle: { color: 'var(--color-text-dim)', glyph: '\u2014' },
+		planning: { color: 'var(--color-accent-cyan)', glyph: '\u27F3' },
+		coding: { color: 'var(--color-accent-purple)', glyph: '\u27F3' },
+		reviewing: { color: 'var(--color-accent-yellow)', glyph: '\u27F3' },
+		waiting: { color: 'var(--color-accent-yellow)', glyph: '\u25E6' },
+		error: { color: 'var(--color-accent-red)', glyph: '\u2715' }
 	};
 
 	const aliveStatuses = ['planning', 'coding', 'reviewing'];
@@ -69,7 +70,7 @@
 				{#each tasksStore.list as task (task.id)}
 					<button onclick={() => onSelect(`task-${task.id}`)} class="flex w-full items-center gap-2 border-l-2 px-2.5 py-1.5 text-left transition-colors hover:bg-[var(--color-bg-hover)]" style="border-color: {selectedId === `task-${task.id}` ? 'var(--color-accent-cyan)' : 'transparent'}; background: {selectedId === `task-${task.id}` ? 'var(--color-bg-surface)' : 'transparent'};">
 						<div class="min-w-0 flex-1">
-							<div class="truncate text-[11px]" style="color: {selectedId === `task-${task.id}` ? 'var(--color-text-bright)' : 'var(--color-text-muted)'};\">{task.description.length > 35 ? task.description.slice(0, 35) + '...' : task.description}</div>
+							<div class="truncate text-[11px]" style="color: {selectedId === `task-${task.id}` ? 'var(--color-text-bright)' : 'var(--color-text-muted)'};">{task.description.length > 35 ? task.description.slice(0, 35) + '...' : task.description}</div>
 							<div class="mt-0.5 truncate text-[9px]" style="color: var(--color-text-dim);">{task.id} | {task.status}</div>
 						</div>
 						<span class="shrink-0 rounded-sm px-1.5 py-px text-[8px] uppercase" style="color: {task.status === 'passed' ? 'var(--color-accent-green)' : task.status === 'failed' ? 'var(--color-accent-red)' : 'var(--color-accent-yellow)'}; background: {task.status === 'passed' ? 'var(--color-accent-green)' : task.status === 'failed' ? 'var(--color-accent-red)' : 'var(--color-accent-yellow)'}12;">{task.status}</span>
@@ -78,12 +79,20 @@
 				<div class="mx-2 my-1" style="height: 1px; background: var(--color-border);"></div>
 				<div class="px-2.5 py-1"><span class="text-[9px] uppercase" style="color: var(--color-text-faint); letter-spacing: 0.8px;">Agents</span></div>
 				{#each agentsStore.list as agent (agent.id)}
+					{@const cfg = statusConfig[agent.status] ?? { color: 'var(--color-text-dim)', glyph: '?' }}
 					<button onclick={() => onSelect(`agent-${agent.id}`)} class="flex w-full items-center gap-2 border-l-2 px-2.5 py-1.5 text-left transition-colors hover:bg-[var(--color-bg-hover)]" style="border-color: {selectedId === `agent-${agent.id}` ? agent.color : 'transparent'}; background: {selectedId === `agent-${agent.id}` ? 'var(--color-bg-surface)' : 'transparent'};">
 						<div class="min-w-0 flex-1">
-							<div class="truncate text-[11px]" style="color: {selectedId === `agent-${agent.id}` ? 'var(--color-text-bright)' : 'var(--color-text-muted)'};\">{agent.name}</div>
+							<div class="truncate text-[11px]" style="color: {selectedId === `agent-${agent.id}` ? 'var(--color-text-bright)' : 'var(--color-text-muted)'};">{agent.name}</div>
 							<div class="mt-0.5 truncate text-[9px]" style="color: var(--color-text-dim);">{agent.model}</div>
 						</div>
-						<span class="inline-block h-[7px] w-[7px] shrink-0 rounded-full" style="background: {statusColors[agent.status] || 'var(--color-text-dim)'}; animation: {aliveStatuses.includes(agent.status) ? 'pulse 1.5s ease-in-out infinite' : 'none'};"></span>
+						<!-- P4: Status indicator — shape + color + text label -->
+						<div class="flex shrink-0 items-center gap-1.5">
+							<span
+								class="flex h-4 w-4 items-center justify-center rounded text-[11px]"
+								style="background: {cfg.color}20; border: 1px solid {cfg.color}40; color: {cfg.color}; animation: {aliveStatuses.includes(agent.status) ? 'pulse 1.5s ease-in-out infinite' : 'none'};"
+							>{cfg.glyph}</span>
+							<span class="text-[9px]" style="color: {cfg.color};">{agent.status}</span>
+						</div>
 					</button>
 				{/each}
 				<div class="mx-2 my-1" style="height: 1px; background: var(--color-border);"></div>
@@ -112,7 +121,6 @@
 					</div>
 				</button>
 				<div class="mx-2 my-1" style="height: 1px; background: var(--color-border);"></div>
-				<!-- Audit Log sidebar entry -->
 				<button onclick={() => onSelect('__memory-audit')} class="flex w-full items-center gap-2 border-l-2 px-2.5 py-1.5 text-left transition-colors hover:bg-[var(--color-bg-hover)]" style="border-color: {selectedId === '__memory-audit' ? 'var(--color-accent-cyan)' : 'transparent'}; background: {selectedId === '__memory-audit' ? 'var(--color-bg-surface)' : 'transparent'};">
 					<div class="min-w-0 flex-1">
 						<div class="truncate text-[11px]" style="color: {selectedId === '__memory-audit' ? 'var(--color-text-bright)' : 'var(--color-text-muted)'};">Audit Log</div>
@@ -120,7 +128,6 @@
 					</div>
 				</button>
 				<div class="mx-2 my-1" style="height: 1px; background: var(--color-border);"></div>
-				<!-- Grouped by module -->
 				{#each memoryStore.groupedByModule as group (group.module)}
 					{@const groupPending = group.entries.filter(e => e.status === 'pending').length}
 					<div class="flex items-center justify-between px-2.5 py-1">
@@ -133,7 +140,7 @@
 						{@const tierColor = entry.tier.includes('l0') ? 'var(--color-accent-amber)' : 'var(--color-accent-purple)'}
 						<button onclick={() => onSelect(entry.id)} class="flex w-full items-center gap-2 border-l-2 px-2.5 py-1.5 text-left transition-colors hover:bg-[var(--color-bg-hover)]" style="border-color: {selectedId === entry.id ? tierColor : 'transparent'}; background: {selectedId === entry.id ? 'var(--color-bg-surface)' : 'transparent'}; opacity: {entry.status !== 'pending' ? 0.4 : 1};">
 							<div class="min-w-0 flex-1">
-								<div class="truncate text-[11px]" style="color: {selectedId === entry.id ? 'var(--color-text-bright)' : 'var(--color-text-muted)'};\">{entry.content.length > 40 ? entry.content.slice(0, 40) + '...' : entry.content}</div>
+								<div class="truncate text-[11px]" style="color: {selectedId === entry.id ? 'var(--color-text-bright)' : 'var(--color-text-muted)'};">{entry.content.length > 40 ? entry.content.slice(0, 40) + '...' : entry.content}</div>
 								<div class="mt-0.5 truncate text-[9px]" style="color: var(--color-text-dim);">{entry.tier} | {entry.source_agent}</div>
 							</div>
 							{#if entry.status === 'pending'}
@@ -154,7 +161,7 @@
 				{#each prsStore.list as pr (pr.id)}
 					<button onclick={() => onSelect(`pr-${pr.id}`)} class="flex w-full items-center gap-2 border-l-2 px-2.5 py-1.5 text-left transition-colors hover:bg-[var(--color-bg-hover)]" style="border-color: {selectedId === `pr-${pr.id}` ? (pr.status === 'merged' ? 'var(--color-accent-green)' : 'var(--color-accent-yellow)') : 'transparent'}; background: {selectedId === `pr-${pr.id}` ? 'var(--color-bg-surface)' : 'transparent'};">
 						<div class="min-w-0 flex-1">
-							<div class="truncate text-[11px]" style="color: {selectedId === `pr-${pr.id}` ? 'var(--color-text-bright)' : 'var(--color-text-muted)'};\">{pr.id} {pr.title}</div>
+							<div class="truncate text-[11px]" style="color: {selectedId === `pr-${pr.id}` ? 'var(--color-text-bright)' : 'var(--color-text-muted)'};">{pr.id} {pr.title}</div>
 							<div class="mt-0.5 truncate text-[9px]" style="color: var(--color-text-dim);">{pr.status} | +{pr.additions} -{pr.deletions}</div>
 						</div>
 					</button>

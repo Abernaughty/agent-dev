@@ -5,19 +5,21 @@
 	Right: Aggregate task budget (tokens/cost/retries) from tasksStore.
 
 	Issue #19: Replaced all hardcoded values with store-driven data.
+	Issue #143: P4 — status indicators use shape + color + text label (not color-only dots)
 -->
 <script lang="ts">
 	import { agentsStore } from '$lib/stores/agents.svelte.js';
 	import { tasksStore } from '$lib/stores/tasks.svelte.js';
 
-	const statusColors: Record<string, string> = {
-		idle: 'var(--color-text-dim)',
-		planning: 'var(--color-accent-cyan)',
-		coding: 'var(--color-accent-purple)',
-		reviewing: 'var(--color-accent-yellow)',
-		waiting: 'var(--color-accent-yellow)',
-		testing: 'var(--color-accent-green)',
-		error: 'var(--color-accent-red)'
+	/** P4: Status indicator config — shape glyph + color per status. */
+	const statusConfig: Record<string, { color: string; glyph: string }> = {
+		idle: { color: '#708090', glyph: '\u2014' },
+		planning: { color: '#22d3ee', glyph: '\u27F3' },
+		coding: { color: '#a78bfa', glyph: '\u27F3' },
+		reviewing: { color: '#fbbf24', glyph: '\u27F3' },
+		waiting: { color: '#fbbf24', glyph: '\u25E6' },
+		testing: { color: '#34d399', glyph: '\u27F3' },
+		error: { color: '#ef4444', glyph: '\u2715' }
 	};
 
 	const aliveStatuses = ['planning', 'coding', 'reviewing', 'testing'];
@@ -50,9 +52,9 @@
 
 	const tokenBarColor = $derived(() => {
 		const pct = tokenPct();
-		if (pct > 90) return 'var(--color-accent-red)';
-		if (pct > 75) return 'var(--color-accent-amber)';
-		return 'var(--color-accent-cyan)';
+		if (pct > 90) return '#ef4444';
+		if (pct > 75) return '#f59e0b';
+		return '#22d3ee';
 	});
 </script>
 
@@ -66,15 +68,17 @@
 		<span class="opacity-70">|</span>
 		{#if agentsStore.list.length > 0}
 			{#each agentsStore.list as agent (agent.id)}
+				{@const cfg = statusConfig[agent.status] ?? { color: '#708090', glyph: '?' }}
 				<span class="flex items-center gap-1">
+					<!-- P4: 16px rounded square with shape glyph -->
 					<span
-						class="inline-block h-[7px] w-[7px] rounded-full"
+						class="flex h-3.5 w-3.5 items-center justify-center rounded-sm text-[9px]"
 						style="
-							background: {statusColors[agent.status] || 'var(--color-text-dim)'};
+							background: {cfg.color}30;
+							color: {cfg.color};
 							animation: {aliveStatuses.includes(agent.status) ? 'pulse 1.5s ease-in-out infinite' : 'none'};
-							box-shadow: {aliveStatuses.includes(agent.status) ? '0 0 6px ' + (statusColors[agent.status] || '') : 'none'};
 						"
-					></span>
+					>{cfg.glyph}</span>
 					<span class="opacity-90">{agent.name}</span>
 				</span>
 			{/each}

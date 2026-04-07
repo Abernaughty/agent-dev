@@ -1,15 +1,17 @@
 <!--
-	TaskDetailView — full task detail with error messages, blueprint,
-	generated code, budget, and compact timeline.
+	TaskDetailView — full task detail with outcome summary, collapsible blueprint,
+	split code/reasoning, milestone timeline, and budget metrics.
 
 	Fetches TaskDetail on-demand via tasksStore.fetchDetail().
 	Replaces the old BlueprintView for task-{id} selections.
 
 	Issue #108: Click-to-expand task detail view
-	CR fixes: neutral acceptance criteria indicators, sandbox output in timeline,
-	          per-task loading/error checks, redacted copy/JSON, $derived.by()
-	Hotfix: untrack fetchDetail in $effect to prevent infinite loop
-	Hotfix: bullet character rendering in acceptance criteria
+	Issue #143: Design polish — hierarchy, typography, contrast, affordances
+	  P1: Outcome summary card at top, collapsible blueprint
+	  P2: 4-tier typography, sentence-case headers, de-saturated constraints
+	  P3: Split code artifacts vs agent reasoning, milestone-only timeline
+	  P4: WCAG AA contrast fixes, shape+color status indicators
+	  P5: Refresh button, copy header bar, neutral file tags, padded toggles
 -->
 <script lang="ts">
 	import { untrack } from 'svelte';
@@ -24,7 +26,6 @@
 
 	let { taskId }: Props = $props();
 
-	// Use $derived.by() for idiomatic Svelte 5
 	const summary = $derived.by(() => tasksStore.list.find((t) => t.id === taskId) ?? null);
 	const detail = $derived.by(() => tasksStore.getDetail(taskId));
 
@@ -38,10 +39,9 @@
 
 	// Fetch detail when taskId changes.
 	// CRITICAL: untrack the fetch call so this effect only depends on taskId,
-	// not on the reactive state that fetchDetail mutates (detailCache, detailLoadingMap, etc).
-	// Without untrack, fetchDetail writes → $derived reads → $effect re-runs → infinite loop.
+	// not on the reactive state that fetchDetail mutates.
 	$effect(() => {
-		const id = taskId; // Subscribe to taskId
+		const id = taskId;
 		if (id) {
 			untrack(() => tasksStore.fetchDetail(id));
 		}
@@ -72,10 +72,24 @@
 		reviewing: 'var(--color-accent-yellow)'
 	};
 
-	// Collapsible sections
+	// P1: Collapsible sections — blueprint collapsed for completed tasks
+	let showBlueprint = $state(false);
 	let showCode = $state(false);
+	let showReasoning = $state(false);
 	let showJson = $state(false);
 	let showTimeline = $state(true);
+	let showAllTimelineEvents = $state(false);
+
+	// P1: Auto-expand blueprint for in-progress tasks
+	$effect(() => {
+		const s = summary;
+		if (s) {
+			const isComplete = s.status === 'passed' || s.status === 'failed' || s.status === 'cancelled';
+			untrack(() => {
+				showBlueprint = !isComplete;
+			});
+		}
+	});
 
 	/** Copy text to clipboard. */
 	async function copyToClipboard(text: string) {
@@ -91,14 +105,12 @@
 		tasksStore.fetchDetail(taskId, true);
 	}
 
-	// Simplified with optional chaining
 	function hasSandboxOutput(event: TimelineEvent): boolean {
 		return !!(event.output_summary?.trim() || event.errors?.length);
 	}
 
 	/**
 	 * Build a redacted copy of task data for JSON display.
-	 * All string fields that could contain secrets are piped through redactSecrets().
 	 */
 	function buildRedactedJson(s: TaskSummary, d: TaskDetail | null): string {
 		const obj: Record<string, unknown> = {
@@ -119,6 +131,64 @@
 		}
 		return JSON.stringify(obj, null, 2);
 	}
+
+	/** P3: Filter timeline to milestone events only (hide tool_call by default). */
+	function getMilestoneEvents(timeline: TimelineEvent[]): TimelineEvent[] {
+		return timeline.filter((e) => e.type !== 'tool_call');
+	}
+
+	/** P3: Count tool calls in timeline. */
+	function countToolCalls(timeline: TimelineEvent[]): number {
+		return timeline.filter((e) => e.type === 'tool_call').length;
+	}
+
+	/** P1: Compute token percentage for outcome card. */
+	function tokenPct(s: TaskSummary): number {
+		if (s.budget.token_budget === 0) return 0;
+		return Math.round((s.budget.tokens_used / s.budget.token_budget) * 100);
+	}
+
+	/** P1: Token percentage color. */
+	function tokenPctColor(pct: number): string {
+		if (pct > 90) return 'var(--color-accent-red)';
+		if (pct > 75) return 'var(--color-accent-amber)';
+		return 'var(--color-text-bright)';
+	}
+
+	/** P3: Separate generated code into file artifacts vs reasoning text.
+	 * File artifacts are delimited by `# --- FILE: path ---` markers (from code_parser).
+	 * Everything outside those markers is reasoning.
+	 */
+	function splitCodeAndReasoning(raw: string): { files: { path: string; code: string }[]; reasoning: string } {
+		const files: { path: string; code: string }[] = [];
+		const reasoningLines: string[] = [];
+		const marker = /^# --- FILE:\s*(.+?)\s*---$/;
+		let currentFile: { path: string; lines: string[] } | null = null;
+
+		for (const line of raw.split('\n')) {
+			const match = line.match(marker);
+			if (match) {
+				if (currentFile) {
+					files.push({ path: currentFile.path, code: currentFile.lines.join('\n').trim() });
+				}
+				currentFile = { path: match[1], lines: [] };
+			} else if (currentFile) {
+				currentFile.lines.push(line);
+			} else {
+				reasoningLines.push(line);
+			}
+		}
+		if (currentFile) {
+			files.push({ path: currentFile.path, code: currentFile.lines.join('\n').trim() });
+		}
+		return { files, reasoning: reasoningLines.join('\n').trim() };
+	}
+
+	/** Approximate word count for reasoning text. */
+	function wordCount(text: string): number {
+		if (!text) return 0;
+		return text.split(/\s+/).filter(Boolean).length;
+	}
 </script>
 
 <div class="max-w-[800px] p-5 pl-6" style="font-family: var(--font-mono);">
@@ -127,18 +197,21 @@
 		{@const d = detail}
 		{@const sColor = statusColors[s.status] || 'var(--color-text-dim)'}
 		{@const isFailed = s.status === 'failed'}
+		{@const isComplete = s.status === 'passed' || s.status === 'failed' || s.status === 'cancelled'}
 		{@const isLoading = tasksStore.isDetailLoading(taskId)}
 		{@const fetchError = tasksStore.getDetailError(taskId)}
+		{@const pct = tokenPct(s)}
 
-		<!-- ===== STATUS HEADER ===== -->
+		<!-- ===== STATUS HEADER (T1 title) ===== -->
 		<div class="mb-1.5 flex items-center gap-2.5">
-			<span class="text-[16px] font-semibold" style="color: var(--color-text-bright);">{s.description.length > 70 ? s.description.slice(0, 70) + '...' : s.description}</span>
+			<span class="text-[15px] font-medium" style="color: var(--color-text-bright);">{s.description.length > 70 ? s.description.slice(0, 70) + '...' : s.description}</span>
 			<span
 				class="rounded-sm px-2 py-0.5 text-[10px] font-semibold uppercase"
 				style="color: {sColor}; background: {sColor}15;"
 			>{s.status}</span>
 		</div>
-		<div class="mb-5 flex items-center gap-3 text-[10px]" style="color: var(--color-text-dim);">
+		<!-- T4 meta line -->
+		<div class="mb-5 flex items-center gap-3 text-[11px]" style="color: var(--color-text-dim);">
 			<span>Task: {s.id}</span>
 			{#if s.workspace}
 				<span style="color: var(--color-text-faint);">|</span>
@@ -149,11 +222,12 @@
 				<a href={s.pr_url} target="_blank" rel="noopener" class="underline" style="color: var(--color-accent-cyan);">PR #{s.pr_number}</a>
 			{/if}
 			<span class="flex-1"></span>
+			<!-- P5: Refresh button with visible bg/border/icon -->
 			<button
 				onclick={refreshDetail}
-				class="cursor-pointer rounded border px-2 py-0.5 text-[9px] transition-opacity hover:opacity-100"
-				style="background: transparent; border-color: var(--color-border); color: var(--color-text-dim); opacity: 0.7;"
-			>Refresh</button>
+				class="flex cursor-pointer items-center gap-1.5 rounded border px-2.5 py-1 text-[11px] transition-opacity hover:opacity-100"
+				style="background: var(--color-bg-surface); border-color: var(--color-border-secondary, var(--color-border)); color: var(--color-text-dim);"
+			>&#8635; Refresh</button>
 		</div>
 
 		<!-- ===== LOADING STATE ===== -->
@@ -168,11 +242,9 @@
 			{@const errorMsg = d?.error_message || s.completion_detail || 'Task failed \u2014 no error details available. Check terminal output for more info.'}
 			<div
 				class="mb-5 rounded-md border p-4"
-				style="background: var(--color-accent-red, #ef4444)08; border-color: var(--color-accent-red, #ef4444)30; border-left: 3px solid var(--color-accent-red, #ef4444);"
+				style="background: var(--color-accent-red)08; border-color: var(--color-accent-red)30; border-left: 3px solid var(--color-accent-red);"
 			>
-				<div class="mb-2 flex items-center gap-2">
-					<span class="text-[10px] font-semibold uppercase" style="color: var(--color-accent-red); letter-spacing: 1px;">Failure Reason</span>
-				</div>
+				<div class="mb-2 text-[12px] font-medium" style="color: var(--color-accent-red);">Failure reason</div>
 				<div class="text-[12px] leading-relaxed" style="color: #f8a0a0; white-space: pre-wrap;">{redactSecrets(errorMsg)}</div>
 			</div>
 		{/if}
@@ -184,55 +256,117 @@
 			</div>
 		{/if}
 
-		<!-- ===== BLUEPRINT ===== -->
-		{#if d?.blueprint}
-			{@const bp = d.blueprint}
-			<div class="mb-2 text-[10px]" style="color: var(--color-text-dim); letter-spacing: 1px;">BLUEPRINT</div>
-
-			<!-- Instructions -->
-			<div
-				class="mb-4 rounded-md border p-3.5"
-				style="background: var(--color-bg-activity); border-color: var(--color-border); border-left: 3px solid var(--color-accent-cyan);"
-			>
-				<div class="mb-1 text-[9px]" style="color: var(--color-text-dim); letter-spacing: 0.5px;">INSTRUCTIONS</div>
-				<div class="text-[12px] leading-relaxed" style="color: var(--color-text-muted); white-space: pre-wrap;">{redactSecrets(bp.instructions)}</div>
-			</div>
-
-			<!-- Target Files -->
-			{#if bp.target_files.length > 0}
-				<div class="mb-1 text-[9px]" style="color: var(--color-text-dim); letter-spacing: 0.5px;">TARGET FILES</div>
-				<div class="mb-4 flex flex-wrap gap-1.5">
-					{#each bp.target_files as f}
-						<span class="rounded px-2 py-0.5 text-[10px]" style="color: var(--color-accent-cyan); background: var(--color-accent-cyan)08;">{f}</span>
-					{/each}
-				</div>
-			{/if}
-
-			<!-- Constraints -->
-			{#if bp.constraints.length > 0}
-				<div class="mb-1 text-[9px]" style="color: var(--color-text-dim); letter-spacing: 0.5px;">CONSTRAINTS</div>
-				<div class="mb-4 flex flex-col gap-1">
-					{#each bp.constraints as c}
-						<div class="rounded border px-2.5 py-1.5 text-[11px] leading-relaxed" style="color: var(--color-accent-amber); background: var(--color-accent-amber)08; border-color: var(--color-accent-amber)15;">{c}</div>
-					{/each}
-				</div>
-			{/if}
-
-			<!-- Acceptance Criteria — neutral indicator, no fabricated per-criterion status -->
-			{#if bp.acceptance_criteria.length > 0}
-				<div class="mb-1 text-[9px]" style="color: var(--color-text-dim); letter-spacing: 0.5px;">ACCEPTANCE CRITERIA</div>
-				<div class="mb-5 flex flex-col gap-1">
-					{#each bp.acceptance_criteria as c}
-						<div class="flex items-start gap-2 rounded border px-2.5 py-1.5 text-[11px] leading-relaxed" style="color: var(--color-text-muted); background: var(--color-bg-activity); border-color: var(--color-border);">
-							<span class="mt-px shrink-0" style="color: var(--color-text-dim);">&#8226;</span>
-							<span>{c}</span>
+		<!-- ===== P1: OUTCOME SUMMARY CARD ===== -->
+		{#if isComplete}
+			<div class="mb-5 rounded-md border p-3.5" style="background: var(--color-bg-activity); border-color: var(--color-border);">
+				<!-- Metric tiles -->
+				<div class="mb-3 grid grid-cols-4 gap-2.5">
+					{#each [
+						{ label: 'Duration', value: s.completed_at ? '\u2014' : '...', color: 'var(--color-text-bright)' },
+						{ label: 'Cost', value: `$${s.budget.cost_used.toFixed(2)}`, sub: `of $${s.budget.cost_budget}`, color: 'var(--color-text-bright)' },
+						{ label: 'Retries', value: `${s.budget.retries_used} / ${s.budget.max_retries}`, color: s.budget.retries_used >= s.budget.max_retries ? 'var(--color-accent-red)' : 'var(--color-text-bright)' },
+						{ label: 'Tokens', value: `${pct}%`, sub: `${(s.budget.tokens_used / 1000).toFixed(1)}k / ${(s.budget.token_budget / 1000).toFixed(0)}k`, color: tokenPctColor(pct) }
+					] as metric}
+						<div class="rounded-md border p-2.5" style="background: var(--color-bg-primary); border-color: var(--color-border);">
+							<div class="text-[11px]" style="color: var(--color-text-dim);">{metric.label}</div>
+							<div class="text-[18px] font-medium" style="color: {metric.color};">{metric.value}</div>
+							{#if metric.sub}
+								<div class="text-[11px]" style="color: var(--color-text-dim);">{metric.sub}</div>
+							{/if}
 						</div>
 					{/each}
 				</div>
+				<!-- Output badges -->
+				<div class="flex flex-wrap gap-2">
+					{#if d?.blueprint?.target_files}
+						<span class="rounded border px-2.5 py-1 text-[11px]" style="color: var(--color-text-dim); background: var(--color-bg-surface); border-color: var(--color-border-secondary, var(--color-border));">{d.blueprint.target_files.length} file{d.blueprint.target_files.length !== 1 ? 's' : ''} targeted</span>
+					{/if}
+					{#if s.pr_url}
+						<span class="rounded border px-2.5 py-1 text-[11px]" style="color: var(--color-accent-cyan); background: var(--color-accent-cyan)10; border-color: var(--color-accent-cyan)25;">PR #{s.pr_number}</span>
+					{/if}
+					<span class="rounded border px-2.5 py-1 text-[11px]" style="color: var(--color-accent-green); background: var(--color-accent-green)10; border-color: var(--color-accent-green)25;">{s.timeline.filter(e => e.type === 'success').length > 0 ? 'Tests passing' : 'No test results'}</span>
+				</div>
+			</div>
+		{:else}
+			<!-- In-progress: show budget inline -->
+			<div class="mb-5 grid grid-cols-3 gap-3">
+				{#each [
+					{ label: 'Tokens', value: `${s.budget.tokens_used.toLocaleString()} / ${s.budget.token_budget.toLocaleString()}` },
+					{ label: 'Cost', value: `$${s.budget.cost_used.toFixed(2)} / $${s.budget.cost_budget}` },
+					{ label: 'Retries', value: `${s.budget.retries_used} / ${s.budget.max_retries}` }
+				] as metric}
+					<div class="rounded-md border p-2.5" style="background: var(--color-bg-activity); border-color: var(--color-border);">
+						<div class="text-[11px]" style="color: var(--color-text-dim);">{metric.label}</div>
+						<div class="text-[13px] font-medium" style="color: var(--color-text-bright);">{metric.value}</div>
+					</div>
+				{/each}
+			</div>
+		{/if}
+
+		<!-- ===== P1+P2: BLUEPRINT (collapsible, sentence-case header) ===== -->
+		{#if d?.blueprint}
+			{@const bp = d.blueprint}
+			<!-- P5: Collapsible toggle as padded row with surface bg and summary metadata -->
+			<button
+				onclick={() => showBlueprint = !showBlueprint}
+				class="mb-3 flex w-full cursor-pointer items-center justify-between rounded-md border px-3.5 py-2 text-left"
+				style="background: var(--color-bg-surface); border-color: var(--color-border-secondary, var(--color-border)); font-family: var(--font-mono);"
+			>
+				<div class="flex items-center gap-2">
+					<span class="text-[11px]" style="color: var(--color-text-faint);">{showBlueprint ? '\u25bc' : '\u25b6'}</span>
+					<span class="text-[12px] font-medium" style="color: var(--color-text-bright);">Blueprint</span>
+				</div>
+				<span class="text-[11px]" style="color: var(--color-text-dim);">{bp.target_files.length} file{bp.target_files.length !== 1 ? 's' : ''} &middot; {bp.constraints.length} constraint{bp.constraints.length !== 1 ? 's' : ''} &middot; {bp.acceptance_criteria.length} criteria</span>
+			</button>
+
+			{#if showBlueprint}
+				<!-- P2: Instructions — T2 header, T3 body -->
+				<div
+					class="mb-4 rounded-md border p-3.5"
+					style="background: var(--color-bg-activity); border-color: var(--color-border); border-left: 3px solid var(--color-accent-cyan);"
+				>
+					<div class="mb-1.5 text-[12px] font-medium" style="color: var(--color-text-bright);">Instructions</div>
+					<div class="text-[12px] leading-relaxed" style="color: var(--color-text-muted); white-space: pre-wrap;">{redactSecrets(bp.instructions)}</div>
+				</div>
+
+				<!-- P5: Target Files — neutral (non-clickable) tags -->
+				{#if bp.target_files.length > 0}
+					<div class="mb-1.5 text-[12px] font-medium" style="color: var(--color-text-bright);">Target files</div>
+					<div class="mb-4 flex flex-wrap gap-1.5">
+						{#each bp.target_files as f}
+							<span class="rounded border px-2 py-0.5 text-[11px]" style="color: var(--color-text-muted); background: var(--color-bg-surface); border-color: var(--color-border-secondary, var(--color-border));">{f}</span>
+						{/each}
+					</div>
+				{/if}
+
+				<!-- P2C: Constraints — de-saturated: neutral surface + left-border amber accent -->
+				{#if bp.constraints.length > 0}
+					<div class="mb-1.5 text-[12px] font-medium" style="color: var(--color-text-bright);">Constraints</div>
+					<div class="mb-4 flex flex-col gap-1">
+						{#each bp.constraints as c}
+							<div class="flex items-start gap-2 py-1.5 pl-2.5 pr-2.5 text-[12px] leading-relaxed" style="color: var(--color-text-muted); background: var(--color-bg-surface); border-left: 2px solid var(--color-accent-amber);">
+								<span class="mt-px shrink-0" style="color: var(--color-text-dim);">&#9676;</span>
+								<span>{c}</span>
+							</div>
+						{/each}
+					</div>
+				{/if}
+
+				<!-- P4C: Acceptance Criteria — check icon prefix, green left-border -->
+				{#if bp.acceptance_criteria.length > 0}
+					<div class="mb-1.5 text-[12px] font-medium" style="color: var(--color-text-bright);">Acceptance criteria</div>
+					<div class="mb-5 flex flex-col gap-1">
+						{#each bp.acceptance_criteria as c}
+							<div class="flex items-start gap-2 py-1.5 pl-2.5 pr-2.5 text-[12px] leading-relaxed" style="color: var(--color-text-muted); background: var(--color-bg-surface); border-left: 2px solid var(--color-accent-green);">
+								<span class="mt-px shrink-0" style="color: var(--color-accent-green);">&#10003;</span>
+								<span>{c}</span>
+							</div>
+						{/each}
+					</div>
+				{/if}
 			{/if}
 		{:else if !d && !isLoading}
-			<!-- Fallback: show description as instructions when no detail loaded -->
-			<div class="mb-2 text-[10px]" style="color: var(--color-text-dim); letter-spacing: 1px;">INSTRUCTIONS</div>
+			<div class="mb-1.5 text-[12px] font-medium" style="color: var(--color-text-bright);">Instructions</div>
 			<div
 				class="mb-5 rounded-md border p-3.5"
 				style="background: var(--color-bg-activity); border-color: var(--color-border); border-left: 3px solid var(--color-accent-cyan);"
@@ -241,111 +375,156 @@
 			</div>
 		{/if}
 
-		<!-- ===== GENERATED CODE (collapsible) ===== -->
+		<!-- ===== P3: FILES CREATED (split from reasoning) ===== -->
 		{#if d?.generated_code}
-			<div class="mb-4">
+			{@const { files: codeFiles, reasoning } = splitCodeAndReasoning(d.generated_code)}
+
+			<!-- File artifacts — primary display -->
+			{#if codeFiles.length > 0}
+				<div class="mb-1.5 text-[12px] font-medium" style="color: var(--color-text-bright);">Files created</div>
+				<div class="mb-4 flex flex-col gap-2">
+					{#each codeFiles as file}
+						{@const redactedCode = redactSecrets(file.code)}
+						<div class="overflow-hidden rounded-md border" style="border-color: var(--color-border);">
+							<!-- P5: Copy button in header bar -->
+							<div class="flex items-center justify-between border-b px-3 py-1.5" style="background: var(--color-bg-surface); border-color: var(--color-border);">
+								<span class="text-[11px]" style="color: var(--color-text-bright);">{file.path}</span>
+								<button
+									onclick={() => copyToClipboard(redactedCode)}
+									class="cursor-pointer rounded border px-2 py-0.5 text-[11px] transition-opacity hover:opacity-100"
+									style="background: var(--color-bg-primary); border-color: var(--color-border-secondary, var(--color-border)); color: var(--color-text-dim);"
+								>Copy</button>
+							</div>
+							<pre class="max-h-[300px] overflow-auto p-3.5 text-[11px] leading-relaxed" style="background: #08090e; color: var(--color-text-muted); font-family: var(--font-mono); margin: 0; white-space: pre-wrap; word-break: break-word;">{redactedCode}</pre>
+						</div>
+					{/each}
+				</div>
+			{/if}
+
+			<!-- Agent reasoning — collapsed by default -->
+			{#if reasoning || codeFiles.length === 0}
+				{@const displayText = reasoning || d.generated_code}
+				{@const redactedReasoning = redactSecrets(displayText)}
 				<button
-					onclick={() => showCode = !showCode}
-					class="mb-1 flex cursor-pointer items-center gap-1.5 border-none bg-transparent p-0 text-[10px]"
-					style="color: var(--color-text-dim); font-family: var(--font-mono); letter-spacing: 1px;"
+					onclick={() => showReasoning = !showReasoning}
+					class="mb-3 flex w-full cursor-pointer items-center justify-between rounded-md border px-3.5 py-2 text-left"
+					style="background: var(--color-bg-surface); border-color: var(--color-border-secondary, var(--color-border)); font-family: var(--font-mono);"
 				>
-					<span style="font-size: 8px;">{showCode ? '\u25bc' : '\u25b6'}</span>
-					GENERATED CODE ({d.generated_code.split('\n').length} lines)
+					<div class="flex items-center gap-2">
+						<span class="text-[11px]" style="color: var(--color-text-faint);">{showReasoning ? '\u25bc' : '\u25b6'}</span>
+						<span class="text-[12px] font-medium" style="color: var(--color-text-bright);">{codeFiles.length > 0 ? 'Agent reasoning' : 'Generated code'}</span>
+					</div>
+					<span class="text-[11px]" style="color: var(--color-text-dim);">~{wordCount(displayText)} words</span>
 				</button>
-				{#if showCode}
-					{@const redactedCode = redactSecrets(d.generated_code)}
-					<div class="relative rounded-md border" style="background: #08090e; border-color: var(--color-border);">
-						<!-- Copy redacted text, not raw -->
-						<button
-							onclick={() => copyToClipboard(redactedCode)}
-							class="absolute right-2 top-2 cursor-pointer rounded border px-2 py-0.5 text-[8px] opacity-60 transition-opacity hover:opacity-100"
-							style="background: var(--color-bg-surface); border-color: var(--color-border); color: var(--color-text-dim);"
-						>Copy</button>
-						<pre class="overflow-x-auto p-3.5 pr-16 text-[10px] leading-relaxed" style="color: var(--color-text-muted); font-family: var(--font-mono); margin: 0; white-space: pre-wrap; word-break: break-word;">{redactedCode}</pre>
+				{#if showReasoning}
+					<div class="mb-4 overflow-hidden rounded-md border" style="border-color: var(--color-border);">
+						<div class="flex items-center justify-between border-b px-3 py-1.5" style="background: var(--color-bg-surface); border-color: var(--color-border);">
+							<span class="text-[11px]" style="color: var(--color-text-dim);">{codeFiles.length > 0 ? 'Agent reasoning' : 'Raw output'}</span>
+							<button
+								onclick={() => copyToClipboard(redactedReasoning)}
+								class="cursor-pointer rounded border px-2 py-0.5 text-[11px] transition-opacity hover:opacity-100"
+								style="background: var(--color-bg-primary); border-color: var(--color-border-secondary, var(--color-border)); color: var(--color-text-dim);"
+							>Copy</button>
+						</div>
+						<pre class="overflow-x-auto p-3.5 text-[11px] leading-relaxed" style="background: #08090e; color: var(--color-text-muted); font-family: var(--font-mono); margin: 0; white-space: pre-wrap; word-break: break-word;">{redactedReasoning}</pre>
 					</div>
 				{/if}
-			</div>
+			{/if}
 		{/if}
 
-		<!-- ===== BUDGET SUMMARY ===== -->
-		<div class="mb-2 text-[10px]" style="color: var(--color-text-dim); letter-spacing: 1px;">BUDGET</div>
-		<div class="mb-5 grid grid-cols-3 gap-3">
-			{#each [
-				{ label: 'Tokens', value: `${s.budget.tokens_used.toLocaleString()} / ${s.budget.token_budget.toLocaleString()}` },
-				{ label: 'Cost', value: `$${s.budget.cost_used.toFixed(2)} / $${s.budget.cost_budget}` },
-				{ label: 'Retries', value: `${s.budget.retries_used} / ${s.budget.max_retries}` }
-			] as metric}
-				<div class="rounded-md border p-2.5" style="background: var(--color-bg-activity); border-color: var(--color-border);">
-					<div class="text-[8px]" style="color: var(--color-text-dim);">{metric.label}</div>
-					<div class="text-[13px] font-semibold" style="color: var(--color-text-bright);">{metric.value}</div>
-				</div>
-			{/each}
-		</div>
-
-		<!-- ===== COMPACT TIMELINE (collapsible) ===== -->
+		<!-- ===== P3: COMPACT TIMELINE (milestone events, full agent names) ===== -->
 		{#if s.timeline.length > 0}
+			{@const milestones = getMilestoneEvents(s.timeline)}
+			{@const toolCallCount = countToolCalls(s.timeline)}
+			{@const displayEvents = showAllTimelineEvents ? s.timeline : milestones}
+
 			<button
 				onclick={() => showTimeline = !showTimeline}
-				class="mb-1 flex cursor-pointer items-center gap-1.5 border-none bg-transparent p-0 text-[10px]"
-				style="color: var(--color-text-dim); font-family: var(--font-mono); letter-spacing: 1px;"
+				class="mb-3 flex w-full cursor-pointer items-center justify-between rounded-md border px-3.5 py-2 text-left"
+				style="background: var(--color-bg-surface); border-color: var(--color-border-secondary, var(--color-border)); font-family: var(--font-mono);"
 			>
-				<span style="font-size: 8px;">{showTimeline ? '\u25bc' : '\u25b6'}</span>
-				TIMELINE ({s.timeline.length} events)
+				<div class="flex items-center gap-2">
+					<span class="text-[11px]" style="color: var(--color-text-faint);">{showTimeline ? '\u25bc' : '\u25b6'}</span>
+					<span class="text-[12px] font-medium" style="color: var(--color-text-bright);">Timeline</span>
+				</div>
+				<span class="text-[11px]" style="color: var(--color-text-dim);">{milestones.length} milestone{milestones.length !== 1 ? 's' : ''}{toolCallCount > 0 ? ` \u00b7 ${toolCallCount} tool call${toolCallCount !== 1 ? 's' : ''}` : ''}</span>
 			</button>
+
 			{#if showTimeline}
 				<div class="mb-5 rounded-md border p-3" style="background: var(--color-bg-activity); border-color: var(--color-border);">
-					{#each s.timeline as event, i}
+					{#each displayEvents as event, i}
 						{@const agent = agentInfo(event.agent)}
 						{@const style = eventStyles[event.type] ?? { color: 'var(--color-text-dim)', label: '?' }}
 						{@const isTool = event.type === 'tool_call'}
-						<div class:mb-1.5={i < s.timeline.length - 1}>
+						{@const isFail = event.type === 'fail'}
+						<div class:mb-2={i < displayEvents.length - 1}>
 							<div class="flex items-start gap-2" class:opacity-70={isTool}>
-								<span class="shrink-0 text-[9px]" style="color: var(--color-text-faint); min-width: 34px; padding-top: 1px;">{event.time}</span>
-								<span class="shrink-0 text-[10px] font-semibold" style="color: {agent.color}; min-width: 20px;">{agent.name.charAt(0)}</span>
+								<span class="shrink-0 pt-px text-[11px]" style="color: var(--color-text-faint); min-width: 36px;">{event.time}</span>
+								<!-- Full agent name -->
+								<span class="shrink-0 text-[11px] font-medium" style="color: {agent.color}; min-width: 60px;">{agent.name}</span>
 								<span
-									class="shrink-0 rounded-sm px-1 py-px text-center font-semibold"
-									class:text-[7px]={isTool}
-									class:text-[8px]={!isTool}
-									style="color: {style.color}; background: {style.color}18; letter-spacing: 0.5px; min-width: 32px;"
+									class="shrink-0 rounded-sm px-1.5 py-px text-center text-[11px] font-semibold"
+									style="color: {style.color}; background: {style.color}18; letter-spacing: 0.5px; min-width: 38px;"
 								>{style.label}</span>
-								<span class="text-[10px] leading-relaxed" style="color: var(--color-text-muted);">{event.action}</span>
+								<span class="text-[11px] leading-relaxed" style="color: {isFail ? '#f8a0a0' : event.type === 'success' ? '#6ee7b7' : isTool ? 'var(--color-text-dim)' : 'var(--color-text-muted)'};">{event.action}</span>
 							</div>
-							<!-- Sandbox validation payload -->
+							<!-- Sandbox output -->
 							{#if hasSandboxOutput(event)}
-								<div class="ml-[88px] mt-1">
+								<div class="ml-[100px] mt-1">
 									{#if event.errors?.length}
-										<div class="rounded border-l-2 px-2 py-1" style="background: var(--color-accent-red)08; border-color: var(--color-accent-red);">
+										<div class="rounded px-2 py-1" style="background: var(--color-accent-red)08; border-left: 2px solid var(--color-accent-red);">
 											{#each event.errors as err}
-												<div class="text-[9px] leading-relaxed" style="color: var(--color-accent-red);">{redactSecrets(err)}</div>
+												<div class="text-[11px] leading-relaxed" style="color: var(--color-accent-red);">{redactSecrets(err)}</div>
 											{/each}
 										</div>
 									{/if}
 									{#if event.output_summary?.trim()}
-										<pre class="mt-0.5 max-h-[120px] overflow-y-auto rounded px-2 py-1 text-[9px] leading-relaxed" style="background: var(--color-bg-activity); color: var(--color-text-dim); margin: 0; white-space: pre-wrap; word-break: break-word;">{redactSecrets(event.output_summary)}</pre>
+										<pre class="mt-0.5 max-h-[120px] overflow-y-auto rounded px-2 py-1 text-[11px] leading-relaxed" style="background: var(--color-bg-activity); color: var(--color-text-dim); margin: 0; white-space: pre-wrap; word-break: break-word;">{redactSecrets(event.output_summary)}</pre>
 									{/if}
 									{#if event.exit_code !== undefined}
-										<div class="mt-0.5 text-[8px]" style="color: {event.exit_code === 0 ? 'var(--color-accent-green)' : 'var(--color-accent-red)'};">exit code: {event.exit_code}</div>
+										<div class="mt-0.5 text-[11px]" style="color: {event.exit_code === 0 ? 'var(--color-accent-green)' : 'var(--color-accent-red)'};">exit code: {event.exit_code}</div>
 									{/if}
 								</div>
 							{/if}
 						</div>
 					{/each}
+
+					<!-- P3: Toggle to show all events including tool calls -->
+					{#if toolCallCount > 0}
+						<button
+							onclick={() => showAllTimelineEvents = !showAllTimelineEvents}
+							class="mt-2 w-full cursor-pointer border-t pt-2 text-center text-[11px]"
+							style="border-color: var(--color-border); color: var(--color-accent-cyan); font-family: var(--font-mono); background: transparent; border-left: none; border-right: none; border-bottom: none;"
+						>
+							{showAllTimelineEvents ? `Hide tool calls (show ${milestones.length} milestones)` : `Show all ${s.timeline.length} events (including ${toolCallCount} tool calls)`}
+						</button>
+					{/if}
 				</div>
 			{/if}
 		{/if}
 
-		<!-- ===== RAW JSON (collapsible) — redacted output ===== -->
+		<!-- ===== RAW JSON (collapsible) ===== -->
 		<button
 			onclick={() => showJson = !showJson}
-			class="mb-1 flex cursor-pointer items-center gap-1.5 border-none bg-transparent p-0 text-[10px]"
-			style="color: var(--color-text-dim); font-family: var(--font-mono); letter-spacing: 1px;"
+			class="mb-3 flex w-full cursor-pointer items-center justify-between rounded-md border px-3.5 py-2 text-left"
+			style="background: var(--color-bg-surface); border-color: var(--color-border-secondary, var(--color-border)); font-family: var(--font-mono);"
 		>
-			<span style="font-size: 8px;">{showJson ? '\u25bc' : '\u25b6'}</span>
-			TASK JSON
+			<div class="flex items-center gap-2">
+				<span class="text-[11px]" style="color: var(--color-text-faint);">{showJson ? '\u25bc' : '\u25b6'}</span>
+				<span class="text-[12px] font-medium" style="color: var(--color-text-bright);">Task JSON</span>
+			</div>
 		</button>
 		{#if showJson}
-			<div class="overflow-x-auto rounded-md border p-3.5" style="background: #08090e; border-color: var(--color-border);">
-				<pre class="m-0 text-[11px] leading-relaxed" style="color: var(--color-text-muted);">{buildRedactedJson(s, d)}</pre>
+			<div class="overflow-hidden rounded-md border" style="border-color: var(--color-border);">
+				<div class="flex items-center justify-between border-b px-3 py-1.5" style="background: var(--color-bg-surface); border-color: var(--color-border);">
+					<span class="text-[11px]" style="color: var(--color-text-dim);">Redacted JSON</span>
+					<button
+						onclick={() => copyToClipboard(buildRedactedJson(s, d))}
+						class="cursor-pointer rounded border px-2 py-0.5 text-[11px] transition-opacity hover:opacity-100"
+						style="background: var(--color-bg-primary); border-color: var(--color-border-secondary, var(--color-border)); color: var(--color-text-dim);"
+					>Copy</button>
+				</div>
+				<pre class="overflow-x-auto p-3.5 text-[11px] leading-relaxed" style="background: #08090e; color: var(--color-text-muted); margin: 0;">{buildRedactedJson(s, d)}</pre>
 			</div>
 		{/if}
 
