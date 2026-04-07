@@ -11,6 +11,7 @@ Issue #105: Workspace-aware task execution -- workspace_root in GraphState,
             per-task init_tools_config scoping, WorkspaceManager validation.
 Issue #107: Sandbox stdout/stderr in timeline -- output_summary, errors,
             exit_code included in sandbox_validated SSE event payload.
+Issue #153: Renamed publish_pr -> create_pr in initial GraphState.
 
 Uses LangGraph's astream() to iterate node completions and emit SSE events
 in real time. Runs entirely on the async event loop -- no threading needed.
@@ -105,12 +106,12 @@ class TaskRunner:
         self._tasks: dict[str, asyncio.Task] = {}
         self._dev_tool_baselines: dict[str, int] = {}
 
-    def submit(self, task_id: str, description: str, workspace: str = "", publish_pr: bool | None = None) -> None:
+    def submit(self, task_id: str, description: str, workspace: str = "", create_pr: bool | None = None) -> None:
         """Submit a task for background execution."""
         if task_id in self._tasks:
             logger.warning("Task %s already running, ignoring duplicate submit", task_id)
             return
-        coro = self._run_task(task_id, description, workspace=workspace, publish_pr=publish_pr)
+        coro = self._run_task(task_id, description, workspace=workspace, create_pr=create_pr)
         async_task = asyncio.create_task(coro, name=f"orchestrator-{task_id}")
         self._tasks[task_id] = async_task
         async_task.add_done_callback(lambda t: self._tasks.pop(task_id, None))
@@ -140,7 +141,7 @@ class TaskRunner:
     def running_count(self) -> int:
         return len(self._tasks)
 
-    async def _run_task(self, task_id: str, description: str, workspace: str = "", publish_pr: bool | None = None) -> None:
+    async def _run_task(self, task_id: str, description: str, workspace: str = "", create_pr: bool | None = None) -> None:
         """Run the orchestrator via astream() and emit SSE events."""
         from .state import state_manager
 
@@ -193,7 +194,7 @@ class TaskRunner:
             else:
                 await self._emit_log("[orchestrator] No tools configured (single-shot mode)")
 
-            # Issue #89: publish_pr defaults to True, API can override
+            # Issue #153: create_pr (renamed from publish_pr) defaults to True
             initial_state: GraphState = {
                 "task_description": description,
                 "blueprint": None,
@@ -208,7 +209,8 @@ class TaskRunner:
                 "parsed_files": [],
                 "tool_calls_log": [],
                 "workspace_root": str(task_workspace),
-                "publish_pr": True if publish_pr is None else publish_pr,
+                "create_pr": True if create_pr is None else create_pr,
+                "workspace_type": "local",
             }
 
             stream_config = {
