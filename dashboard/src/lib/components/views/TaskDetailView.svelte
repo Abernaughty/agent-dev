@@ -19,6 +19,7 @@
 	  - Fix 3: File cards are collapsible (click header to toggle)
 	  - Fix 4: Markdown rendered in agent reasoning via marked
 	  - Fix 5: Remove redundant "Redacted JSON" label from Task JSON header
+	  - Fix 6: Move initExpandedFiles into $effect (state_unsafe_mutation)
 -->
 <script lang="ts">
 	import { untrack } from 'svelte';
@@ -90,7 +91,6 @@
 
 	// Fix 3: Track which file cards are expanded (by path)
 	let expandedFiles: Set<string> = $state(new Set());
-	let filesInitialized = $state(false);
 
 	// P1: Auto-expand blueprint for in-progress tasks
 	$effect(() => {
@@ -99,6 +99,27 @@
 			const isComplete = s.status === 'passed' || s.status === 'failed' || s.status === 'cancelled';
 			untrack(() => {
 				showBlueprint = !isComplete;
+			});
+		}
+	});
+
+	// Fix 6: Initialize first file as expanded when detail arrives.
+	// This must be in a $effect, NOT in a template expression ({@const}),
+	// because Svelte 5 forbids state mutation during render/derived evaluation.
+	let lastInitializedTaskId = '';
+	$effect(() => {
+		const d = detail;
+		const id = taskId;
+		if (d?.generated_code && id !== lastInitializedTaskId) {
+			const marker = /^# --- FILE:\s*(.+?)\s*---$/m;
+			const match = d.generated_code.match(marker);
+			untrack(() => {
+				if (match) {
+					expandedFiles = new Set([match[1]]);
+				} else {
+					expandedFiles = new Set();
+				}
+				lastInitializedTaskId = id;
 			});
 		}
 	});
@@ -236,14 +257,6 @@
 		}
 		expandedFiles = next;
 	}
-
-	/** Fix 3: Initialize first file as expanded when code files change. */
-	function initExpandedFiles(files: { path: string; code: string }[]) {
-		if (!filesInitialized && files.length > 0) {
-			expandedFiles = new Set([files[0].path]);
-			filesInitialized = true;
-		}
-	}
 </script>
 
 <div class="max-w-[800px] p-5 pl-6" style="font-family: var(--font-mono);">
@@ -361,7 +374,6 @@
 		<!-- ===== P1+P2: BLUEPRINT (collapsible, sentence-case header) ===== -->
 		{#if d?.blueprint}
 			{@const bp = d.blueprint}
-			<!-- P5: Collapsible toggle as padded row with surface bg and summary metadata -->
 			<button
 				onclick={() => showBlueprint = !showBlueprint}
 				class="mb-3 flex w-full cursor-pointer items-center justify-between rounded-md border px-3.5 py-2 text-left"
@@ -375,7 +387,6 @@
 			</button>
 
 			{#if showBlueprint}
-				<!-- P2: Instructions — T2 header, T3 body -->
 				<div
 					class="mb-4 rounded-md border p-3.5"
 					style="background: var(--color-bg-activity); border-color: var(--color-border); border-left: 3px solid var(--color-accent-cyan);"
@@ -384,7 +395,6 @@
 					<div class="text-[12px] leading-relaxed" style="color: var(--color-text-muted); white-space: pre-wrap;">{redactSecrets(bp.instructions)}</div>
 				</div>
 
-				<!-- P5: Target Files — neutral (non-clickable) tags -->
 				{#if bp.target_files.length > 0}
 					<div class="mb-1.5 text-[12px] font-medium" style="color: var(--color-text-bright);">Target files</div>
 					<div class="mb-4 flex flex-wrap gap-1.5">
@@ -394,7 +404,6 @@
 					</div>
 				{/if}
 
-				<!-- P2C: Constraints — de-saturated: neutral surface + left-border amber accent -->
 				{#if bp.constraints.length > 0}
 					<div class="mb-1.5 text-[12px] font-medium" style="color: var(--color-text-bright);">Constraints</div>
 					<div class="mb-4 flex flex-col gap-1">
@@ -407,7 +416,6 @@
 					</div>
 				{/if}
 
-				<!-- P4C: Acceptance Criteria — check icon prefix, green left-border -->
 				{#if bp.acceptance_criteria.length > 0}
 					<div class="mb-1.5 text-[12px] font-medium" style="color: var(--color-text-bright);">Acceptance criteria</div>
 					<div class="mb-5 flex flex-col gap-1">
@@ -434,9 +442,6 @@
 		{#if d?.generated_code}
 			{@const { files: codeFiles, reasoning } = splitCodeAndReasoning(d.generated_code)}
 
-			<!-- Fix 3: Initialize first file as expanded -->
-			{@const _ = initExpandedFiles(codeFiles)}
-
 			<!-- File artifacts — collapsible cards -->
 			{#if codeFiles.length > 0}
 				<div class="mb-1.5 text-[12px] font-medium" style="color: var(--color-text-bright);">Files created</div>
@@ -445,8 +450,6 @@
 						{@const redactedCode = redactSecrets(file.code)}
 						{@const isExpanded = expandedFiles.has(file.path)}
 						<div class="overflow-hidden rounded-md border" style="border-color: var(--color-border);">
-							<!-- Fix 3: Use <div> instead of <button> to avoid nested button error.
-								 The Copy <button> lives inside this clickable div. -->
 							<div
 								onclick={() => toggleFile(file.path)}
 								onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleFile(file.path); } }}
@@ -459,7 +462,6 @@
 									<span class="text-[11px]" style="color: var(--color-text-faint);">{isExpanded ? '\u25bc' : '\u25b6'}</span>
 									<span class="text-[11px]" style="color: var(--color-text-bright);">{file.path}</span>
 								</div>
-								<!-- Copy button: stopPropagation prevents toggling the card -->
 								<button
 									onclick={(e) => copyAndStop(e, redactedCode)}
 									class="cursor-pointer rounded border px-2 py-0.5 text-[11px] transition-opacity hover:opacity-100"
@@ -490,7 +492,6 @@
 					<span class="text-[11px]" style="color: var(--color-text-dim);">~{wordCount(displayText)} words</span>
 				</button>
 				{#if showReasoning}
-					<!-- Fix 1+4: Single container, no duplicate header, markdown rendered -->
 					<div class="mb-4 overflow-hidden rounded-md border" style="border-color: var(--color-border);">
 						<div class="flex items-center justify-end border-b px-3 py-1.5" style="background: var(--color-bg-surface); border-color: var(--color-border);">
 							<button
@@ -499,7 +500,6 @@
 								style="background: var(--color-bg-primary); border-color: var(--color-border-secondary, var(--color-border)); color: var(--color-text-dim);"
 							>Copy</button>
 						</div>
-						<!-- Fix 4: Markdown-rendered reasoning with scoped styles -->
 						<div class="reasoning-content overflow-x-auto p-3.5 text-[12px] leading-relaxed" style="background: #08090e; color: var(--color-text-muted); font-family: var(--font-mono);">
 							{@html renderMarkdown(redactedReasoning)}
 						</div>
@@ -527,7 +527,6 @@
 			</button>
 
 			{#if showTimeline}
-				<!-- Fix 2: Background matches other sections (#08090e instead of --color-bg-activity) -->
 				<div class="mb-5 rounded-md border p-3" style="background: #08090e; border-color: var(--color-border);">
 					{#each displayEvents as event, i}
 						{@const agent = agentInfo(event.agent)}
@@ -537,7 +536,6 @@
 						<div class:mb-2={i < displayEvents.length - 1}>
 							<div class="flex items-start gap-2" class:opacity-70={isTool}>
 								<span class="shrink-0 pt-px text-[11px]" style="color: var(--color-text-faint); min-width: 36px;">{event.time}</span>
-								<!-- Full agent name -->
 								<span class="shrink-0 text-[11px] font-medium" style="color: {agent.color}; min-width: 60px;">{agent.name}</span>
 								<span
 									class="shrink-0 rounded-sm px-1.5 py-px text-center text-[11px] font-semibold"
@@ -545,7 +543,6 @@
 								>{style.label}</span>
 								<span class="text-[11px] leading-relaxed" style="color: {isFail ? '#f8a0a0' : event.type === 'success' ? '#6ee7b7' : isTool ? 'var(--color-text-dim)' : 'var(--color-text-muted)'};">{event.action}</span>
 							</div>
-							<!-- Sandbox output -->
 							{#if hasSandboxOutput(event)}
 								<div class="ml-[100px] mt-1">
 									{#if event.errors?.length}
@@ -566,7 +563,6 @@
 						</div>
 					{/each}
 
-					<!-- P3: Toggle to show all events including tool calls -->
 					{#if toolCallCount > 0}
 						<button
 							onclick={() => showAllTimelineEvents = !showAllTimelineEvents}
@@ -593,7 +589,6 @@
 		</button>
 		{#if showJson}
 			<div class="overflow-hidden rounded-md border" style="border-color: var(--color-border);">
-				<!-- Fix 5: Just the Copy button, no redundant label -->
 				<div class="flex items-center justify-end border-b px-3 py-1.5" style="background: var(--color-bg-surface); border-color: var(--color-border);">
 					<button
 						onclick={() => copyToClipboard(buildRedactedJson(s, d))}
@@ -696,12 +691,10 @@
 		text-decoration: underline;
 	}
 
-	/* Remove top margin from first child */
 	.reasoning-content :global(:first-child) {
 		margin-top: 0;
 	}
 
-	/* Remove bottom margin from last child */
 	.reasoning-content :global(:last-child) {
 		margin-bottom: 0;
 	}
