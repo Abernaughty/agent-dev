@@ -17,6 +17,10 @@
 
 	let terminalHeight = $state(170);
 
+	// Wrap context getters in $derived to ensure Svelte 5 tracks them reactively
+	// when passed as component props. Without this, sidebar/content can go stale.
+	const activePanel = $derived(dash.activePanel);
+	const selectedId = $derived(dash.selectedId);
 	const pendingMemory = $derived(memoryStore.pendingCount);
 	const pendingPR = $derived(prsStore.openCount);
 
@@ -40,15 +44,15 @@
 
 	<div class="flex flex-1 overflow-hidden">
 		<ActivityBar
-			activePanel={dash.activePanel}
+			{activePanel}
 			onSelect={dash.handlePanelSwitch}
 			{pendingMemory}
 			{pendingPR}
 		/>
 
 		<SidebarPanel
-			activePanel={dash.activePanel}
-			selectedId={dash.selectedId}
+			{activePanel}
+			{selectedId}
 			onSelect={dash.handleSelect}
 		/>
 
