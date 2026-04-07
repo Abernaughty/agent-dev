@@ -129,7 +129,7 @@
 		}
 	}
 
-	/** Copy text to clipboard, stopping event propagation (for nested buttons). */
+	/** Copy text to clipboard, stopping event propagation (for nested elements). */
 	function copyAndStop(e: Event, text: string) {
 		e.stopPropagation();
 		copyToClipboard(text);
@@ -444,23 +444,27 @@
 						{@const redactedCode = redactSecrets(file.code)}
 						{@const isExpanded = expandedFiles.has(file.path)}
 						<div class="overflow-hidden rounded-md border" style="border-color: var(--color-border);">
-							<!-- Fix 3: Clickable header to toggle code visibility -->
-							<button
+							<!-- Fix 3: Use <div> instead of <button> to avoid nested button error.
+								 The Copy <button> lives inside this clickable div. -->
+							<div
 								onclick={() => toggleFile(file.path)}
-								class="flex w-full cursor-pointer items-center justify-between border-b px-3 py-1.5 text-left"
+								onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleFile(file.path); } }}
+								role="button"
+								tabindex="0"
+								class="flex w-full cursor-pointer items-center justify-between border-b px-3 py-1.5"
 								style="background: var(--color-bg-surface); border-color: {isExpanded ? 'var(--color-border)' : 'transparent'}; font-family: var(--font-mono);"
 							>
 								<div class="flex items-center gap-2">
 									<span class="text-[11px]" style="color: var(--color-text-faint);">{isExpanded ? '\u25bc' : '\u25b6'}</span>
 									<span class="text-[11px]" style="color: var(--color-text-bright);">{file.path}</span>
 								</div>
-								<!-- Svelte 5: stopPropagation inside handler, not as modifier -->
+								<!-- Copy button: stopPropagation prevents toggling the card -->
 								<button
 									onclick={(e) => copyAndStop(e, redactedCode)}
 									class="cursor-pointer rounded border px-2 py-0.5 text-[11px] transition-opacity hover:opacity-100"
 									style="background: var(--color-bg-primary); border-color: var(--color-border-secondary, var(--color-border)); color: var(--color-text-dim);"
 								>Copy</button>
-							</button>
+							</div>
 							{#if isExpanded}
 								<pre class="max-h-[300px] overflow-auto p-3.5 text-[11px] leading-relaxed" style="background: #08090e; color: var(--color-text-muted); font-family: var(--font-mono); margin: 0; white-space: pre-wrap; word-break: break-word;">{redactedCode}</pre>
 							{/if}
