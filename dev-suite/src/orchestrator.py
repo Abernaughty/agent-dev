@@ -420,7 +420,7 @@ def _build_retry_sandbox_context(sandbox_result: SandboxResult | None) -> str:
 
 # -- Node Functions --
 
-def architect_node(state: GraphState) -> dict:
+async def architect_node(state: GraphState) -> dict:
     trace = list(state.get("trace", []))
     trace.append("architect: starting planning")
     retry_count = state.get("retry_count", 0)
@@ -453,7 +453,7 @@ Do not include any text before or after the JSON.{memory_block}"""
         user_msg += f"Recommendation: {failure_report.recommendation}\n"
         user_msg += "\nGenerate a COMPLETELY NEW Blueprint. Do not patch the old one. The previous target_files or approach was wrong."
     llm = _get_architect_llm()
-    response = llm.invoke([SystemMessage(content=system_prompt), HumanMessage(content=user_msg)])
+    response = await llm.ainvoke([SystemMessage(content=system_prompt), HumanMessage(content=user_msg)])
     try:
         raw = _extract_text_content(response.content)
         blueprint_data = _extract_json(raw)
@@ -468,7 +468,7 @@ Do not include any text before or after the JSON.{memory_block}"""
     return {"blueprint": blueprint, "status": WorkflowStatus.BUILDING, "tokens_used": tokens_used, "trace": trace, "memory_context": memory_context}
 
 
-def developer_node(state: GraphState, config: RunnableConfig | None = None) -> dict:
+async def developer_node(state: GraphState, config: RunnableConfig | None = None) -> dict:
     trace = list(state.get("trace", []))
     trace.append("developer: starting build")
     memory_writes = list(state.get("memory_writes", []))
@@ -594,10 +594,10 @@ Write clean, well-documented code."""
     llm = _get_developer_llm()
     if has_tools:
         llm_with_tools = llm.bind_tools(tools)
-        response, tokens_used, new_tool_log = _run_async(_run_tool_loop(llm_with_tools, messages, tools, max_turns=MAX_TOOL_TURNS, tokens_used=tokens_used, trace=trace, agent_name="developer"))
+        response, tokens_used, new_tool_log = await _run_tool_loop(llm_with_tools, messages, tools, max_turns=MAX_TOOL_TURNS, tokens_used=tokens_used, trace=trace, agent_name="developer")
         tool_calls_log.extend(new_tool_log)
     else:
-        response = llm.invoke(messages)
+        response = await llm.ainvoke(messages)
         tokens_used += _extract_token_count(response)
     content = _extract_text_content(response.content)
     trace.append(f"developer: code generated ({len(content)} chars)")
@@ -694,7 +694,7 @@ def apply_code_node(state: GraphState) -> dict:
     return {"parsed_files": parsed_files_data, "trace": trace}
 
 
-def qa_node(state: GraphState, config: RunnableConfig | None = None) -> dict:
+async def qa_node(state: GraphState, config: RunnableConfig | None = None) -> dict:
     trace = list(state.get("trace", []))
     trace.append("qa: starting review")
     memory_writes = list(state.get("memory_writes", []))
@@ -748,10 +748,10 @@ The user did not specify acceptance criteria for this task. In this case:
     llm = _get_qa_llm()
     if has_tools:
         llm_with_tools = llm.bind_tools(tools)
-        response, tokens_used, new_tool_log = _run_async(_run_tool_loop(llm_with_tools, messages, tools, max_turns=5, tokens_used=tokens_used, trace=trace, agent_name="qa"))
+        response, tokens_used, new_tool_log = await _run_tool_loop(llm_with_tools, messages, tools, max_turns=5, tokens_used=tokens_used, trace=trace, agent_name="qa")
         tool_calls_log.extend(new_tool_log)
     else:
-        response = llm.invoke(messages)
+        response = await llm.ainvoke(messages)
         tokens_used += _extract_token_count(response)
     try:
         raw = _extract_text_content(response.content)
@@ -1001,9 +1001,9 @@ async def _publish_code_async(state: dict) -> dict:
         return {"trace": trace}
 
 
-def publish_code_node(state: GraphState) -> dict:
+async def publish_code_node(state: GraphState) -> dict:
     """Push files to GitHub branch and open PR after QA passes."""
-    return _run_async(_publish_code_async(state))
+    return await _publish_code_async(state)
 
 
 def route_after_qa(state: GraphState) -> Literal["publish_code", "flush_memory", "developer", "architect", "__end__"]:
@@ -1088,7 +1088,7 @@ def run_task(task_description, enable_tracing=True, session_id=None, tags=None):
         invoke_config["callbacks"] = trace_config.callbacks
     with trace_config.propagation_context():
         add_trace_event(trace_config, "orchestrator_start", metadata={"task_preview": task_description[:200], "max_retries": MAX_RETRIES, "token_budget": TOKEN_BUDGET, "tools_available": len(tools_config.get("configurable", {}).get("tools", []))})
-        result = workflow.invoke(initial_state, config=invoke_config)
+        result = asyncio.run(workflow.ainvoke(initial_state, config=invoke_config))
         final_state = AgentState(**result)
         add_trace_event(trace_config, "orchestrator_complete", metadata={"status": final_state.status.value, "tokens_used": final_state.tokens_used, "retry_count": final_state.retry_count, "memory_writes_count": len(final_state.memory_writes), "tool_calls_count": len(final_state.tool_calls_log)})
     trace_config.flush()
