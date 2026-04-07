@@ -6,6 +6,7 @@
 	Issue #19: Added batch approve/reject buttons, audit log viewer
 	Updated: Added ChatView, SessionDebrief, CostView
 	Issue #108: Replaced BlueprintView with TaskDetailView for task-{id}
+	Issue #109: Updated PR routing to use prNumber for detail fetch
 -->
 <script lang="ts">
 	import { agentsStore } from '$lib/stores/agents.svelte.js';
@@ -66,6 +67,15 @@
 			? memoryStore.list.find((e) => e.id === selectedId)
 			: undefined
 	);
+
+	/**
+	 * Issue #109: Extract PR number from selectedId.
+	 * selectedId format is `pr-#150` (from sidebar). Parse to integer.
+	 */
+	function extractPRNumber(id: string): number | null {
+		const match = id.match(/^pr-#?(\d+)$/);
+		return match ? parseInt(match[1], 10) : null;
+	}
 </script>
 
 {#if activePanel === 'agents'}
@@ -173,21 +183,36 @@
 
 {:else if activePanel === 'prs'}
 	{#if selectedId.startsWith('pr-')}
-		{@const prId = selectedId.replace('pr-', '')}
-		{@const pr = prsStore.list.find((p) => p.id === prId)}
-		{#if pr}
-			<PRDetailView {pr} />
+		{@const prNum = extractPRNumber(selectedId)}
+		{#if prNum}
+			<PRDetailView prNumber={prNum} />
+		{:else}
+			<div class="p-4 pl-6 text-[13px]" style="font-family: var(--font-mono); color: var(--color-text-muted);">Invalid PR selection.</div>
 		{/if}
 	{:else}
 		<div class="p-4 pl-6" style="font-family: var(--font-mono);">
-			<div class="mb-3.5 text-[10px]" style="color: var(--color-text-faint); letter-spacing: 1px;">PULL REQUESTS</div>
+			<div class="mb-3.5 flex items-center justify-between">
+				<span class="text-[10px]" style="color: var(--color-text-faint); letter-spacing: 1px;">PULL REQUESTS</span>
+				<button
+					onclick={() => prsStore.manualRefresh()}
+					class="flex cursor-pointer items-center gap-1.5 rounded border px-2.5 py-1 text-[11px] transition-opacity hover:opacity-100"
+					style="background: var(--color-bg-surface); border-color: var(--color-border-secondary, var(--color-border)); color: var(--color-text-dim);"
+				>\u21BB Refresh</button>
+			</div>
 			<div class="mb-4 text-[12px] leading-relaxed" style="color: var(--color-text-muted);">
 				Select a pull request from the sidebar to view details and test results.
 			</div>
+			{#if prsStore.loading}
+				<div class="text-[11px]" style="color: var(--color-text-dim);">Loading PRs...</div>
+			{:else if prsStore.error}
+				<div class="mb-4 rounded-md border px-3 py-2 text-[11px]" style="background: var(--color-accent-red)08; border-color: var(--color-accent-red)20; color: var(--color-accent-red);">{prsStore.error}</div>
+			{/if}
 			<div class="flex gap-4">
 				{#each [
 					{ label: 'Open', count: prsStore.openCount, color: 'var(--color-accent-yellow)' },
-					{ label: 'Merged', count: prsStore.list.filter(p => p.status === 'merged').length, color: 'var(--color-accent-green)' }
+					{ label: 'Merged', count: prsStore.list.filter(p => p.status === 'merged').length, color: 'var(--color-accent-green)' },
+					{ label: 'Closed', count: prsStore.list.filter(p => p.status === 'closed').length, color: 'var(--color-accent-red)' },
+					{ label: 'Total', count: prsStore.list.length, color: 'var(--color-text-muted)' }
 				] as stat}
 					<div class="rounded-md border px-4 py-3 text-center" style="background: var(--color-bg-activity); border-color: var(--color-border);">
 						<div class="text-[20px] font-semibold" style="color: {stat.color};">{stat.count}</div>

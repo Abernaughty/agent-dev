@@ -8,6 +8,7 @@
 	Issue #38: Data Integration — PR3
 	Issue #19: Memory entries grouped by module via memoryStore.groupedByModule
 	Issue #143: P4 — status indicators use shape + color + text label (not color-only dots)
+	Issue #109: PR sidebar shows review state badge, draft indicator
 -->
 <script lang="ts">
 	import { agentsStore } from '$lib/stores/agents.svelte.js';
@@ -45,6 +46,23 @@
 	const aliveStatuses = ['planning', 'coding', 'reviewing'];
 
 	const hasCompletedTask = $derived(tasksStore.list.some((t) => t.completed_at));
+
+	/** Issue #109: Get the most significant review state for a PR. */
+	function prReviewBadge(pr: { reviews?: { state: string }[] }): { label: string; color: string } | null {
+		const reviews = pr.reviews;
+		if (!reviews || reviews.length === 0) return null;
+		// Priority: changes_requested > approved > commented
+		if (reviews.some((r) => r.state === 'changes_requested')) {
+			return { label: 'CHG', color: 'var(--color-accent-red)' };
+		}
+		if (reviews.some((r) => r.state === 'approved')) {
+			return { label: 'OK', color: 'var(--color-accent-green)' };
+		}
+		if (reviews.some((r) => r.state === 'commented')) {
+			return { label: 'REV', color: 'var(--color-accent-amber)' };
+		}
+		return null;
+	}
 </script>
 
 {#if activePanel}
@@ -70,7 +88,7 @@
 				{#each tasksStore.list as task (task.id)}
 					<button onclick={() => onSelect(`task-${task.id}`)} class="flex w-full items-center gap-2 border-l-2 px-2.5 py-1.5 text-left transition-colors hover:bg-[var(--color-bg-hover)]" style="border-color: {selectedId === `task-${task.id}` ? 'var(--color-accent-cyan)' : 'transparent'}; background: {selectedId === `task-${task.id}` ? 'var(--color-bg-surface)' : 'transparent'};">
 						<div class="min-w-0 flex-1">
-							<div class="truncate text-[11px]" style="color: {selectedId === `task-${task.id}` ? 'var(--color-text-bright)' : 'var(--color-text-muted)'};">{task.description.length > 35 ? task.description.slice(0, 35) + '...' : task.description}</div>
+							<div class="truncate text-[11px]" style="color: {selectedId === `task-${task.id}` ? 'var(--color-text-bright)' : 'var(--color-text-muted)'};">{ task.description.length > 35 ? task.description.slice(0, 35) + '...' : task.description}</div>
 							<div class="mt-0.5 truncate text-[9px]" style="color: var(--color-text-dim);">{task.id} | {task.status}</div>
 						</div>
 						<span class="shrink-0 rounded-sm px-1.5 py-px text-[8px] uppercase" style="color: {task.status === 'passed' ? 'var(--color-accent-green)' : task.status === 'failed' ? 'var(--color-accent-red)' : 'var(--color-accent-yellow)'}; background: {task.status === 'passed' ? 'var(--color-accent-green)' : task.status === 'failed' ? 'var(--color-accent-red)' : 'var(--color-accent-yellow)'}12;">{task.status}</span>
@@ -82,7 +100,7 @@
 					{@const cfg = statusConfig[agent.status] ?? { color: 'var(--color-text-dim)', glyph: '?' }}
 					<button onclick={() => onSelect(`agent-${agent.id}`)} class="flex w-full items-center gap-2 border-l-2 px-2.5 py-1.5 text-left transition-colors hover:bg-[var(--color-bg-hover)]" style="border-color: {selectedId === `agent-${agent.id}` ? agent.color : 'transparent'}; background: {selectedId === `agent-${agent.id}` ? 'var(--color-bg-surface)' : 'transparent'};">
 						<div class="min-w-0 flex-1">
-							<div class="truncate text-[11px]" style="color: {selectedId === `agent-${agent.id}` ? 'var(--color-text-bright)' : 'var(--color-text-muted)'};">{agent.name}</div>
+							<div class="truncate text-[11px]" style="color: {selectedId === `agent-${agent.id}` ? 'var(--color-text-bright)' : 'var(--color-text-muted)'};">{ agent.name}</div>
 							<div class="mt-0.5 truncate text-[9px]" style="color: var(--color-text-dim);">{agent.model}</div>
 						</div>
 						<!-- P4: Status indicator — shape + color + text label -->
@@ -140,7 +158,7 @@
 						{@const tierColor = entry.tier.includes('l0') ? 'var(--color-accent-amber)' : 'var(--color-accent-purple)'}
 						<button onclick={() => onSelect(entry.id)} class="flex w-full items-center gap-2 border-l-2 px-2.5 py-1.5 text-left transition-colors hover:bg-[var(--color-bg-hover)]" style="border-color: {selectedId === entry.id ? tierColor : 'transparent'}; background: {selectedId === entry.id ? 'var(--color-bg-surface)' : 'transparent'}; opacity: {entry.status !== 'pending' ? 0.4 : 1};">
 							<div class="min-w-0 flex-1">
-								<div class="truncate text-[11px]" style="color: {selectedId === entry.id ? 'var(--color-text-bright)' : 'var(--color-text-muted)'};">{entry.content.length > 40 ? entry.content.slice(0, 40) + '...' : entry.content}</div>
+								<div class="truncate text-[11px]" style="color: {selectedId === entry.id ? 'var(--color-text-bright)' : 'var(--color-text-muted)'};">{ entry.content.length > 40 ? entry.content.slice(0, 40) + '...' : entry.content}</div>
 								<div class="mt-0.5 truncate text-[9px]" style="color: var(--color-text-dim);">{entry.tier} | {entry.source_agent}</div>
 							</div>
 							{#if entry.status === 'pending'}
@@ -159,11 +177,15 @@
 				</button>
 				<div class="mx-2 my-1" style="height: 1px; background: var(--color-border);"></div>
 				{#each prsStore.list as pr (pr.id)}
+					{@const badge = prReviewBadge(pr)}
 					<button onclick={() => onSelect(`pr-${pr.id}`)} class="flex w-full items-center gap-2 border-l-2 px-2.5 py-1.5 text-left transition-colors hover:bg-[var(--color-bg-hover)]" style="border-color: {selectedId === `pr-${pr.id}` ? (pr.status === 'merged' ? 'var(--color-accent-green)' : 'var(--color-accent-yellow)') : 'transparent'}; background: {selectedId === `pr-${pr.id}` ? 'var(--color-bg-surface)' : 'transparent'};">
 						<div class="min-w-0 flex-1">
 							<div class="truncate text-[11px]" style="color: {selectedId === `pr-${pr.id}` ? 'var(--color-text-bright)' : 'var(--color-text-muted)'};">{pr.id} {pr.title}</div>
-							<div class="mt-0.5 truncate text-[9px]" style="color: var(--color-text-dim);">{pr.status} | +{pr.additions} -{pr.deletions}</div>
+							<div class="mt-0.5 truncate text-[9px]" style="color: var(--color-text-dim);">{pr.status}{pr.draft ? ' (draft)' : ''} | +{pr.additions} -{pr.deletions}</div>
 						</div>
+						{#if badge}
+							<span class="shrink-0 rounded-sm px-1.5 py-px text-[7px] font-semibold" style="color: {badge.color}; background: {badge.color}15;">{badge.label}</span>
+						{/if}
 					</button>
 				{/each}
 
