@@ -10,11 +10,12 @@
   --color-bg-input: #0a0c10;
 
   --color-border: #1a1d28;
+  --color-border-secondary: #2a2d38;
 
   --color-text-bright: #e2e8f0;
   --color-text-muted: #94a3b8;
-  --color-text-dim: #475569;
-  --color-text-faint: #3a3d4a;
+  --color-text-dim: #708090;
+  --color-text-faint: #5b687a;
 
   --color-accent-cyan: #22d3ee;
   --color-accent-purple: #a78bfa;
