@@ -2,12 +2,16 @@
  * Pull Requests store — reactive PR list with detail fetching.
  *
  * Initialised by fetching GET /api/prs.
- * Polling-based refresh (PRs don't stream via SSE).
+ * Polling-based refresh (PRs don't stream via SSE — GitHub doesn't push
+ * PR updates to us, so polling is by design per the roadmap. Webhooks
+ * are deferred to Phase 3).
  * Detail, files, reviews, and comments fetched on-demand.
  *
  * Issue #37: Initial store
  * Issue #109: Full lifecycle — detail fetch, files, reviews, comments,
  *            per-PR loading/error, cache, manual refresh, cross-nav
+ * Issue #109 CR: Split-brain fix (bidirectional sync between list ↔ detailCache),
+ *               separate draftCount from openCount
  */
 
 import type {
@@ -42,6 +46,43 @@ let commentsCache = $state<Map<number, PRComment[]>>(new Map());
 /** Currently selected PR number (for cross-navigation). */
 let selectedNumber = $state<number | null>(null);
 
+/**
+ * CR fix: Sync list → detailCache after a list refresh.
+ * Any PR that exists in both the list and the cache gets its cache entry
+ * updated with the fresher list data (preserving reviews/check_status
+ * that only come from the detail endpoint).
+ */
+function syncListToDetailCache(freshList: PullRequest[]) {
+	if (detailCache.size === 0) return;
+	const nextCache = new Map(detailCache);
+	let changed = false;
+	for (const pr of freshList) {
+		if (nextCache.has(pr.number)) {
+			const cached = nextCache.get(pr.number)!;
+			// Merge: use list data for summary fields, keep cached detail-only fields
+			nextCache.set(pr.number, {
+				...pr,
+				reviews: cached.reviews?.length ? cached.reviews : pr.reviews ?? [],
+				check_status: cached.check_status?.length ? cached.check_status : pr.check_status ?? []
+			});
+			changed = true;
+		}
+	}
+	if (changed) detailCache = nextCache;
+}
+
+/**
+ * CR fix: Sync detailCache → list after a detail fetch.
+ * Updates the corresponding entry in the list so sidebar badges/counts
+ * reflect the freshest data.
+ */
+function syncDetailToList(detail: PullRequest) {
+	const idx = prs.findIndex((p) => p.number === detail.number);
+	if (idx >= 0) {
+		prs = prs.map((p, i) => (i === idx ? { ...p, ...detail } : p));
+	}
+}
+
 export const prsStore = {
 	get list() {
 		return prs;
@@ -52,8 +93,13 @@ export const prsStore = {
 	get error() {
 		return error;
 	},
+	/** CR fix: openCount excludes drafts. */
 	get openCount() {
-		return prs.filter((p) => p.status === 'review' || p.status === 'open' || p.status === 'draft').length;
+		return prs.filter((p) => p.status === 'review' || p.status === 'open').length;
+	},
+	/** CR fix: separate draft count. */
+	get draftCount() {
+		return prs.filter((p) => p.status === 'draft').length;
 	},
 	get selectedNumber() {
 		return selectedNumber;
@@ -79,6 +125,8 @@ export const prsStore = {
 			const body = await res.json();
 			if (res.ok && body.data) {
 				prs = body.data;
+				// CR fix: sync fresh list data into detailCache
+				syncListToDetailCache(prs);
 			} else {
 				error = body.errors?.[0] ?? 'Failed to fetch PRs';
 			}
@@ -125,6 +173,8 @@ export const prsStore = {
 				const nextCache = new Map(detailCache);
 				nextCache.set(prNumber, detail);
 				detailCache = nextCache;
+				// CR fix: sync detail into list
+				syncDetailToList(detail);
 				return detail;
 			}
 			const errMsg = body.errors?.[0] ?? 'Failed to fetch PR detail';

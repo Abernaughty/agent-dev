@@ -6,9 +6,12 @@
 
 	Issue #38: Initial stub
 	Issue #109: Full lifecycle — real diffs, reviews, comments, cross-nav
+	Issue #109 CR: DOMPurify for XSS, graceful degradation for errors,
+	              canonical GitHub URL, CodeRabbit structured findings
 -->
 <script lang="ts">
 	import { untrack } from 'svelte';
+	import DOMPurify from 'dompurify';
 	import { Marked } from 'marked';
 	import { prsStore } from '$lib/stores/prs.svelte.js';
 	import { getDashboardContext } from '$lib/stores/dashboard.svelte.js';
@@ -24,7 +27,6 @@
 
 	// Reactive data from store
 	const pr = $derived.by(() => {
-		// First check detail cache, then fall back to list entry
 		const detail = prsStore.getDetail(prNumber);
 		if (detail) return detail;
 		return prsStore.list.find((p) => p.number === prNumber) ?? null;
@@ -63,22 +65,66 @@
 		}
 	});
 
-	// Markdown rendering for review bodies
+	// CR fix #1: DOMPurify + marked for safe rendering
 	const marked = new Marked({ breaks: true, gfm: true });
 
 	function renderMarkdown(text: string): string {
 		try {
 			const result = marked.parse(text);
-			if (typeof result === 'string') return result;
-			return text;
+			if (typeof result === 'string') return DOMPurify.sanitize(result);
+			return DOMPurify.sanitize(text);
 		} catch {
-			return text;
+			return DOMPurify.sanitize(text);
 		}
 	}
 
 	/** Detect CodeRabbit bot reviews. */
 	function isCodeRabbit(review: PRReview): boolean {
 		return review.is_bot && review.author.includes('coderabbit');
+	}
+
+	/**
+	 * CR fix #3: Extract structured CodeRabbit findings.
+	 * Parses the review body to extract Major/Minor actionable items.
+	 */
+	function extractCodeRabbitFindings(body: string): { majors: string[]; minors: string[] } {
+		const majors: string[] = [];
+		const minors: string[] = [];
+
+		// CodeRabbit uses patterns like:
+		// `_\u26a0\ufe0f Potential issue_ | _\ud83d\udfe0 Major_`
+		// `_\u26a0\ufe0f Potential issue_ | _\ud83d\udfe1 Minor_`
+		// Or headers like "**Major:**" followed by items
+		const lines = body.split('\n');
+		let currentSeverity: 'major' | 'minor' | null = null;
+
+		for (const line of lines) {
+			const lower = line.toLowerCase();
+			// Detect severity markers
+			if (lower.includes('major') && (lower.includes('potential issue') || lower.includes('\ud83d\udfe0') || lower.includes('\ud83d\udd34'))) {
+				currentSeverity = 'major';
+			} else if (lower.includes('minor') && (lower.includes('potential issue') || lower.includes('\ud83d\udfe1'))) {
+				currentSeverity = 'minor';
+			}
+
+			// Extract bold-prefixed finding descriptions
+			const boldMatch = line.match(/\*\*(.+?)\*\*/);
+			if (boldMatch && currentSeverity) {
+				const text = boldMatch[1].trim();
+				// Skip generic headers
+				if (text.length > 10 && !text.startsWith('Actionable') && !text.startsWith('Nitpick')) {
+					if (currentSeverity === 'major') majors.push(text);
+					else minors.push(text);
+				}
+			}
+
+			// Reset on section boundaries
+			if (line.startsWith('---') || line.startsWith('</details>')) {
+				currentSeverity = null;
+			}
+		}
+
+		return { majors, minors };
 	}
 
 	/** Map review state to display label + color. */
@@ -126,6 +172,9 @@
 			default: return 'var(--color-accent-yellow)';
 		}
 	}
+
+	/** CR fix #4: Build canonical GitHub URL from known owner/repo. */
+	const githubBaseUrl = 'https://github.com/Abernaughty/agent-dev';
 
 	const statusColors: Record<string, string> = {
 		open: 'var(--color-accent-yellow)',
@@ -177,8 +226,11 @@
 			<div class="mb-4 rounded-md border px-3 py-2 text-[11px]" style="background: var(--color-bg-activity); border-color: var(--color-border); color: var(--color-text-dim);">Loading PR details...</div>
 		{/if}
 
+		<!-- CR fix #2: Graceful degradation instead of raw error -->
 		{#if fetchError && !isLoading}
-			<div class="mb-4 rounded-md border px-3 py-2 text-[11px]" style="background: var(--color-accent-red)08; border-color: var(--color-accent-red)20; color: var(--color-accent-red);">{fetchError}</div>
+			<div class="mb-4 rounded-md border px-3 py-2 text-[11px]" style="background: var(--color-bg-activity); border-color: var(--color-border); color: var(--color-text-dim);">
+				PR details temporarily unavailable \u2014 showing cached data.
+			</div>
 		{/if}
 
 		<!-- Stats bar -->
@@ -213,6 +265,7 @@
 					{#each reviews as review}
 						{@const stateInfo = reviewStateInfo(review.state)}
 						{@const isCR = isCodeRabbit(review)}
+						{@const crFindings = isCR && review.body ? extractCodeRabbitFindings(review.body) : null}
 						<div
 							class="rounded-md border p-3"
 							style="background: var(--color-bg-activity); border-color: var(--color-border); border-left: 2px solid {stateInfo.color};"
@@ -229,9 +282,36 @@
 									<span class="text-[10px]" style="color: var(--color-text-faint);">{review.submitted_at.split('T')[0]}</span>
 								{/if}
 							</div>
+
+							<!-- CR fix #3: Structured CodeRabbit findings -->
+							{#if crFindings && (crFindings.majors.length > 0 || crFindings.minors.length > 0)}
+								{#if crFindings.majors.length > 0}
+									<div class="mb-2">
+										<div class="mb-1 flex items-center gap-1.5">
+											<span class="rounded-sm px-1.5 py-px text-[8px] font-semibold" style="color: var(--color-accent-red); background: var(--color-accent-red)15;">MAJOR</span>
+											<span class="text-[10px]" style="color: var(--color-text-dim);">{crFindings.majors.length} item{crFindings.majors.length !== 1 ? 's' : ''}</span>
+										</div>
+										{#each crFindings.majors as item}
+											<div class="mb-1 rounded border-l-2 py-1 pl-2.5 text-[11px] leading-relaxed" style="border-color: var(--color-accent-red); color: var(--color-text-muted);">{item}</div>
+										{/each}
+									</div>
+								{/if}
+								{#if crFindings.minors.length > 0}
+									<div class="mb-2">
+										<div class="mb-1 flex items-center gap-1.5">
+											<span class="rounded-sm px-1.5 py-px text-[8px] font-semibold" style="color: var(--color-accent-amber); background: var(--color-accent-amber)15;">MINOR</span>
+											<span class="text-[10px]" style="color: var(--color-text-dim);">{crFindings.minors.length} item{crFindings.minors.length !== 1 ? 's' : ''}</span>
+										</div>
+										{#each crFindings.minors as item}
+											<div class="mb-1 rounded border-l-2 py-1 pl-2.5 text-[11px] leading-relaxed" style="border-color: var(--color-accent-amber); color: var(--color-text-muted);">{item}</div>
+										{/each}
+									</div>
+								{/if}
+							{/if}
+
 							{#if review.body}
 								<div class="review-content max-h-[200px] overflow-y-auto text-[12px] leading-relaxed" style="color: var(--color-text-muted);">
-									{@html renderMarkdown(review.body.length > 2000 ? review.body.slice(0, 2000) + '\n\n*[Truncated — view full review on GitHub]*' : review.body)}
+									{@html renderMarkdown(review.body.length > 2000 ? review.body.slice(0, 2000) + '\n\n*[Truncated \u2014 view full review on GitHub]*' : review.body)}
 								</div>
 							{/if}
 						</div>
@@ -338,7 +418,6 @@
 				</div>
 			{/each}
 		{:else if !isLoading}
-			<!-- Fallback: files from list-level PR data (no patches) -->
 			{#if pr.files && pr.files.length > 0}
 				<div class="mb-2 text-[12px] font-medium" style="color: var(--color-text-bright);">Changed files</div>
 				{#each pr.files as file}
@@ -353,10 +432,10 @@
 			{/if}
 		{/if}
 
-		<!-- GitHub link -->
+		<!-- CR fix #4: Canonical GitHub link -->
 		<div class="mt-5 text-[11px]" style="color: var(--color-text-dim);">
 			<a
-				href="https://github.com/{pr.author === 'unknown' ? 'Abernaughty' : pr.author}/agent-dev/pull/{pr.number}"
+				href="{githubBaseUrl}/pull/{pr.number}"
 				target="_blank"
 				rel="noopener"
 				class="underline"
