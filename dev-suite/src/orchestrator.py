@@ -77,8 +77,6 @@ def _safe_int(env_key: str, default: int) -> int:
 MAX_RETRIES = _safe_int("MAX_RETRIES", 3)
 TOKEN_BUDGET = _safe_int("TOKEN_BUDGET", 50000)
 MAX_TOOL_TURNS = _safe_int("MAX_TOOL_TURNS", 10)
-# Issue #125: Max chars of file content to inject into retry prompt
-# to prevent context window exhaustion on large files.
 MAX_RETRY_FILE_CHARS = _safe_int("MAX_RETRY_FILE_CHARS", 30000)
 
 
@@ -112,12 +110,11 @@ class GraphState(TypedDict, total=False):
     parsed_files: list[dict]
     tool_calls_log: list[dict]
     memory_writes_flushed: list[dict]
-    workspace_root: str  # Issue #105: per-task workspace directory
-    # Issue #89: PR publication fields
-    publish_pr: bool  # Whether to create branch + PR after QA passes
-    working_branch: str | None  # Branch created for this task
-    pr_url: str | None  # URL of opened PR
-    pr_number: int | None  # PR number
+    workspace_root: str
+    publish_pr: bool
+    working_branch: str | None
+    pr_url: str | None
+    pr_number: int | None
 
 
 class AgentState(BaseModel):
@@ -135,8 +132,7 @@ class AgentState(BaseModel):
     sandbox_result: SandboxResult | None = None
     parsed_files: list[dict] = []
     tool_calls_log: list[dict] = []
-    workspace_root: str = ""  # Issue #105
-    # Issue #89
+    workspace_root: str = ""
     publish_pr: bool = True
     working_branch: str | None = None
     pr_url: str | None = None
@@ -237,8 +233,6 @@ def _infer_module(target_files: list[str]) -> str:
     return "global"
 
 
-# -- Tool Binding (Issue #80) --
-
 DEV_TOOL_NAMES = {"filesystem_read", "filesystem_write", "filesystem_list", "github_read_diff"}
 QA_TOOL_NAMES = {"filesystem_read", "filesystem_list", "github_read_diff"}
 
@@ -334,78 +328,43 @@ def _run_async(coro):
         return asyncio.run(coro)
 
 
-# -- Issue #125: Retry Context Builder --
-
-
-def _build_retry_file_context(
-    failure_report: FailureReport,
-    blueprint: Blueprint,
-    workspace_root: Path,
-    max_chars: int = MAX_RETRY_FILE_CHARS,
-) -> str:
-    """Read current file contents from disk for failed files.
-
-    Only reads files listed in failure_report.failed_files to keep
-    context budget manageable. Falls back to all target_files if
-    failed_files is empty. Respects workspace_root boundary.
-
-    Returns a formatted string block for injection into the retry prompt.
-    """
-    # Determine which files to include
+def _build_retry_file_context(failure_report: FailureReport, blueprint: Blueprint, workspace_root: Path, max_chars: int = MAX_RETRY_FILE_CHARS) -> str:
     files_to_read = failure_report.failed_files or blueprint.target_files
     if not files_to_read:
         return ""
-
     parts = []
     total_chars = 0
-
     for file_path in files_to_read:
-        # Security: resolve and validate path stays within workspace
         try:
             full_path = (workspace_root / file_path).resolve()
             if not full_path.is_relative_to(workspace_root):
-                logger.warning(
-                    "[RETRY] Path traversal blocked: %s", file_path
-                )
+                logger.warning("[RETRY] Path traversal blocked: %s", file_path)
                 continue
         except (ValueError, OSError):
             continue
-
         if not full_path.is_file():
             parts.append(f"\n--- FILE: {file_path} (not found on disk) ---")
             continue
-
         try:
             content = full_path.read_text(encoding="utf-8")
         except Exception as e:
             parts.append(f"\n--- FILE: {file_path} (read error: {e}) ---")
             continue
-
-        # Budget check: skip if adding this file would exceed limit
         if total_chars + len(content) > max_chars:
-            parts.append(
-                f"\n--- FILE: {file_path} (skipped: would exceed "
-                f"{max_chars} char context budget) ---"
-            )
+            parts.append(f"\n--- FILE: {file_path} (skipped: would exceed {max_chars} char context budget) ---")
             continue
-
         parts.append(f"\n--- FILE: {file_path} ---\n{content}")
         total_chars += len(content)
-
     if not parts:
         return ""
-
     return "\n\nCURRENT FILES ON DISK (your previous output):\n" + "\n".join(parts)
 
 
 def _build_retry_sandbox_context(sandbox_result: SandboxResult | None) -> str:
-    """Format sandbox execution output for the retry prompt."""
     if sandbox_result is None:
         return ""
-
     parts = ["\n\nSANDBOX EXECUTION RESULTS (what your code actually produced):"]
     parts.append(f"  Exit code: {sandbox_result.exit_code}")
-
     if sandbox_result.tests_passed is not None:
         parts.append(f"  Tests passed: {sandbox_result.tests_passed}")
     if sandbox_result.tests_failed is not None:
@@ -414,11 +373,12 @@ def _build_retry_sandbox_context(sandbox_result: SandboxResult | None) -> str:
         parts.append(f"  Errors: {', '.join(sandbox_result.errors)}")
     if sandbox_result.output_summary:
         parts.append(f"  Output:\n{sandbox_result.output_summary}")
-
     return "\n".join(parts)
 
 
 # -- Node Functions --
+# CRITICAL: All graph nodes MUST be async def on Python 3.13+.
+# Sync nodes cause "generator didn't stop after throw()" under astream().
 
 async def architect_node(state: GraphState) -> dict:
     trace = list(state.get("trace", []))
@@ -480,17 +440,11 @@ async def developer_node(state: GraphState, config: RunnableConfig | None = None
     if not blueprint:
         trace.append("developer: no blueprint provided")
         return {"status": WorkflowStatus.FAILED, "error_message": "Developer received no Blueprint", "trace": trace}
-
-    # Issue #125: Detect retry vs first attempt
     failure_report = state.get("failure_report")
     is_retry = failure_report is not None and not failure_report.is_architectural
-
     tools = _get_agent_tools(config, DEV_TOOL_NAMES)
     has_tools = len(tools) > 0
-
-    # -- Build system prompt (different for retry vs first attempt) --
     if is_retry:
-        # Issue #125: Retry-specific system prompt
         system_prompt = """You are the Lead Dev agent. You previously implemented this Blueprint but QA found issues.
 
 IMPORTANT RETRY RULES:
@@ -541,55 +495,34 @@ at the top of each file section, like:
 
 Follow the Blueprint exactly. Respect all constraints.
 Write clean, well-documented code."""
-
-    # -- Build user message --
     user_msg = f"Blueprint:\n{blueprint.model_dump_json(indent=2)}"
-
     if is_retry:
-        # Issue #125: Structured retry context
         user_msg += "\n\n" + "=" * 60
         user_msg += f"\nRETRY CONTEXT (attempt #{retry_count + 1})\n"
         user_msg += "=" * 60
-
-        # QA failure details
         user_msg += "\n\nQA FAILURE REPORT:"
         user_msg += f"\n  Tests passed: {failure_report.tests_passed}"
         user_msg += f"\n  Tests failed: {failure_report.tests_failed}"
         user_msg += f"\n  Errors: {', '.join(failure_report.errors)}"
         user_msg += f"\n  Failed files: {', '.join(failure_report.failed_files)}"
         user_msg += f"\n  Recommendation: {failure_report.recommendation}"
-
-        # Issue #125: Fix complexity and hint
         if failure_report.fix_complexity:
             user_msg += f"\n  Fix complexity: {failure_report.fix_complexity}"
         if failure_report.exact_fix_hint:
             user_msg += f"\n\n  EXACT FIX HINT: {failure_report.exact_fix_hint}"
-
-        # Issue #125: Current file contents from disk
         ws_from_state = state.get("workspace_root", "")
-        workspace_root = (
-            Path(ws_from_state).resolve() if ws_from_state
-            else _get_workspace_root()
-        )
-        file_context = _build_retry_file_context(
-            failure_report, blueprint, workspace_root
-        )
+        workspace_root = (Path(ws_from_state).resolve() if ws_from_state else _get_workspace_root())
+        file_context = _build_retry_file_context(failure_report, blueprint, workspace_root)
         if file_context:
             user_msg += file_context
-            trace.append(
-                f"developer: retry -- injected file context "
-                f"({len(file_context)} chars)"
-            )
+            trace.append(f"developer: retry -- injected file context ({len(file_context)} chars)")
         else:
             trace.append("developer: retry -- no file context available")
-
-        # Issue #125: Sandbox output
         sandbox_result = state.get("sandbox_result")
         sandbox_context = _build_retry_sandbox_context(sandbox_result)
         if sandbox_context:
             user_msg += sandbox_context
             trace.append("developer: retry -- injected sandbox output")
-
     messages = [SystemMessage(content=system_prompt), HumanMessage(content=user_msg)]
     llm = _get_developer_llm()
     if has_tools:
@@ -602,52 +535,27 @@ Write clean, well-documented code."""
     content = _extract_text_content(response.content)
 
     # -- Recover generated_code from tool-written files --
-    # When the developer uses filesystem_write tools, the final LLM response
-    # often contains only a summary (or empty text). But the actual code is
-    # on disk. Read it back so downstream nodes (apply_code, QA) see it.
     if not content.strip() and has_tools:
-        wrote_files = [
-            tc for tc in tool_calls_log
-            if tc.get("tool") == "filesystem_write"
-            and tc.get("success")
-            and tc.get("agent") == "developer"
-        ]
+        wrote_files = [tc for tc in tool_calls_log if tc.get("tool") == "filesystem_write" and tc.get("success") and tc.get("agent") == "developer"]
         if wrote_files and blueprint.target_files:
             ws_from_state = state.get("workspace_root", "")
-            ws_root = (
-                Path(ws_from_state).resolve() if ws_from_state
-                else _get_workspace_root()
-            )
+            ws_root = (Path(ws_from_state).resolve() if ws_from_state else _get_workspace_root())
             recovered_parts = []
             for target_path in blueprint.target_files:
                 full_path = ws_root / target_path
                 if full_path.is_file():
                     try:
                         file_content = full_path.read_text(encoding="utf-8")
-                        recovered_parts.append(
-                            f"# --- FILE: {target_path} ---\n{file_content}"
-                        )
+                        recovered_parts.append(f"# --- FILE: {target_path} ---\n{file_content}")
                     except Exception as e:
-                        logger.warning(
-                            "[DEV] Failed to recover %s from disk: %s",
-                            target_path, e,
-                        )
+                        logger.warning("[DEV] Failed to recover %s from disk: %s", target_path, e)
             if recovered_parts:
                 content = "\n\n".join(recovered_parts)
-                trace.append(
-                    f"developer: recovered {len(recovered_parts)} file(s) "
-                    f"from disk ({len(content)} chars) -- "
-                    f"LLM text was empty after tool use"
-                )
-                logger.info(
-                    "[DEV] Recovered %d files from disk (LLM text was empty)",
-                    len(recovered_parts),
-                )
+                trace.append(f"developer: recovered {len(recovered_parts)} file(s) from disk ({len(content)} chars) -- LLM text was empty after tool use")
+                logger.info("[DEV] Recovered %d files from disk (LLM text was empty)", len(recovered_parts))
 
     trace.append(f"developer: code generated ({len(content)} chars)")
     logger.info("[DEV] done. tokens_used now=%d", tokens_used)
-    # Deduplicate: on retries, replace existing developer entry for this task_id
-    # rather than appending duplicates (trace review showed 3x identical entries).
     new_entry = {"content": f"Implemented blueprint {blueprint.task_id}: {blueprint.instructions[:200]}", "tier": "l1", "module": _infer_module(blueprint.target_files), "source_agent": "developer", "confidence": 1.0, "sandbox_origin": "locked-down", "related_files": ",".join(blueprint.target_files), "task_id": blueprint.task_id}
     replaced = False
     for i, existing in enumerate(memory_writes):
@@ -660,7 +568,7 @@ Write clean, well-documented code."""
     return {"generated_code": content, "status": WorkflowStatus.REVIEWING, "tokens_used": tokens_used, "trace": trace, "memory_writes": memory_writes, "tool_calls_log": tool_calls_log}
 
 
-def apply_code_node(state: GraphState) -> dict:
+async def apply_code_node(state: GraphState) -> dict:
     trace = list(state.get("trace", []))
     trace.append("apply_code: starting")
     generated_code = state.get("generated_code", "")
@@ -668,21 +576,10 @@ def apply_code_node(state: GraphState) -> dict:
     if not blueprint:
         trace.append("apply_code: no blueprint -- skipping")
         return {"parsed_files": [], "trace": trace}
-
-    # Issue #105: Use per-task workspace from GraphState, fall back to env var
     ws_from_state = state.get("workspace_root", "")
     workspace_root = Path(ws_from_state).resolve() if ws_from_state else _get_workspace_root()
-
-    # When the developer used filesystem_write tools, the clean code is already
-    # on disk. Reading from disk avoids re-parsing the LLM's summary text which
-    # often contains markdown fences and prose that corrupt the code.
-    # Trace review (task-ba22eafa) showed 2 wasted retries from this mismatch.
     tool_calls_log = state.get("tool_calls_log", [])
-    wrote_via_tools = any(
-        tc.get("tool") == "filesystem_write" and tc.get("success")
-        for tc in tool_calls_log
-    )
-
+    wrote_via_tools = any(tc.get("tool") == "filesystem_write" and tc.get("success") for tc in tool_calls_log)
     if wrote_via_tools and blueprint.target_files:
         disk_files = []
         for target_path in blueprint.target_files:
@@ -694,16 +591,12 @@ def apply_code_node(state: GraphState) -> dict:
                 except Exception as e:
                     logger.warning("[APPLY_CODE] Failed to read tool-written file %s: %s", target_path, e)
                     trace.append(f"apply_code: failed to read {target_path} from disk -- {e}")
-
         if disk_files:
             total_chars = sum(len(f["content"]) for f in disk_files)
             trace.append(f"apply_code: read {len(disk_files)} file(s) from disk (tool-written, {total_chars:,} chars total)")
             logger.info("[APPLY_CODE] Read %d tool-written files (%d chars) from %s", len(disk_files), total_chars, workspace_root)
             return {"parsed_files": disk_files, "trace": trace}
-
         trace.append("apply_code: tool-written files not found on disk, falling back to parser")
-
-    # Fallback: parse generated_code (single-shot mode or disk read failed)
     if not generated_code:
         trace.append("apply_code: no generated_code and no tool-written files on disk -- skipping")
         return {"parsed_files": [], "trace": trace}
@@ -751,39 +644,24 @@ async def qa_node(state: GraphState, config: RunnableConfig | None = None) -> di
     if not blueprint:
         trace.append("qa: missing blueprint")
         return {"status": WorkflowStatus.FAILED, "error_message": "QA received no blueprint to review", "trace": trace}
-
-    # If generated_code is empty but developer wrote files via tools,
-    # recover from disk so QA can still review the actual code.
     if not generated_code:
         tool_calls_log_state = state.get("tool_calls_log", [])
-        wrote_via_tools = any(
-            tc.get("tool") == "filesystem_write" and tc.get("success")
-            for tc in tool_calls_log_state
-        )
+        wrote_via_tools = any(tc.get("tool") == "filesystem_write" and tc.get("success") for tc in tool_calls_log_state)
         if wrote_via_tools and blueprint.target_files:
             ws_from_state = state.get("workspace_root", "")
-            ws_root = (
-                Path(ws_from_state).resolve() if ws_from_state
-                else _get_workspace_root()
-            )
+            ws_root = (Path(ws_from_state).resolve() if ws_from_state else _get_workspace_root())
             recovered_parts = []
             for target_path in blueprint.target_files:
                 full_path = ws_root / target_path
                 if full_path.is_file():
                     try:
                         file_content = full_path.read_text(encoding="utf-8")
-                        recovered_parts.append(
-                            f"# --- FILE: {target_path} ---\n{file_content}"
-                        )
+                        recovered_parts.append(f"# --- FILE: {target_path} ---\n{file_content}")
                     except Exception:
                         pass
             if recovered_parts:
                 generated_code = "\n\n".join(recovered_parts)
-                trace.append(
-                    f"qa: recovered {len(recovered_parts)} file(s) from "
-                    f"disk for review (generated_code was empty)"
-                )
-
+                trace.append(f"qa: recovered {len(recovered_parts)} file(s) from disk for review (generated_code was empty)")
         if not generated_code:
             trace.append("qa: missing code (no generated_code and no tool-written files)")
             return {"status": WorkflowStatus.FAILED, "error_message": "QA received no code or blueprint to review", "trace": trace}
@@ -796,8 +674,6 @@ async def qa_node(state: GraphState, config: RunnableConfig | None = None) -> di
     if has_tools:
         system_prompt += "You have tools to read files from the workspace. Use filesystem_read to inspect the actual files that were written, and filesystem_list to check the project structure.\n\n"
     system_prompt += 'Respond with ONLY a valid JSON object matching this schema:\n{\n  "task_id": "string (from the Blueprint)",\n  "status": "pass" or "fail" or "escalate",\n  "tests_passed": number,\n  "tests_failed": number,\n  "errors": ["list of specific error descriptions"],\n  "failed_files": ["list of files with issues"],\n  "is_architectural": true/false,\n  "failure_type": "code" or "architectural" or null (if pass),\n  "fix_complexity": "trivial" or "moderate" or "complex" or null (if pass),\n  "exact_fix_hint": "specific instruction for what to change, e.g. Line 5: add 6 spaces before /\\\\" or null,\n  "recommendation": "what to fix or why it should escalate"\n}\n\nFAILURE CLASSIFICATION (critical for correct routing):\n\nSet failure_type to "code" (status: "fail") when:\n- Implementation has bugs, syntax errors, or type errors\n- Tests fail due to logic errors in the code\n- Code does not follow the Blueprint\'s constraints\n- Missing error handling or edge cases\nAction: Lead Dev will retry with the same Blueprint.\n\nSet failure_type to "architectural" (status: "escalate") when:\n- Blueprint targets the WRONG files (code is in the wrong place)\n- A required dependency or import is missing from the Blueprint\n- The design approach is fundamentally flawed\n- Acceptance criteria are impossible to meet with current targets\n- The task requires files not listed in target_files\nAction: Architect will generate a completely NEW Blueprint.\n\nFIX COMPLEXITY CLASSIFICATION (helps Lead Dev on retry):\n- "trivial": One-line fix (spacing, typo, missing import, off-by-one error)\n- "moderate": Multi-line fix within the same function or code block\n- "complex": Structural changes across multiple functions or files\n\nEXACT FIX HINT: When fix_complexity is "trivial" or "moderate", provide a specific\ninstruction describing EXACTLY what to change (e.g., "Line 1: add 6 leading spaces\nbefore the /\\\\ character" or "Add `import os` at line 3"). This helps the Lead Dev\nmake a targeted fix instead of rewriting the entire file.\n\nBe strict but fair. Only pass code that meets ALL acceptance criteria.\nDo not include any text before or after the JSON.'
-
-    # Issue #125: QA leniency when acceptance criteria are empty
     if not blueprint.acceptance_criteria:
         system_prompt += """\n\nIMPORTANT - NO ACCEPTANCE CRITERIA PROVIDED:
 The user did not specify acceptance criteria for this task. In this case:
@@ -806,7 +682,6 @@ The user did not specify acceptance criteria for this task. In this case:
 3. Do NOT invent strict formatting or cosmetic requirements.
 4. Only FAIL for genuine bugs, syntax errors, or logic errors.
 5. Subjective quality issues (indentation style, variable naming) are NOT failures."""
-
     bp_json = blueprint.model_dump_json(indent=2)
     user_msg = f"Blueprint:\n{bp_json}\n\nGenerated Code:\n{generated_code}"
     sandbox_result = state.get("sandbox_result")
@@ -876,7 +751,7 @@ def _run_sandbox_script(script_file, template, parsed_files=None, timeout=30):
     return runner.run_script(script_file=script_file, project_files=project_files, timeout=timeout, template=template)
 
 
-def sandbox_validate_node(state: GraphState) -> dict:
+async def sandbox_validate_node(state: GraphState) -> dict:
     trace = list(state.get("trace", []))
     trace.append("sandbox_validate: starting")
     blueprint = state.get("blueprint")
@@ -923,7 +798,7 @@ def sandbox_validate_node(state: GraphState) -> dict:
         return {"sandbox_result": None, "trace": trace}
 
 
-def flush_memory_node(state: GraphState) -> dict:
+async def flush_memory_node(state: GraphState) -> dict:
     trace = list(state.get("trace", []))
     trace.append("flush_memory: starting")
     memory_writes = state.get("memory_writes", [])
@@ -959,42 +834,32 @@ def flush_memory_node(state: GraphState) -> dict:
     return {"trace": trace, "memory_writes_flushed": written_entries}
 
 
-# -- Publish Code Node (Issue #89) --
-
-
 async def _publish_code_async(state: dict) -> dict:
     from .api.github_prs import github_pr_provider
-
     trace = list(state.get("trace", []))
     trace.append("publish_code: starting")
-
     if not github_pr_provider.configured:
         trace.append("publish_code: skipped -- no GITHUB_TOKEN configured")
         logger.info("[PUBLISH] Skipped: no GITHUB_TOKEN")
         return {"trace": trace}
-
     publish_pr = state.get("publish_pr", True)
     if not publish_pr:
         trace.append("publish_code: skipped -- publish_pr=False (user opted out)")
         logger.info("[PUBLISH] Skipped: publish_pr=False")
         return {"trace": trace}
-
     parsed_files = state.get("parsed_files", [])
     if not parsed_files:
         trace.append("publish_code: skipped -- no parsed_files")
         logger.info("[PUBLISH] Skipped: no parsed_files")
         return {"trace": trace}
-
     blueprint = state.get("blueprint")
     if not blueprint:
         trace.append("publish_code: skipped -- no blueprint")
         logger.info("[PUBLISH] Skipped: no blueprint")
         return {"trace": trace}
-
     task_id = blueprint.task_id
     branch_name = f"agent/{task_id}"
     branch_name = re.sub(r"[^a-zA-Z0-9/_-]", "-", branch_name)
-
     try:
         trace.append(f"publish_code: creating branch '{branch_name}'")
         branch_ok = await github_pr_provider.create_branch(branch_name)
@@ -1002,7 +867,6 @@ async def _publish_code_async(state: dict) -> dict:
             trace.append("publish_code: FAILED to create branch")
             logger.error("[PUBLISH] Failed to create branch '%s'", branch_name)
             return {"trace": trace}
-
         trace.append(f"publish_code: pushing {len(parsed_files)} file(s)")
         workspace_root = state.get("workspace_root", "")
         repo_subdir = ""
@@ -1015,25 +879,19 @@ async def _publish_code_async(state: dict) -> dict:
                     except ValueError:
                         repo_subdir = ""
                     break
-
         files_payload = []
         for pf in parsed_files:
             repo_path = pf["path"]
             if repo_subdir and repo_subdir != ".":
                 repo_path = f"{repo_subdir}/{pf['path']}"
             files_payload.append({"path": repo_path, "content": pf["content"]})
-        push_ok = await github_pr_provider.push_files_batch(
-            files=files_payload, branch=branch_name,
-            message=f"feat({task_id}): implement {blueprint.instructions[:60]}",
-        )
+        push_ok = await github_pr_provider.push_files_batch(files=files_payload, branch=branch_name, message=f"feat({task_id}): implement {blueprint.instructions[:60]}")
         if not push_ok:
             trace.append("publish_code: FAILED to push files")
             logger.error("[PUBLISH] Failed to push files to '%s'", branch_name)
             return {"working_branch": branch_name, "trace": trace}
-
         criteria_lines = [f"- [x] {ac}" for ac in blueprint.acceptance_criteria]
         criteria_block = "\n".join(criteria_lines) if criteria_lines else "_No criteria specified._"
-
         sandbox_result = state.get("sandbox_result")
         test_summary = ""
         if sandbox_result is not None:
@@ -1041,40 +899,20 @@ async def _publish_code_async(state: dict) -> dict:
             failed = getattr(sandbox_result, "tests_failed", None)
             if passed is not None or failed is not None:
                 test_summary = f"\n\n### Test Results\n- Passed: {passed or 0}\n- Failed: {failed or 0}\n"
-
-        pr_body = (
-            f"## Task: `{task_id}`\n\n"
-            f"{blueprint.instructions}\n\n"
-            f"### Acceptance Criteria\n{criteria_block}"
-            f"{test_summary}\n\n"
-            f"### Files Changed\n"
-            + "\n".join(f"- `{fp['path']}`" for fp in files_payload)
-            + "\n\n---\n_Opened automatically by the agent orchestrator._"
-        )
-
+        pr_body = (f"## Task: `{task_id}`\n\n" + f"{blueprint.instructions}\n\n" + f"### Acceptance Criteria\n{criteria_block}" + f"{test_summary}\n\n" + f"### Files Changed\n" + "\n".join(f"- `{fp['path']}`" for fp in files_payload) + "\n\n---\n_Opened automatically by the agent orchestrator._")
         pr_title = f"feat({task_id}): {blueprint.instructions[:80]}"
         if len(blueprint.instructions) > 80:
             pr_title = pr_title[:83] + "..."
-
         trace.append("publish_code: opening PR")
-        pr_result = await github_pr_provider.create_pr(
-            head=branch_name, base="main", title=pr_title, body=pr_body,
-        )
-
+        pr_result = await github_pr_provider.create_pr(head=branch_name, base="main", title=pr_title, body=pr_body)
         if pr_result:
             trace.append(f"publish_code: PR #{pr_result.number} opened -> {pr_result.id}")
             logger.info("[PUBLISH] PR #%d opened: %s", pr_result.number, pr_title)
-            return {
-                "working_branch": branch_name,
-                "pr_url": f"https://github.com/{github_pr_provider.owner}/{github_pr_provider.repo}/pull/{pr_result.number}",
-                "pr_number": pr_result.number,
-                "trace": trace,
-            }
+            return {"working_branch": branch_name, "pr_url": f"https://github.com/{github_pr_provider.owner}/{github_pr_provider.repo}/pull/{pr_result.number}", "pr_number": pr_result.number, "trace": trace}
         else:
             trace.append("publish_code: FAILED to open PR (files pushed to branch)")
             logger.error("[PUBLISH] Failed to open PR (files are on branch '%s')", branch_name)
             return {"working_branch": branch_name, "trace": trace}
-
     except Exception as e:
         trace.append(f"publish_code: error -- {type(e).__name__}: {e}")
         logger.error("[PUBLISH] Unexpected error: %s", e, exc_info=True)
