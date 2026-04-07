@@ -139,16 +139,70 @@ class AgentState(BaseModel):
     pr_number: int | None = None
 
 
+# -- LLM Provider Auto-Detection --
+
+
+def _detect_provider(model: str) -> str:
+    """Detect LLM provider from model name prefix.
+
+    Returns "anthropic", "google", or raises ValueError for unknown models.
+    """
+    lower = model.lower()
+    if lower.startswith("claude") or lower.startswith("anthropic"):
+        return "anthropic"
+    if lower.startswith("gemini") or lower.startswith("models/gemini"):
+        return "google"
+    raise ValueError(
+        f"Cannot detect provider for model '{model}'. "
+        f"Model name must start with 'claude'/'anthropic' (Anthropic) "
+        f"or 'gemini' (Google). Check your .env configuration."
+    )
+
+
+def _create_llm(model: str, *, temperature: float = 0.2, max_tokens: int | None = None):
+    """Create a LangChain LLM instance, auto-detecting provider from model name.
+
+    Supports Anthropic (claude-*) and Google (gemini-*) models interchangeably.
+    Provider is inferred from the model name prefix — no separate PROVIDER env var needed.
+    """
+    provider = _detect_provider(model)
+    if provider == "anthropic":
+        kwargs = {
+            "model": model,
+            "api_key": os.getenv("ANTHROPIC_API_KEY"),
+            "temperature": temperature,
+        }
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
+        else:
+            # Anthropic requires max_tokens; use a sensible default
+            kwargs["max_tokens"] = 8192
+        return ChatAnthropic(**kwargs)
+    else:
+        # Google Gemini — max_tokens not supported the same way
+        kwargs = {
+            "model": model,
+            "google_api_key": os.getenv("GOOGLE_API_KEY"),
+            "temperature": temperature,
+        }
+        if max_tokens is not None:
+            kwargs["max_output_tokens"] = max_tokens
+        return ChatGoogleGenerativeAI(**kwargs)
+
+
 def _get_architect_llm():
-    return ChatGoogleGenerativeAI(model=os.getenv("ARCHITECT_MODEL", "gemini-3-flash-preview"), google_api_key=os.getenv("GOOGLE_API_KEY"), temperature=0.2)
+    model = os.getenv("ARCHITECT_MODEL", "gemini-3-flash-preview")
+    return _create_llm(model, temperature=0.2)
 
 
 def _get_developer_llm():
-    return ChatAnthropic(model=os.getenv("DEVELOPER_MODEL", "claude-sonnet-4-20250514"), api_key=os.getenv("ANTHROPIC_API_KEY"), temperature=0.1, max_tokens=8192)
+    model = os.getenv("DEVELOPER_MODEL", "claude-sonnet-4-20250514")
+    return _create_llm(model, temperature=0.1, max_tokens=8192)
 
 
 def _get_qa_llm():
-    return ChatAnthropic(model=os.getenv("QA_MODEL", "claude-sonnet-4-20250514"), api_key=os.getenv("ANTHROPIC_API_KEY"), temperature=0.0, max_tokens=4096)
+    model = os.getenv("QA_MODEL", "claude-sonnet-4-20250514")
+    return _create_llm(model, temperature=0.0, max_tokens=4096)
 
 
 def _extract_text_content(content: Any) -> str:
