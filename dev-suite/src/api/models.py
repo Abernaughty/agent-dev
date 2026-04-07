@@ -4,10 +4,12 @@ These define the contract between the FastAPI backend and the SvelteKit
 dashboard. All endpoints return an ApiResponse envelope.
 
 Issue #19: Added AuditLogEntry, confidence/sandbox/related_files to MemoryEntryResponse
-Issue #89: Added publish_pr to CreateTaskRequest, pr_url/working_branch/pr_number to TaskSummary
+Issue #89: Added create_pr to CreateTaskRequest, pr_url/working_branch/pr_number to TaskSummary
 Issue #105: Added workspace models, workspace field to CreateTaskRequest/TaskSummary
 Issue #106: Added Planner session models (PlannerStartRequest, PlannerMessageRequest, etc.)
 Issue #107: Added sandbox output fields to TimelineEvent
+Issue #153: Added WorkspaceType enum, github_repo/github_branch/github_feature_branch
+            to CreateTaskRequest and TaskSummary. Renamed publish_pr → create_pr.
 """
 
 from __future__ import annotations
@@ -56,6 +58,16 @@ class AgentInfo(BaseModel):
     status: AgentStatus = AgentStatus.IDLE
     current_task_id: str | None = None
     color: str = "#64748b"
+
+
+# -- Workspace Type (Issue #153) --
+
+
+class WorkspaceType(str, Enum):
+    """Whether the task targets a local directory or a remote GitHub repo."""
+
+    LOCAL = "local"
+    GITHUB = "github"
 
 
 # -- Task Models --
@@ -118,7 +130,11 @@ class TaskSummary(BaseModel):
     budget: TaskBudget = Field(default_factory=TaskBudget)
     timeline: list[TimelineEvent] = []
     workspace: str = ""
-    # Issue #89: PR publication fields
+    # Issue #153: Remote workspace fields
+    workspace_type: WorkspaceType = WorkspaceType.LOCAL
+    github_repo: str | None = None
+    github_branch: str | None = None
+    # Issue #89: PR publication fields (renamed publish_pr → create_pr in #153)
     pr_url: str | None = None
     pr_number: int | None = None
     working_branch: str | None = None
@@ -290,26 +306,49 @@ class MergePRRequest(BaseModel):
 class CreateTaskRequest(BaseModel):
     """Request body for creating a new task.
 
-    Issue #89: publish_pr controls whether a PR is opened after QA passes.
+    Issue #89: create_pr controls whether a PR is opened after QA passes.
     Defaults to True when GITHUB_TOKEN is configured.
     Issue #105: workspace is required. The dashboard pre-fills it with
     WORKSPACE_ROOT, but it must be explicitly sent. For protected
     workspaces, pin must also be provided.
+    Issue #153: workspace_type selects local vs GitHub remote workspace.
+    For GitHub workspaces, github_repo and github_branch are required.
+    github_feature_branch is the branch the agents push to (auto-generated
+    if not provided).
     """
 
     description: str = Field(..., min_length=1, max_length=2000)
     workspace: str = Field(
         ...,
         min_length=1,
-        description="Target workspace directory (absolute path). "
-        "Must be in the allowed directories list.",
+        description="Target workspace directory (absolute path for local, "
+        "ignored for GitHub workspaces).",
+    )
+    workspace_type: WorkspaceType = Field(
+        default=WorkspaceType.LOCAL,
+        description="Whether the task targets a local directory or a GitHub repo.",
+    )
+    github_repo: str | None = Field(
+        default=None,
+        description="GitHub repo in 'owner/repo' format. "
+        "Required when workspace_type is 'github'.",
+    )
+    github_branch: str | None = Field(
+        default=None,
+        description="Base branch to clone and target for PRs (e.g. 'main'). "
+        "Required when workspace_type is 'github'. Defaults to 'main'.",
+    )
+    github_feature_branch: str | None = Field(
+        default=None,
+        description="Feature branch name for the PR. "
+        "Auto-generated from task_id if not provided.",
     )
     pin: str | None = Field(
         default=None,
         description="Admin PIN for protected workspaces. "
         "Required when workspace is protected.",
     )
-    publish_pr: bool | None = Field(
+    create_pr: bool | None = Field(
         default=None,
         description="Whether to create a branch and open a PR after QA passes. "
         "Defaults to True if GITHUB_TOKEN is configured, False otherwise.",

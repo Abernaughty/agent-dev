@@ -20,6 +20,11 @@ apply_code_node uses per-task workspace instead of global env var.
 Issue #125: Retry loop fix -- On retry, developer_node now receives
 current file contents from disk, sandbox stdout, and a targeted
 "fix, don't rewrite" system prompt. QA leniency for empty criteria.
+
+Issue #153: Remote GitHub workspace -- GraphState carries workspace_type,
+github_repo, github_branch, github_feature_branch. publish_code_node
+targets per-task repo when workspace_type=="github". Renamed
+publish_pr → create_pr across the board.
 """
 
 import asyncio
@@ -113,8 +118,13 @@ class GraphState(TypedDict, total=False):
     tool_calls_log: list[dict]
     memory_writes_flushed: list[dict]
     workspace_root: str  # Issue #105: per-task workspace directory
-    # Issue #89: PR publication fields
-    publish_pr: bool  # Whether to create branch + PR after QA passes
+    # Issue #153: Remote GitHub workspace fields
+    workspace_type: str  # "local" or "github"
+    github_repo: str | None  # "owner/repo" format
+    github_branch: str | None  # Base branch (e.g. "main")
+    github_feature_branch: str | None  # Feature branch for PR
+    # Issue #89 / #153: PR creation fields (renamed publish_pr → create_pr)
+    create_pr: bool  # Whether to create branch + PR after QA passes
     working_branch: str | None  # Branch created for this task
     pr_url: str | None  # URL of opened PR
     pr_number: int | None  # PR number
@@ -136,8 +146,13 @@ class AgentState(BaseModel):
     parsed_files: list[dict] = []
     tool_calls_log: list[dict] = []
     workspace_root: str = ""  # Issue #105
-    # Issue #89
-    publish_pr: bool = True
+    # Issue #153: Remote workspace fields
+    workspace_type: str = "local"
+    github_repo: str | None = None
+    github_branch: str | None = None
+    github_feature_branch: str | None = None
+    # Issue #89 / #153
+    create_pr: bool = True
     working_branch: str | None = None
     pr_url: str | None = None
     pr_number: int | None = None
@@ -879,7 +894,28 @@ def flush_memory_node(state: GraphState) -> dict:
     return {"trace": trace, "memory_writes_flushed": written_entries}
 
 
-# -- Publish Code Node (Issue #89) --
+# -- Publish Code Node (Issue #89 / #153) --
+
+
+def _resolve_pr_target(state: dict) -> tuple[str | None, str | None]:
+    """Resolve the owner and repo for PR creation.
+
+    Issue #153: When workspace_type=="github", use the task's github_repo.
+    Otherwise fall back to global GITHUB_OWNER/GITHUB_REPO env vars.
+
+    Returns (owner, repo) tuple. Either may be None if not configured.
+    """
+    workspace_type = state.get("workspace_type", "local")
+
+    if workspace_type == "github":
+        github_repo = state.get("github_repo", "")
+        if github_repo and "/" in github_repo:
+            parts = github_repo.split("/", 1)
+            return parts[0], parts[1].removesuffix(".git")
+
+    # Fallback: global env vars (original behavior)
+    from .api.github_prs import github_pr_provider
+    return github_pr_provider.owner, github_pr_provider.repo
 
 
 async def _publish_code_async(state: dict) -> dict:
@@ -893,10 +929,10 @@ async def _publish_code_async(state: dict) -> dict:
         logger.info("[PUBLISH] Skipped: no GITHUB_TOKEN")
         return {"trace": trace}
 
-    publish_pr = state.get("publish_pr", True)
-    if not publish_pr:
-        trace.append("publish_code: skipped -- publish_pr=False (user opted out)")
-        logger.info("[PUBLISH] Skipped: publish_pr=False")
+    create_pr = state.get("create_pr", True)
+    if not create_pr:
+        trace.append("publish_code: skipped -- create_pr=False (user opted out)")
+        logger.info("[PUBLISH] Skipped: create_pr=False")
         return {"trace": trace}
 
     parsed_files = state.get("parsed_files", [])
@@ -911,12 +947,20 @@ async def _publish_code_async(state: dict) -> dict:
         logger.info("[PUBLISH] Skipped: no blueprint")
         return {"trace": trace}
 
+    # Issue #153: Resolve PR target (per-task repo or global env)
+    pr_owner, pr_repo = _resolve_pr_target(state)
+    if not pr_owner or not pr_repo:
+        trace.append("publish_code: skipped -- no target repo configured")
+        logger.info("[PUBLISH] Skipped: no target repo")
+        return {"trace": trace}
+
     task_id = blueprint.task_id
-    branch_name = f"agent/{task_id}"
+    # Issue #153: Use github_feature_branch if provided, otherwise auto-generate
+    branch_name = state.get("github_feature_branch") or f"agent/{task_id}"
     branch_name = re.sub(r"[^a-zA-Z0-9/_-]", "-", branch_name)
 
     try:
-        trace.append(f"publish_code: creating branch '{branch_name}'")
+        trace.append(f"publish_code: creating branch '{branch_name}' on {pr_owner}/{pr_repo}")
         branch_ok = await github_pr_provider.create_branch(branch_name)
         if not branch_ok:
             trace.append("publish_code: FAILED to create branch")
@@ -925,8 +969,12 @@ async def _publish_code_async(state: dict) -> dict:
 
         trace.append(f"publish_code: pushing {len(parsed_files)} file(s)")
         workspace_root = state.get("workspace_root", "")
+        workspace_type = state.get("workspace_type", "local")
         repo_subdir = ""
-        if workspace_root:
+
+        # For local workspaces, detect subdirectory relative to git root.
+        # For GitHub workspaces, files are already relative to repo root.
+        if workspace_type == "local" and workspace_root:
             ws = Path(workspace_root).resolve()
             for parent in [ws, *ws.parents]:
                 if (parent / ".git").exists():
@@ -976,9 +1024,15 @@ async def _publish_code_async(state: dict) -> dict:
         if len(blueprint.instructions) > 80:
             pr_title = pr_title[:83] + "..."
 
-        trace.append("publish_code: opening PR")
+        # Issue #153: Determine PR base branch
+        workspace_type = state.get("workspace_type", "local")
+        pr_base = "main"
+        if workspace_type == "github":
+            pr_base = state.get("github_branch") or "main"
+
+        trace.append(f"publish_code: opening PR ({branch_name} → {pr_base})")
         pr_result = await github_pr_provider.create_pr(
-            head=branch_name, base="main", title=pr_title, body=pr_body,
+            head=branch_name, base=pr_base, title=pr_title, body=pr_body,
         )
 
         if pr_result:
@@ -986,7 +1040,7 @@ async def _publish_code_async(state: dict) -> dict:
             logger.info("[PUBLISH] PR #%d opened: %s", pr_result.number, pr_title)
             return {
                 "working_branch": branch_name,
-                "pr_url": f"https://github.com/{github_pr_provider.owner}/{github_pr_provider.repo}/pull/{pr_result.number}",
+                "pr_url": f"https://github.com/{pr_owner}/{pr_repo}/pull/{pr_result.number}",
                 "pr_number": pr_result.number,
                 "trace": trace,
             }
@@ -1081,8 +1135,8 @@ def run_task(task_description, enable_tracing=True, session_id=None, tags=None):
     trace_config = create_trace_config(enabled=enable_tracing, task_description=task_description, session_id=session_id, tags=tags or ["orchestrator"], metadata={"max_retries": str(MAX_RETRIES), "token_budget": str(TOKEN_BUDGET)})
     workflow = create_workflow()
     tools_config = init_tools_config()
-    publish_pr = bool(os.getenv("GITHUB_TOKEN"))
-    initial_state: GraphState = {"task_description": task_description, "blueprint": None, "generated_code": "", "failure_report": None, "status": WorkflowStatus.PLANNING, "retry_count": 0, "tokens_used": 0, "error_message": "", "memory_context": [], "memory_writes": [], "trace": [], "sandbox_result": None, "parsed_files": [], "tool_calls_log": [], "publish_pr": publish_pr}
+    create_pr = bool(os.getenv("GITHUB_TOKEN"))
+    initial_state: GraphState = {"task_description": task_description, "blueprint": None, "generated_code": "", "failure_report": None, "status": WorkflowStatus.PLANNING, "retry_count": 0, "tokens_used": 0, "error_message": "", "memory_context": [], "memory_writes": [], "trace": [], "sandbox_result": None, "parsed_files": [], "tool_calls_log": [], "create_pr": create_pr, "workspace_type": "local"}
     invoke_config = {"recursion_limit": 25, **tools_config}
     if trace_config.callbacks:
         invoke_config["callbacks"] = trace_config.callbacks
