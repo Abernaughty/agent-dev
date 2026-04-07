@@ -18,6 +18,7 @@
 	  - Fix 2: Timeline background matches other sections (#08090e)
 	  - Fix 3: File cards are collapsible (click header to toggle)
 	  - Fix 4: Markdown rendered in agent reasoning via marked
+	  - Fix 5: Remove redundant "Redacted JSON" label from Task JSON header
 -->
 <script lang="ts">
 	import { untrack } from 'svelte';
@@ -592,8 +593,8 @@
 		</button>
 		{#if showJson}
 			<div class="overflow-hidden rounded-md border" style="border-color: var(--color-border);">
-				<div class="flex items-center justify-between border-b px-3 py-1.5" style="background: var(--color-bg-surface); border-color: var(--color-border);">
-					<span class="text-[11px]" style="color: var(--color-text-dim);">Redacted JSON</span>
+				<!-- Fix 5: Just the Copy button, no redundant label -->
+				<div class="flex items-center justify-end border-b px-3 py-1.5" style="background: var(--color-bg-surface); border-color: var(--color-border);">
 					<button
 						onclick={() => copyToClipboard(buildRedactedJson(s, d))}
 						class="cursor-pointer rounded border px-2 py-0.5 text-[11px] transition-opacity hover:opacity-100"
