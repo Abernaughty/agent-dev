@@ -11,7 +11,7 @@
 -->
 <script lang="ts">
 	import { untrack } from 'svelte';
-	import DOMPurify from 'dompurify';
+	import DOMPurify from 'isomorphic-dompurify';
 	import { Marked } from 'marked';
 	import { prsStore } from '$lib/stores/prs.svelte.js';
 	import { getDashboardContext } from '$lib/stores/dashboard.svelte.js';
@@ -65,7 +65,7 @@
 		}
 	});
 
-	// CR fix #1: DOMPurify + marked for safe rendering
+	// CR fix #1: isomorphic-dompurify + marked for safe rendering (SSR-compatible)
 	const marked = new Marked({ breaks: true, gfm: true });
 
 	function renderMarkdown(text: string): string {
@@ -91,34 +91,26 @@
 		const majors: string[] = [];
 		const minors: string[] = [];
 
-		// CodeRabbit uses patterns like:
-		// `_\u26a0\ufe0f Potential issue_ | _\ud83d\udfe0 Major_`
-		// `_\u26a0\ufe0f Potential issue_ | _\ud83d\udfe1 Minor_`
-		// Or headers like "**Major:**" followed by items
 		const lines = body.split('\n');
 		let currentSeverity: 'major' | 'minor' | null = null;
 
 		for (const line of lines) {
 			const lower = line.toLowerCase();
-			// Detect severity markers
 			if (lower.includes('major') && (lower.includes('potential issue') || lower.includes('\ud83d\udfe0') || lower.includes('\ud83d\udd34'))) {
 				currentSeverity = 'major';
 			} else if (lower.includes('minor') && (lower.includes('potential issue') || lower.includes('\ud83d\udfe1'))) {
 				currentSeverity = 'minor';
 			}
 
-			// Extract bold-prefixed finding descriptions
 			const boldMatch = line.match(/\*\*(.+?)\*\*/);
 			if (boldMatch && currentSeverity) {
 				const text = boldMatch[1].trim();
-				// Skip generic headers
 				if (text.length > 10 && !text.startsWith('Actionable') && !text.startsWith('Nitpick')) {
 					if (currentSeverity === 'major') majors.push(text);
 					else minors.push(text);
 				}
 			}
 
-			// Reset on section boundaries
 			if (line.startsWith('---') || line.startsWith('</details>')) {
 				currentSeverity = null;
 			}
@@ -127,7 +119,6 @@
 		return { majors, minors };
 	}
 
-	/** Map review state to display label + color. */
 	function reviewStateInfo(state: string): { label: string; color: string } {
 		switch (state.toLowerCase()) {
 			case 'approved':
@@ -143,7 +134,6 @@
 		}
 	}
 
-	/** Try to extract a task_id from PR body (publish_code_node tags it). */
 	function extractTaskId(body: string | null | undefined): string | null {
 		if (!body) return null;
 		const match = body.match(/task[_-]id[:\s]+([a-zA-Z0-9_-]+)/i);
@@ -159,7 +149,6 @@
 		prsStore.refreshPR(prNumber);
 	}
 
-	/** Check run conclusion color. */
 	function checkColor(conclusion: string | null): string {
 		switch (conclusion) {
 			case 'success': return 'var(--color-accent-green)';
@@ -173,7 +162,6 @@
 		}
 	}
 
-	/** CR fix #4: Build canonical GitHub URL from known owner/repo. */
 	const githubBaseUrl = 'https://github.com/Abernaughty/agent-dev';
 
 	const statusColors: Record<string, string> = {
@@ -190,7 +178,6 @@
 		{@const sColor = statusColors[pr.status] || 'var(--color-text-dim)'}
 		{@const taskId = extractTaskId(pr.summary)}
 
-		<!-- Header -->
 		<div class="mb-1.5 flex items-center gap-2.5">
 			<span class="text-[16px] font-semibold" style="color: var(--color-accent-cyan);">#{pr.number}</span>
 			<span class="rounded-sm px-2 py-0.5 text-[10px] font-semibold uppercase" style="color: {sColor}; background: {sColor}15;">{pr.status}</span>
@@ -226,14 +213,12 @@
 			<div class="mb-4 rounded-md border px-3 py-2 text-[11px]" style="background: var(--color-bg-activity); border-color: var(--color-border); color: var(--color-text-dim);">Loading PR details...</div>
 		{/if}
 
-		<!-- CR fix #2: Graceful degradation instead of raw error -->
 		{#if fetchError && !isLoading}
 			<div class="mb-4 rounded-md border px-3 py-2 text-[11px]" style="background: var(--color-bg-activity); border-color: var(--color-border); color: var(--color-text-dim);">
 				PR details temporarily unavailable \u2014 showing cached data.
 			</div>
 		{/if}
 
-		<!-- Stats bar -->
 		<div class="mb-5 flex gap-4 text-[11px]">
 			<span style="color: var(--color-text-dim);">{pr.file_count} files</span>
 			<span style="color: var(--color-accent-green);">+{pr.additions}</span>
@@ -246,7 +231,6 @@
 			{/if}
 		</div>
 
-		<!-- Reviews section -->
 		{#if reviews && reviews.length > 0}
 			<button
 				onclick={() => showReviews = !showReviews}
@@ -283,7 +267,6 @@
 								{/if}
 							</div>
 
-							<!-- CR fix #3: Structured CodeRabbit findings -->
 							{#if crFindings && (crFindings.majors.length > 0 || crFindings.minors.length > 0)}
 								{#if crFindings.majors.length > 0}
 									<div class="mb-2">
@@ -320,7 +303,6 @@
 			{/if}
 		{/if}
 
-		<!-- Check Runs -->
 		{#if pr.check_status && pr.check_status.length > 0}
 			<button
 				onclick={() => showChecks = !showChecks}
@@ -348,7 +330,6 @@
 			{/if}
 		{/if}
 
-		<!-- Comments -->
 		{#if comments && comments.length > 0}
 			<button
 				onclick={() => showComments = !showComments}
@@ -387,7 +368,6 @@
 			{/if}
 		{/if}
 
-		<!-- Changed Files -->
 		{#if files}
 			<div class="mb-2 text-[12px] font-medium" style="color: var(--color-text-bright);">Changed files</div>
 			{#each files as file}
@@ -432,7 +412,6 @@
 			{/if}
 		{/if}
 
-		<!-- CR fix #4: Canonical GitHub link -->
 		<div class="mt-5 text-[11px]" style="color: var(--color-text-dim);">
 			<a
 				href="{githubBaseUrl}/pull/{pr.number}"
