@@ -6,6 +6,8 @@
 	Issue #19: Added batch approve/reject buttons, audit log viewer
 	Updated: Added ChatView, SessionDebrief, CostView
 	Issue #108: Replaced BlueprintView with TaskDetailView for task-{id}
+	Issue #109: Updated PR routing to use prNumber for detail fetch
+	Issue #109 CR: Graceful degradation for PR errors, draft count stat
 -->
 <script lang="ts">
 	import { agentsStore } from '$lib/stores/agents.svelte.js';
@@ -60,12 +62,16 @@
 		confirmRejectAll = false;
 	}
 
-	// -- Memory entry lookup: supports any id format, not just 'mem-' prefix --
 	const selectedMemoryEntry = $derived(
 		activePanel === 'memory' && selectedId !== '__memory-home' && selectedId !== '__memory-audit'
 			? memoryStore.list.find((e) => e.id === selectedId)
 			: undefined
 	);
+
+	function extractPRNumber(id: string): number | null {
+		const match = id.match(/^pr-#?(\d+)$/);
+		return match ? parseInt(match[1], 10) : null;
+	}
 </script>
 
 {#if activePanel === 'agents'}
@@ -76,7 +82,6 @@
 			<AgentDetailView {agent} />
 		{/if}
 	{:else if selectedId.startsWith('task-')}
-		<!-- Issue #108: TaskDetailView replaces BlueprintView -->
 		<TaskDetailView taskId={selectedId.replace('task-', '')} />
 	{:else if selectedId === '__debrief'}
 		<SessionDebrief />
@@ -90,7 +95,6 @@
 	{#if selectedMemoryEntry}
 		<MemoryDetailView entry={selectedMemoryEntry} />
 	{:else if selectedId === '__memory-audit'}
-		<!-- Audit Log View -->
 		<div class="p-4 pl-6" style="font-family: var(--font-mono);">
 			<div class="mb-3.5 text-[10px]" style="color: var(--color-text-faint); letter-spacing: 1px;">AUDIT LOG</div>
 			<div class="mb-4 text-[12px] leading-relaxed" style="color: var(--color-text-muted);">
@@ -118,14 +122,12 @@
 			{/if}
 		</div>
 	{:else}
-		<!-- Memory Overview with batch actions -->
 		<div class="p-4 pl-6" style="font-family: var(--font-mono);">
 			<div class="mb-3.5 text-[10px]" style="color: var(--color-text-faint); letter-spacing: 1px;">MEMORY OVERVIEW</div>
 			<div class="mb-4 text-[12px] leading-relaxed" style="color: var(--color-text-muted);">
 				Select a memory entry from the sidebar to inspect details and approve or reject.
 			</div>
 
-			<!-- Batch Actions -->
 			{#if memoryStore.pendingCount > 0}
 				<div class="mb-4 flex items-center gap-2.5">
 					<button onclick={handleBatchApprove} disabled={batchInProgress} class="cursor-pointer rounded-md border px-4 py-1.5 text-[11px] font-medium transition-opacity disabled:cursor-not-allowed disabled:opacity-50" style="background: var(--color-accent-green)15; border-color: var(--color-accent-green)30; color: var(--color-accent-green);">
@@ -147,14 +149,12 @@
 				</div>
 			{/if}
 
-			<!-- Batch Result Feedback -->
 			{#if batchResult}
 				<div class="mb-4 rounded-md border px-3 py-2 text-[11px]" style="background: {batchResult.type === 'approve' ? 'var(--color-accent-green)' : 'var(--color-accent-red)'}08; border-color: {batchResult.type === 'approve' ? 'var(--color-accent-green)' : 'var(--color-accent-red)'}20; color: {batchResult.type === 'approve' ? 'var(--color-accent-green)' : 'var(--color-accent-red)'};">
 					{batchResult.succeeded} {batchResult.type === 'approve' ? 'approved' : 'rejected'}{batchResult.failed > 0 ? `, ${batchResult.failed} failed` : ''}
 				</div>
 			{/if}
 
-			<!-- Stats -->
 			<div class="flex gap-4">
 				{#each [
 					{ label: 'Pending', count: memoryStore.pendingCount, color: 'var(--color-accent-amber)' },
@@ -173,21 +173,39 @@
 
 {:else if activePanel === 'prs'}
 	{#if selectedId.startsWith('pr-')}
-		{@const prId = selectedId.replace('pr-', '')}
-		{@const pr = prsStore.list.find((p) => p.id === prId)}
-		{#if pr}
-			<PRDetailView {pr} />
+		{@const prNum = extractPRNumber(selectedId)}
+		{#if prNum}
+			<PRDetailView prNumber={prNum} />
+		{:else}
+			<div class="p-4 pl-6 text-[13px]" style="font-family: var(--font-mono); color: var(--color-text-muted);">Invalid PR selection.</div>
 		{/if}
 	{:else}
 		<div class="p-4 pl-6" style="font-family: var(--font-mono);">
-			<div class="mb-3.5 text-[10px]" style="color: var(--color-text-faint); letter-spacing: 1px;">PULL REQUESTS</div>
+			<div class="mb-3.5 flex items-center justify-between">
+				<span class="text-[10px]" style="color: var(--color-text-faint); letter-spacing: 1px;">PULL REQUESTS</span>
+				<button
+					onclick={() => prsStore.manualRefresh()}
+					class="flex cursor-pointer items-center gap-1.5 rounded border px-2.5 py-1 text-[11px] transition-opacity hover:opacity-100"
+					style="background: var(--color-bg-surface); border-color: var(--color-border-secondary, var(--color-border)); color: var(--color-text-dim);"
+				>\u21BB Refresh</button>
+			</div>
 			<div class="mb-4 text-[12px] leading-relaxed" style="color: var(--color-text-muted);">
 				Select a pull request from the sidebar to view details and test results.
 			</div>
+			{#if prsStore.loading}
+				<div class="text-[11px]" style="color: var(--color-text-dim);">Loading PRs...</div>
+			{:else if prsStore.error}
+				<!-- CR fix: Graceful degradation instead of raw error -->
+				<div class="mb-4 rounded-md border px-3 py-2 text-[11px]" style="background: var(--color-bg-activity); border-color: var(--color-border); color: var(--color-text-dim);">
+					PR data is temporarily unavailable. Showing the dashboard without live PR details.
+				</div>
+			{/if}
 			<div class="flex gap-4">
 				{#each [
 					{ label: 'Open', count: prsStore.openCount, color: 'var(--color-accent-yellow)' },
-					{ label: 'Merged', count: prsStore.list.filter(p => p.status === 'merged').length, color: 'var(--color-accent-green)' }
+					{ label: 'Draft', count: prsStore.draftCount, color: 'var(--color-text-dim)' },
+					{ label: 'Merged', count: prsStore.list.filter(p => p.status === 'merged').length, color: 'var(--color-accent-green)' },
+					{ label: 'Total', count: prsStore.list.length, color: 'var(--color-text-muted)' }
 				] as stat}
 					<div class="rounded-md border px-4 py-3 text-center" style="background: var(--color-bg-activity); border-color: var(--color-border);">
 						<div class="text-[20px] font-semibold" style="color: {stat.color};">{stat.count}</div>

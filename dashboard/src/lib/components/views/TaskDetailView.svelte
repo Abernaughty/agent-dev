@@ -7,11 +7,7 @@
 
 	Issue #108: Click-to-expand task detail view
 	Issue #143: Design polish — hierarchy, typography, contrast, affordances
-	  P1: Outcome summary card at top, collapsible blueprint
-	  P2: 4-tier typography, sentence-case headers, de-saturated constraints
-	  P3: Split code artifacts vs agent reasoning, milestone-only timeline
-	  P4: WCAG AA contrast fixes, shape+color status indicators
-	  P5: Refresh button, copy header bar, neutral file tags, padded toggles
+	Issue #109: Added cross-navigation to PR blade via dashboard context
 
 	Hotfix (post-#143):
 	  - Fix 1: Duplicate "Agent reasoning" label — inner header shows neutral text
@@ -26,6 +22,7 @@
 	import { Marked } from 'marked';
 	import { tasksStore } from '$lib/stores/tasks.svelte.js';
 	import { agentsStore } from '$lib/stores/agents.svelte.js';
+	import { getDashboardContext } from '$lib/stores/dashboard.svelte.js';
 	import { redactSecrets } from '$lib/utils/redact.js';
 	import type { TaskDetail, TaskSummary, TimelineEvent } from '$lib/types/api.js';
 
@@ -34,6 +31,8 @@
 	}
 
 	let { taskId }: Props = $props();
+
+	const dash = getDashboardContext();
 
 	const summary = $derived.by(() => tasksStore.list.find((t) => t.id === taskId) ?? null);
 	const detail = $derived.by(() => tasksStore.getDetail(taskId));
@@ -104,8 +103,6 @@
 	});
 
 	// Fix 6: Initialize first file as expanded when detail arrives.
-	// This must be in a $effect, NOT in a template expression ({@const}),
-	// because Svelte 5 forbids state mutation during render/derived evaluation.
 	let lastInitializedTaskId = '';
 	$effect(() => {
 		const d = detail;
@@ -135,7 +132,6 @@
 		try {
 			const result = marked.parse(text);
 			if (typeof result === 'string') return result;
-			// If marked returns a Promise (async mode), fall back to raw text
 			return text;
 		} catch {
 			return text;
@@ -162,13 +158,16 @@
 		tasksStore.fetchDetail(taskId, true);
 	}
 
+	/** Issue #109: Navigate to PR blade and select a specific PR. */
+	function navigateToPR(prNumber: number) {
+		dash.handlePanelSwitch('prs');
+		dash.handleSelect(`pr-#${prNumber}`);
+	}
+
 	function hasSandboxOutput(event: TimelineEvent): boolean {
 		return !!(event.output_summary?.trim() || event.errors?.length);
 	}
 
-	/**
-	 * Build a redacted copy of task data for JSON display.
-	 */
 	function buildRedactedJson(s: TaskSummary, d: TaskDetail | null): string {
 		const obj: Record<string, unknown> = {
 			task_id: s.id,
@@ -189,33 +188,25 @@
 		return JSON.stringify(obj, null, 2);
 	}
 
-	/** P3: Filter timeline to milestone events only (hide tool_call by default). */
 	function getMilestoneEvents(timeline: TimelineEvent[]): TimelineEvent[] {
 		return timeline.filter((e) => e.type !== 'tool_call');
 	}
 
-	/** P3: Count tool calls in timeline. */
 	function countToolCalls(timeline: TimelineEvent[]): number {
 		return timeline.filter((e) => e.type === 'tool_call').length;
 	}
 
-	/** P1: Compute token percentage for outcome card. */
 	function tokenPct(s: TaskSummary): number {
 		if (s.budget.token_budget === 0) return 0;
 		return Math.round((s.budget.tokens_used / s.budget.token_budget) * 100);
 	}
 
-	/** P1: Token percentage color. */
 	function tokenPctColor(pct: number): string {
 		if (pct > 90) return 'var(--color-accent-red)';
 		if (pct > 75) return 'var(--color-accent-amber)';
 		return 'var(--color-text-bright)';
 	}
 
-	/** P3: Separate generated code into file artifacts vs reasoning text.
-	 * File artifacts are delimited by `# --- FILE: path ---` markers (from code_parser).
-	 * Everything outside those markers is reasoning.
-	 */
 	function splitCodeAndReasoning(raw: string): { files: { path: string; code: string }[]; reasoning: string } {
 		const files: { path: string; code: string }[] = [];
 		const reasoningLines: string[] = [];
@@ -241,13 +232,11 @@
 		return { files, reasoning: reasoningLines.join('\n').trim() };
 	}
 
-	/** Approximate word count for reasoning text. */
 	function wordCount(text: string): number {
 		if (!text) return 0;
 		return text.split(/\s+/).filter(Boolean).length;
 	}
 
-	/** Fix 3: Toggle file card expansion. */
 	function toggleFile(path: string) {
 		const next = new Set(expandedFiles);
 		if (next.has(path)) {
@@ -285,12 +274,16 @@
 				<span style="color: var(--color-text-faint);">|</span>
 				<span>{s.workspace}</span>
 			{/if}
-			{#if s.pr_url}
+			{#if s.pr_number}
 				<span style="color: var(--color-text-faint);">|</span>
-				<a href={s.pr_url} target="_blank" rel="noopener" class="underline" style="color: var(--color-accent-cyan);">PR #{s.pr_number}</a>
+				<button
+					onclick={() => navigateToPR(s.pr_number!)}
+					class="cursor-pointer underline"
+					style="color: var(--color-accent-cyan); background: none; border: none; font-family: var(--font-mono); font-size: 11px;"
+				>PR #{s.pr_number} &#8599;</button>
 			{/if}
 			<span class="flex-1"></span>
-			<!-- P5: Refresh button with visible bg/border/icon -->
+			<!-- P5: Refresh button -->
 			<button
 				onclick={refreshDetail}
 				class="flex cursor-pointer items-center gap-1.5 rounded border px-2.5 py-1 text-[11px] transition-opacity hover:opacity-100"
@@ -349,8 +342,12 @@
 					{#if d?.blueprint?.target_files}
 						<span class="rounded border px-2.5 py-1 text-[11px]" style="color: var(--color-text-dim); background: var(--color-bg-surface); border-color: var(--color-border-secondary, var(--color-border));">{d.blueprint.target_files.length} file{d.blueprint.target_files.length !== 1 ? 's' : ''} targeted</span>
 					{/if}
-					{#if s.pr_url}
-						<span class="rounded border px-2.5 py-1 text-[11px]" style="color: var(--color-accent-cyan); background: var(--color-accent-cyan)10; border-color: var(--color-accent-cyan)25;">PR #{s.pr_number}</span>
+					{#if s.pr_number}
+						<button
+							onclick={() => navigateToPR(s.pr_number!)}
+							class="cursor-pointer rounded border px-2.5 py-1 text-[11px]"
+							style="color: var(--color-accent-cyan); background: var(--color-accent-cyan)10; border-color: var(--color-accent-cyan)25; font-family: var(--font-mono);"
+						>PR #{s.pr_number} &#8599;</button>
 					{/if}
 					<span class="rounded border px-2.5 py-1 text-[11px]" style="color: var(--color-accent-green); background: var(--color-accent-green)10; border-color: var(--color-accent-green)25;">{s.timeline.filter(e => e.type === 'success').length > 0 ? 'Tests passing' : 'No test results'}</span>
 				</div>
@@ -371,7 +368,7 @@
 			</div>
 		{/if}
 
-		<!-- ===== P1+P2: BLUEPRINT (collapsible, sentence-case header) ===== -->
+		<!-- ===== BLUEPRINT (collapsible) ===== -->
 		{#if d?.blueprint}
 			{@const bp = d.blueprint}
 			<button
@@ -387,10 +384,7 @@
 			</button>
 
 			{#if showBlueprint}
-				<div
-					class="mb-4 rounded-md border p-3.5"
-					style="background: var(--color-bg-activity); border-color: var(--color-border); border-left: 3px solid var(--color-accent-cyan);"
-				>
+				<div class="mb-4 rounded-md border p-3.5" style="background: var(--color-bg-activity); border-color: var(--color-border); border-left: 3px solid var(--color-accent-cyan);">
 					<div class="mb-1.5 text-[12px] font-medium" style="color: var(--color-text-bright);">Instructions</div>
 					<div class="text-[12px] leading-relaxed" style="color: var(--color-text-muted); white-space: pre-wrap;">{redactSecrets(bp.instructions)}</div>
 				</div>
@@ -430,19 +424,15 @@
 			{/if}
 		{:else if !d && !isLoading}
 			<div class="mb-1.5 text-[12px] font-medium" style="color: var(--color-text-bright);">Instructions</div>
-			<div
-				class="mb-5 rounded-md border p-3.5"
-				style="background: var(--color-bg-activity); border-color: var(--color-border); border-left: 3px solid var(--color-accent-cyan);"
-			>
+			<div class="mb-5 rounded-md border p-3.5" style="background: var(--color-bg-activity); border-color: var(--color-border); border-left: 3px solid var(--color-accent-cyan);">
 				<div class="text-[12px] leading-relaxed" style="color: var(--color-text-muted);">{s.description}</div>
 			</div>
 		{/if}
 
-		<!-- ===== P3: FILES CREATED (split from reasoning) ===== -->
+		<!-- ===== FILES CREATED ===== -->
 		{#if d?.generated_code}
 			{@const { files: codeFiles, reasoning } = splitCodeAndReasoning(d.generated_code)}
 
-			<!-- File artifacts — collapsible cards -->
 			{#if codeFiles.length > 0}
 				<div class="mb-1.5 text-[12px] font-medium" style="color: var(--color-text-bright);">Files created</div>
 				<div class="mb-4 flex flex-col gap-2">
@@ -476,7 +466,6 @@
 				</div>
 			{/if}
 
-			<!-- Agent reasoning — collapsed by default, rendered as markdown -->
 			{#if reasoning || codeFiles.length === 0}
 				{@const displayText = reasoning || d.generated_code}
 				{@const redactedReasoning = redactSecrets(displayText)}
@@ -508,7 +497,7 @@
 			{/if}
 		{/if}
 
-		<!-- ===== P3: COMPACT TIMELINE (milestone events, full agent names) ===== -->
+		<!-- ===== COMPACT TIMELINE ===== -->
 		{#if s.timeline.length > 0}
 			{@const milestones = getMilestoneEvents(s.timeline)}
 			{@const toolCallCount = countToolCalls(s.timeline)}
@@ -537,10 +526,7 @@
 							<div class="flex items-start gap-2" class:opacity-70={isTool}>
 								<span class="shrink-0 pt-px text-[11px]" style="color: var(--color-text-faint); min-width: 36px;">{event.time}</span>
 								<span class="shrink-0 text-[11px] font-medium" style="color: {agent.color}; min-width: 60px;">{agent.name}</span>
-								<span
-									class="shrink-0 rounded-sm px-1.5 py-px text-center text-[11px] font-semibold"
-									style="color: {style.color}; background: {style.color}18; letter-spacing: 0.5px; min-width: 38px;"
-								>{style.label}</span>
+								<span class="shrink-0 rounded-sm px-1.5 py-px text-center text-[11px] font-semibold" style="color: {style.color}; background: {style.color}18; letter-spacing: 0.5px; min-width: 38px;">{style.label}</span>
 								<span class="text-[11px] leading-relaxed" style="color: {isFail ? '#f8a0a0' : event.type === 'success' ? '#6ee7b7' : isTool ? 'var(--color-text-dim)' : 'var(--color-text-muted)'};">{event.action}</span>
 							</div>
 							{#if hasSandboxOutput(event)}
@@ -607,7 +593,7 @@
 	{/if}
 </div>
 
-<!-- Fix 4: Scoped styles for markdown-rendered reasoning content -->
+<!-- Scoped styles for markdown-rendered reasoning content -->
 <style>
 	.reasoning-content :global(h1),
 	.reasoning-content :global(h2),

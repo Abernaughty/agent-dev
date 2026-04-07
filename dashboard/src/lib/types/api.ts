@@ -12,6 +12,8 @@
  * Issue #106 Phase B: Added Planner types, planner_message SSE event
  * Issue #107: Added sandbox output fields to TimelineEvent
  * Issue #108: Added completion_detail to TaskSummary, ensured TaskDetail has all fields
+ * Issue #109: Aligned PR types with backend PRSummary; added PRReview, PRComment,
+ *            PRCheckStatus; enhanced PRFileChange with patch field
  */
 
 // -- Envelope --
@@ -177,15 +179,17 @@ export interface AuditLogEntry {
 	timestamp: string;
 }
 
-// -- Pull Requests --
+// -- Pull Requests (Issue #109: aligned with backend PRSummary) --
 
-export type PRStatus = 'open' | 'review' | 'merged' | 'closed';
+export type PRStatus = 'open' | 'review' | 'merged' | 'closed' | 'draft';
 
 export interface PRFileChange {
 	name: string;
 	additions: number;
 	deletions: number;
 	status: string;
+	/** Unified diff patch from GitHub API. */
+	patch: string;
 }
 
 export interface PRTestResults {
@@ -194,8 +198,34 @@ export interface PRTestResults {
 	total: number;
 }
 
+export interface PRReview {
+	id: number;
+	author: string;
+	state: string;
+	body: string;
+	submitted_at: string;
+	is_bot: boolean;
+}
+
+export interface PRComment {
+	id: number;
+	author: string;
+	body: string;
+	path: string | null;
+	line: number | null;
+	created_at: string;
+	is_bot: boolean;
+}
+
+export interface PRCheckStatus {
+	name: string;
+	status: string;
+	conclusion: string | null;
+}
+
 export interface PullRequest {
 	id: string;
+	number: number;
 	title: string;
 	author: string;
 	status: PRStatus;
@@ -207,6 +237,16 @@ export interface PullRequest {
 	file_count: number;
 	files: PRFileChange[];
 	tests: PRTestResults;
+	/** Whether this is a draft PR. */
+	draft: boolean;
+	/** Whether GitHub considers this PR mergeable. */
+	mergeable: boolean | null;
+	/** HEAD commit SHA for check status lookups. */
+	head_sha: string;
+	/** Reviews on this PR (populated by detail fetch). */
+	reviews: PRReview[];
+	/** CI/CD check runs (populated by detail fetch). */
+	check_status: PRCheckStatus[];
 }
 
 // -- SSE --
