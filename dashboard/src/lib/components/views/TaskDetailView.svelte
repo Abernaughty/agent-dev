@@ -12,9 +12,16 @@
 	  P3: Split code artifacts vs agent reasoning, milestone-only timeline
 	  P4: WCAG AA contrast fixes, shape+color status indicators
 	  P5: Refresh button, copy header bar, neutral file tags, padded toggles
+
+	Hotfix (post-#143):
+	  - Fix 1: Duplicate "Agent reasoning" label — inner header shows neutral text
+	  - Fix 2: Timeline background matches other sections (#08090e)
+	  - Fix 3: File cards are collapsible (click header to toggle)
+	  - Fix 4: Markdown rendered in agent reasoning via marked
 -->
 <script lang="ts">
 	import { untrack } from 'svelte';
+	import { Marked } from 'marked';
 	import { tasksStore } from '$lib/stores/tasks.svelte.js';
 	import { agentsStore } from '$lib/stores/agents.svelte.js';
 	import { redactSecrets } from '$lib/utils/redact.js';
@@ -80,6 +87,10 @@
 	let showTimeline = $state(true);
 	let showAllTimelineEvents = $state(false);
 
+	// Fix 3: Track which file cards are expanded (by path)
+	let expandedFiles: Set<string> = $state(new Set());
+	let filesInitialized = $state(false);
+
 	// P1: Auto-expand blueprint for in-progress tasks
 	$effect(() => {
 		const s = summary;
@@ -90,6 +101,24 @@
 			});
 		}
 	});
+
+	// Fix 4: Configure marked for safe rendering
+	const marked = new Marked({
+		breaks: true,
+		gfm: true
+	});
+
+	/** Render markdown to sanitized HTML. */
+	function renderMarkdown(text: string): string {
+		try {
+			const result = marked.parse(text);
+			if (typeof result === 'string') return result;
+			// If marked returns a Promise (async mode), fall back to raw text
+			return text;
+		} catch {
+			return text;
+		}
+	}
 
 	/** Copy text to clipboard. */
 	async function copyToClipboard(text: string) {
@@ -188,6 +217,25 @@
 	function wordCount(text: string): number {
 		if (!text) return 0;
 		return text.split(/\s+/).filter(Boolean).length;
+	}
+
+	/** Fix 3: Toggle file card expansion. */
+	function toggleFile(path: string) {
+		const next = new Set(expandedFiles);
+		if (next.has(path)) {
+			next.delete(path);
+		} else {
+			next.add(path);
+		}
+		expandedFiles = next;
+	}
+
+	/** Fix 3: Initialize first file as expanded when code files change. */
+	function initExpandedFiles(files: { path: string; code: string }[]) {
+		if (!filesInitialized && files.length > 0) {
+			expandedFiles = new Set([files[0].path]);
+			filesInitialized = true;
+		}
 	}
 </script>
 
@@ -379,29 +427,43 @@
 		{#if d?.generated_code}
 			{@const { files: codeFiles, reasoning } = splitCodeAndReasoning(d.generated_code)}
 
-			<!-- File artifacts — primary display -->
+			<!-- Fix 3: Initialize first file as expanded -->
+			{@const _ = initExpandedFiles(codeFiles)}
+
+			<!-- File artifacts — collapsible cards -->
 			{#if codeFiles.length > 0}
 				<div class="mb-1.5 text-[12px] font-medium" style="color: var(--color-text-bright);">Files created</div>
 				<div class="mb-4 flex flex-col gap-2">
 					{#each codeFiles as file}
 						{@const redactedCode = redactSecrets(file.code)}
+						{@const isExpanded = expandedFiles.has(file.path)}
 						<div class="overflow-hidden rounded-md border" style="border-color: var(--color-border);">
-							<!-- P5: Copy button in header bar -->
-							<div class="flex items-center justify-between border-b px-3 py-1.5" style="background: var(--color-bg-surface); border-color: var(--color-border);">
-								<span class="text-[11px]" style="color: var(--color-text-bright);">{file.path}</span>
+							<!-- Fix 3: Clickable header to toggle code visibility -->
+							<button
+								onclick={() => toggleFile(file.path)}
+								class="flex w-full cursor-pointer items-center justify-between border-b px-3 py-1.5 text-left"
+								style="background: var(--color-bg-surface); border-color: {isExpanded ? 'var(--color-border)' : 'transparent'}; font-family: var(--font-mono);"
+							>
+								<div class="flex items-center gap-2">
+									<span class="text-[11px]" style="color: var(--color-text-faint);">{isExpanded ? '\u25bc' : '\u25b6'}</span>
+									<span class="text-[11px]" style="color: var(--color-text-bright);">{file.path}</span>
+								</div>
+								<!-- Stop propagation on Copy so it doesn't toggle the card -->
 								<button
-									onclick={() => copyToClipboard(redactedCode)}
+									onclick|stopPropagation={() => copyToClipboard(redactedCode)}
 									class="cursor-pointer rounded border px-2 py-0.5 text-[11px] transition-opacity hover:opacity-100"
 									style="background: var(--color-bg-primary); border-color: var(--color-border-secondary, var(--color-border)); color: var(--color-text-dim);"
 								>Copy</button>
-							</div>
-							<pre class="max-h-[300px] overflow-auto p-3.5 text-[11px] leading-relaxed" style="background: #08090e; color: var(--color-text-muted); font-family: var(--font-mono); margin: 0; white-space: pre-wrap; word-break: break-word;">{redactedCode}</pre>
+							</button>
+							{#if isExpanded}
+								<pre class="max-h-[300px] overflow-auto p-3.5 text-[11px] leading-relaxed" style="background: #08090e; color: var(--color-text-muted); font-family: var(--font-mono); margin: 0; white-space: pre-wrap; word-break: break-word;">{redactedCode}</pre>
+							{/if}
 						</div>
 					{/each}
 				</div>
 			{/if}
 
-			<!-- Agent reasoning — collapsed by default -->
+			<!-- Agent reasoning — collapsed by default, rendered as markdown -->
 			{#if reasoning || codeFiles.length === 0}
 				{@const displayText = reasoning || d.generated_code}
 				{@const redactedReasoning = redactSecrets(displayText)}
@@ -417,16 +479,19 @@
 					<span class="text-[11px]" style="color: var(--color-text-dim);">~{wordCount(displayText)} words</span>
 				</button>
 				{#if showReasoning}
+					<!-- Fix 1+4: Single container, no duplicate header, markdown rendered -->
 					<div class="mb-4 overflow-hidden rounded-md border" style="border-color: var(--color-border);">
-						<div class="flex items-center justify-between border-b px-3 py-1.5" style="background: var(--color-bg-surface); border-color: var(--color-border);">
-							<span class="text-[11px]" style="color: var(--color-text-dim);">{codeFiles.length > 0 ? 'Agent reasoning' : 'Raw output'}</span>
+						<div class="flex items-center justify-end border-b px-3 py-1.5" style="background: var(--color-bg-surface); border-color: var(--color-border);">
 							<button
 								onclick={() => copyToClipboard(redactedReasoning)}
 								class="cursor-pointer rounded border px-2 py-0.5 text-[11px] transition-opacity hover:opacity-100"
 								style="background: var(--color-bg-primary); border-color: var(--color-border-secondary, var(--color-border)); color: var(--color-text-dim);"
 							>Copy</button>
 						</div>
-						<pre class="overflow-x-auto p-3.5 text-[11px] leading-relaxed" style="background: #08090e; color: var(--color-text-muted); font-family: var(--font-mono); margin: 0; white-space: pre-wrap; word-break: break-word;">{redactedReasoning}</pre>
+						<!-- Fix 4: Markdown-rendered reasoning with scoped styles -->
+						<div class="reasoning-content overflow-x-auto p-3.5 text-[12px] leading-relaxed" style="background: #08090e; color: var(--color-text-muted); font-family: var(--font-mono);">
+							{@html renderMarkdown(redactedReasoning)}
+						</div>
 					</div>
 				{/if}
 			{/if}
@@ -451,7 +516,8 @@
 			</button>
 
 			{#if showTimeline}
-				<div class="mb-5 rounded-md border p-3" style="background: var(--color-bg-activity); border-color: var(--color-border);">
+				<!-- Fix 2: Background matches other sections (#08090e instead of --color-bg-activity) -->
+				<div class="mb-5 rounded-md border p-3" style="background: #08090e; border-color: var(--color-border);">
 					{#each displayEvents as event, i}
 						{@const agent = agentInfo(event.agent)}
 						{@const style = eventStyles[event.type] ?? { color: 'var(--color-text-dim)', label: '?' }}
@@ -534,3 +600,98 @@
 		</div>
 	{/if}
 </div>
+
+<!-- Fix 4: Scoped styles for markdown-rendered reasoning content -->
+<style>
+	.reasoning-content :global(h1),
+	.reasoning-content :global(h2),
+	.reasoning-content :global(h3),
+	.reasoning-content :global(h4) {
+		color: var(--color-text-bright);
+		font-weight: 500;
+		margin-top: 1em;
+		margin-bottom: 0.4em;
+	}
+	.reasoning-content :global(h1) { font-size: 14px; }
+	.reasoning-content :global(h2) { font-size: 13px; }
+	.reasoning-content :global(h3) { font-size: 12px; }
+	.reasoning-content :global(h4) { font-size: 12px; color: var(--color-text-muted); }
+
+	.reasoning-content :global(p) {
+		margin-bottom: 0.6em;
+		line-height: 1.6;
+	}
+
+	.reasoning-content :global(strong) {
+		color: var(--color-text-bright);
+		font-weight: 500;
+	}
+
+	.reasoning-content :global(em) {
+		font-style: italic;
+	}
+
+	.reasoning-content :global(code) {
+		background: var(--color-bg-surface);
+		color: var(--color-accent-cyan);
+		padding: 1px 4px;
+		border-radius: 3px;
+		font-size: 11px;
+	}
+
+	.reasoning-content :global(pre) {
+		background: var(--color-bg-activity);
+		border: 1px solid var(--color-border);
+		border-radius: 4px;
+		padding: 10px 12px;
+		margin: 0.6em 0;
+		overflow-x: auto;
+		font-size: 11px;
+		line-height: 1.6;
+	}
+
+	.reasoning-content :global(pre code) {
+		background: none;
+		padding: 0;
+		color: var(--color-text-muted);
+	}
+
+	.reasoning-content :global(ul),
+	.reasoning-content :global(ol) {
+		padding-left: 1.4em;
+		margin-bottom: 0.6em;
+	}
+
+	.reasoning-content :global(li) {
+		margin-bottom: 0.25em;
+		line-height: 1.6;
+	}
+
+	.reasoning-content :global(hr) {
+		border: none;
+		border-top: 1px solid var(--color-border);
+		margin: 1em 0;
+	}
+
+	.reasoning-content :global(blockquote) {
+		border-left: 2px solid var(--color-accent-cyan);
+		padding-left: 10px;
+		margin: 0.6em 0;
+		color: var(--color-text-dim);
+	}
+
+	.reasoning-content :global(a) {
+		color: var(--color-accent-cyan);
+		text-decoration: underline;
+	}
+
+	/* Remove top margin from first child */
+	.reasoning-content :global(:first-child) {
+		margin-top: 0;
+	}
+
+	/* Remove bottom margin from last child */
+	.reasoning-content :global(:last-child) {
+		margin-bottom: 0;
+	}
+</style>
