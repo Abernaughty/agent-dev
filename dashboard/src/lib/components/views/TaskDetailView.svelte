@@ -129,6 +129,12 @@
 		}
 	}
 
+	/** Copy text to clipboard, stopping event propagation (for nested buttons). */
+	function copyAndStop(e: Event, text: string) {
+		e.stopPropagation();
+		copyToClipboard(text);
+	}
+
 	/** Refresh detail data from the API. */
 	function refreshDetail() {
 		tasksStore.fetchDetail(taskId, true);
@@ -448,9 +454,9 @@
 									<span class="text-[11px]" style="color: var(--color-text-faint);">{isExpanded ? '\u25bc' : '\u25b6'}</span>
 									<span class="text-[11px]" style="color: var(--color-text-bright);">{file.path}</span>
 								</div>
-								<!-- Stop propagation on Copy so it doesn't toggle the card -->
+								<!-- Svelte 5: stopPropagation inside handler, not as modifier -->
 								<button
-									onclick|stopPropagation={() => copyToClipboard(redactedCode)}
+									onclick={(e) => copyAndStop(e, redactedCode)}
 									class="cursor-pointer rounded border px-2 py-0.5 text-[11px] transition-opacity hover:opacity-100"
 									style="background: var(--color-bg-primary); border-color: var(--color-border-secondary, var(--color-border)); color: var(--color-text-dim);"
 								>Copy</button>
