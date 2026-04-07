@@ -600,6 +600,50 @@ Write clean, well-documented code."""
         response = await llm.ainvoke(messages)
         tokens_used += _extract_token_count(response)
     content = _extract_text_content(response.content)
+
+    # -- Recover generated_code from tool-written files --
+    # When the developer uses filesystem_write tools, the final LLM response
+    # often contains only a summary (or empty text). But the actual code is
+    # on disk. Read it back so downstream nodes (apply_code, QA) see it.
+    if not content.strip() and has_tools:
+        wrote_files = [
+            tc for tc in tool_calls_log
+            if tc.get("tool") == "filesystem_write"
+            and tc.get("success")
+            and tc.get("agent") == "developer"
+        ]
+        if wrote_files and blueprint.target_files:
+            ws_from_state = state.get("workspace_root", "")
+            ws_root = (
+                Path(ws_from_state).resolve() if ws_from_state
+                else _get_workspace_root()
+            )
+            recovered_parts = []
+            for target_path in blueprint.target_files:
+                full_path = ws_root / target_path
+                if full_path.is_file():
+                    try:
+                        file_content = full_path.read_text(encoding="utf-8")
+                        recovered_parts.append(
+                            f"# --- FILE: {target_path} ---\n{file_content}"
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "[DEV] Failed to recover %s from disk: %s",
+                            target_path, e,
+                        )
+            if recovered_parts:
+                content = "\n\n".join(recovered_parts)
+                trace.append(
+                    f"developer: recovered {len(recovered_parts)} file(s) "
+                    f"from disk ({len(content)} chars) -- "
+                    f"LLM text was empty after tool use"
+                )
+                logger.info(
+                    "[DEV] Recovered %d files from disk (LLM text was empty)",
+                    len(recovered_parts),
+                )
+
     trace.append(f"developer: code generated ({len(content)} chars)")
     logger.info("[DEV] done. tokens_used now=%d", tokens_used)
     # Deduplicate: on retries, replace existing developer entry for this task_id
@@ -621,9 +665,6 @@ def apply_code_node(state: GraphState) -> dict:
     trace.append("apply_code: starting")
     generated_code = state.get("generated_code", "")
     blueprint = state.get("blueprint")
-    if not generated_code:
-        trace.append("apply_code: no generated_code -- skipping")
-        return {"parsed_files": [], "trace": trace}
     if not blueprint:
         trace.append("apply_code: no blueprint -- skipping")
         return {"parsed_files": [], "trace": trace}
@@ -663,6 +704,9 @@ def apply_code_node(state: GraphState) -> dict:
         trace.append("apply_code: tool-written files not found on disk, falling back to parser")
 
     # Fallback: parse generated_code (single-shot mode or disk read failed)
+    if not generated_code:
+        trace.append("apply_code: no generated_code and no tool-written files on disk -- skipping")
+        return {"parsed_files": [], "trace": trace}
     try:
         parsed = parse_generated_code(generated_code)
     except CodeParserError as e:
@@ -704,9 +748,45 @@ async def qa_node(state: GraphState, config: RunnableConfig | None = None) -> di
     logger.info("[QA] retry_count=%d, tokens_used=%d, status=%s", retry_count, tokens_used, state.get("status", "unknown"))
     generated_code = state.get("generated_code", "")
     blueprint = state.get("blueprint")
-    if not generated_code or not blueprint:
-        trace.append("qa: missing code or blueprint")
-        return {"status": WorkflowStatus.FAILED, "error_message": "QA received no code or blueprint to review", "trace": trace}
+    if not blueprint:
+        trace.append("qa: missing blueprint")
+        return {"status": WorkflowStatus.FAILED, "error_message": "QA received no blueprint to review", "trace": trace}
+
+    # If generated_code is empty but developer wrote files via tools,
+    # recover from disk so QA can still review the actual code.
+    if not generated_code:
+        tool_calls_log_state = state.get("tool_calls_log", [])
+        wrote_via_tools = any(
+            tc.get("tool") == "filesystem_write" and tc.get("success")
+            for tc in tool_calls_log_state
+        )
+        if wrote_via_tools and blueprint.target_files:
+            ws_from_state = state.get("workspace_root", "")
+            ws_root = (
+                Path(ws_from_state).resolve() if ws_from_state
+                else _get_workspace_root()
+            )
+            recovered_parts = []
+            for target_path in blueprint.target_files:
+                full_path = ws_root / target_path
+                if full_path.is_file():
+                    try:
+                        file_content = full_path.read_text(encoding="utf-8")
+                        recovered_parts.append(
+                            f"# --- FILE: {target_path} ---\n{file_content}"
+                        )
+                    except Exception:
+                        pass
+            if recovered_parts:
+                generated_code = "\n\n".join(recovered_parts)
+                trace.append(
+                    f"qa: recovered {len(recovered_parts)} file(s) from "
+                    f"disk for review (generated_code was empty)"
+                )
+
+        if not generated_code:
+            trace.append("qa: missing code (no generated_code and no tool-written files)")
+            return {"status": WorkflowStatus.FAILED, "error_message": "QA received no code or blueprint to review", "trace": trace}
     tools = _get_agent_tools(config, QA_TOOL_NAMES)
     has_tools = len(tools) > 0
     if has_tools:
