@@ -22,8 +22,8 @@ jobs:
       - uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          model: claude-sonnet-4-6
-          direct_prompt: |
+          claude_args: "--model claude-sonnet-4-6"
+          prompt: |
             Read issue #${{ github.event.issue.number }} and implement a fix.
             Follow the project conventions in CLAUDE.md.
             Create a PR with the changes referencing the issue.
