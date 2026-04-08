@@ -96,6 +96,24 @@
 		<div class="text-[13px] leading-relaxed" style="color: var(--color-text-bright);">"{entry.content}"</div>
 	</div>
 
+	<!-- Context (issue #110) -->
+	{#if entry.source_step || entry.source_output_ref}
+		<div class="mb-5">
+			<div class="mb-2 text-[10px]" style="color: var(--color-text-dim); letter-spacing: 1px;">CONTEXT</div>
+			<div class="rounded-md border p-3" style="background: var(--color-bg-activity); border-color: var(--color-border);">
+				{#if entry.source_step}
+					<div class="mb-1.5 flex items-center gap-2">
+						<span class="text-[9px]" style="color: var(--color-text-dim);">Step</span>
+						<span class="rounded px-1.5 py-0.5 text-[11px]" style="color: var(--color-accent-cyan); background: var(--color-accent-cyan)10;">{entry.source_step}</span>
+					</div>
+				{/if}
+				{#if entry.source_output_ref}
+					<div class="text-[11px] leading-relaxed" style="color: var(--color-text-muted);">{entry.source_output_ref}</div>
+				{/if}
+			</div>
+		</div>
+	{/if}
+
 	<!-- Metadata Grid -->
 	<div class="mb-5 grid grid-cols-2 gap-3">
 		{#each [

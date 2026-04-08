@@ -852,7 +852,7 @@ Write clean, well-documented code."""
 
     trace.append(f"developer: code generated ({len(content)} chars)")
     logger.info("[DEV] done. tokens_used now=%d", tokens_used)
-    new_entry = {"content": f"Implemented blueprint {blueprint.task_id}: {blueprint.instructions[:200]}", "tier": "l1", "module": _infer_module(blueprint.target_files), "source_agent": "developer", "confidence": 1.0, "sandbox_origin": "locked-down", "related_files": ",".join(blueprint.target_files), "task_id": blueprint.task_id}
+    new_entry = {"content": f"Implemented blueprint {blueprint.task_id}: {blueprint.instructions[:200]}", "tier": "l1", "module": _infer_module(blueprint.target_files), "source_agent": "developer", "confidence": 1.0, "sandbox_origin": "locked-down", "related_files": ",".join(blueprint.target_files), "task_id": blueprint.task_id, "source_step": "developer", "source_output_ref": f"Implemented: {blueprint.instructions[:150]}"}
     replaced = False
     for i, existing in enumerate(memory_writes):
         if existing.get("task_id") == blueprint.task_id and existing.get("source_agent") == "developer":
@@ -1035,10 +1035,10 @@ The user did not specify acceptance criteria for this task. In this case:
     trace.append(f"qa: verdict={failure_report.status}, passed={failure_report.tests_passed}, failed={failure_report.tests_failed}")
     if failure_report.status == "pass":
         status = WorkflowStatus.PASSED
-        memory_writes.append({"content": f"QA passed for {blueprint.task_id}: {failure_report.tests_passed} tests passed", "tier": "l2", "module": _infer_module(blueprint.target_files), "source_agent": "qa", "confidence": 1.0, "sandbox_origin": "locked-down", "related_files": ",".join(blueprint.target_files), "task_id": blueprint.task_id})
+        memory_writes.append({"content": f"QA passed for {blueprint.task_id}: {failure_report.tests_passed} tests passed", "tier": "l2", "module": _infer_module(blueprint.target_files), "source_agent": "qa", "confidence": 1.0, "sandbox_origin": "locked-down", "related_files": ",".join(blueprint.target_files), "task_id": blueprint.task_id, "source_step": "qa", "source_output_ref": f"QA passed: {failure_report.tests_passed} tests passed"})
     elif failure_report.is_architectural:
         status = WorkflowStatus.ESCALATED
-        memory_writes.append({"content": f"Architectural issue in {blueprint.task_id}: {failure_report.recommendation}", "tier": "l0-discovered", "module": _infer_module(blueprint.target_files), "source_agent": "qa", "confidence": 0.85, "sandbox_origin": "locked-down", "related_files": ",".join(failure_report.failed_files), "task_id": blueprint.task_id})
+        memory_writes.append({"content": f"Architectural issue in {blueprint.task_id}: {failure_report.recommendation}", "tier": "l0-discovered", "module": _infer_module(blueprint.target_files), "source_agent": "qa", "confidence": 0.85, "sandbox_origin": "locked-down", "related_files": ",".join(failure_report.failed_files), "task_id": blueprint.task_id, "source_step": "qa", "source_output_ref": f"Architectural: {failure_report.recommendation[:150]}"})
     else:
         status = WorkflowStatus.REVIEWING
     new_retry_count = retry_count + (1 if failure_report.status != "pass" else 0)
@@ -1165,12 +1165,14 @@ async def flush_memory_node(state: GraphState) -> dict:
             sandbox_origin = entry.get("sandbox_origin", "none")
             related_files = entry.get("related_files", "")
             task_id = entry.get("task_id", "")
+            source_step = entry.get("source_step", "")
+            source_output_ref = entry.get("source_output_ref", "")
             if tier == "l0-discovered":
-                store.add_l0_discovered(content, module=module, source_agent=source_agent, confidence=confidence, sandbox_origin=sandbox_origin, related_files=related_files, task_id=task_id)
+                store.add_l0_discovered(content, module=module, source_agent=source_agent, confidence=confidence, sandbox_origin=sandbox_origin, related_files=related_files, task_id=task_id, source_step=source_step, source_output_ref=source_output_ref)
             elif tier == "l2":
-                store.add_l2(content, module=module, source_agent=source_agent, related_files=related_files, task_id=task_id)
+                store.add_l2(content, module=module, source_agent=source_agent, related_files=related_files, task_id=task_id, source_step=source_step, source_output_ref=source_output_ref)
             else:
-                store.add_l1(content, module=module, source_agent=source_agent, confidence=confidence, sandbox_origin=sandbox_origin, related_files=related_files, task_id=task_id)
+                store.add_l1(content, module=module, source_agent=source_agent, confidence=confidence, sandbox_origin=sandbox_origin, related_files=related_files, task_id=task_id, source_step=source_step, source_output_ref=source_output_ref)
             written_entries.append(entry)
         trace.append(f"flush_memory: wrote {len(written_entries)} entries to store")
         logger.info("[FLUSH] Wrote %d memory entries", len(written_entries))

@@ -236,6 +236,8 @@ export const memoryStore = {
 		related_files?: string[];
 		expires_at?: number | null;
 		hours_remaining?: number | null;
+		source_step?: string;
+		source_output_ref?: string;
 	}) {
 		const idx = entries.findIndex((e) => e.id === data.id);
 		if (idx >= 0) {
@@ -268,7 +270,9 @@ export const memoryStore = {
 				hours_remaining: data.hours_remaining ?? null,
 				confidence: data.confidence ?? 0,
 				sandbox: data.sandbox ?? 'locked-down',
-				related_files: data.related_files ?? []
+				related_files: data.related_files ?? [],
+				source_step: data.source_step ?? '',
+				source_output_ref: data.source_output_ref ?? ''
 			};
 			entries = [...entries, newEntry];
 		}

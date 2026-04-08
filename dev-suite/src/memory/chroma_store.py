@@ -127,6 +127,8 @@ class ChromaMemoryStore:
         sandbox_origin: str = "none",
         related_files: str = "",
         task_id: str = "",
+        source_step: str = "",
+        source_output_ref: str = "",
     ) -> str:
         """Add an agent-discovered constraint. Expires in 48h if not approved."""
         return self._add(
@@ -141,6 +143,8 @@ class ChromaMemoryStore:
             sandbox_origin=sandbox_origin,
             related_files=related_files,
             task_id=task_id,
+            source_step=source_step,
+            source_output_ref=source_output_ref,
             ttl=L0_DISCOVERED_TTL,
         )
 
@@ -154,6 +158,8 @@ class ChromaMemoryStore:
         sandbox_origin: str = "none",
         related_files: str = "",
         task_id: str = "",
+        source_step: str = "",
+        source_output_ref: str = "",
     ) -> str:
         """Add module-level context."""
         return self._add(
@@ -168,6 +174,8 @@ class ChromaMemoryStore:
             sandbox_origin=sandbox_origin,
             related_files=related_files,
             task_id=task_id,
+            source_step=source_step,
+            source_output_ref=source_output_ref,
         )
 
     def add_l2(
@@ -178,6 +186,8 @@ class ChromaMemoryStore:
         *,
         related_files: str = "",
         task_id: str = "",
+        source_step: str = "",
+        source_output_ref: str = "",
     ) -> str:
         """Add ephemeral task context. Auto-expires."""
         return self._add(
@@ -192,6 +202,8 @@ class ChromaMemoryStore:
             sandbox_origin="none",
             related_files=related_files,
             task_id=task_id,
+            source_step=source_step,
+            source_output_ref=source_output_ref,
             ttl=L2_TTL,
         )
 
@@ -208,6 +220,8 @@ class ChromaMemoryStore:
         sandbox_origin: str,
         related_files: str,
         task_id: str,
+        source_step: str = "",
+        source_output_ref: str = "",
         ttl: int | None = None,
     ) -> str:
         """Internal: add an entry to Chroma with full metadata."""
@@ -232,6 +246,8 @@ class ChromaMemoryStore:
                     "mutable": mutable,
                     "created_at": now,
                     "expires_at": expires_at,
+                    "source_step": source_step,
+                    "source_output_ref": source_output_ref,
                 }
             ],
         )
@@ -309,6 +325,8 @@ class ChromaMemoryStore:
                     sandbox_origin=meta.get("sandbox_origin", "none"),
                     mutable=meta.get("mutable", True),
                     score=score,
+                    source_step=meta.get("source_step", ""),
+                    source_output_ref=meta.get("source_output_ref", ""),
                 )
             )
 

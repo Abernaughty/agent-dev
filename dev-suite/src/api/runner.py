@@ -504,6 +504,8 @@ class TaskRunner:
                         sandbox_origin=entry_data.get("sandbox_origin", "locked-down"),
                         related_files=entry_data.get("related_files", ""),
                         task_id=task_id,
+                        source_step=entry_data.get("source_step", ""),
+                        source_output_ref=entry_data.get("source_output_ref", ""),
                     )
                 await self._emit_log(f"[memory] {n_entries} entries pending approval")
             else:
