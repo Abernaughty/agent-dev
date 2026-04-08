@@ -31,8 +31,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
-from pydantic import BaseModel as PydanticBaseModel
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel as PydanticBaseModel
 from sse_starlette import EventSourceResponse
 
 from .auth import require_auth

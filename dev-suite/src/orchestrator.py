@@ -963,7 +963,7 @@ async def _publish_code_async(state: dict) -> dict:
             failed = getattr(sandbox_result, "tests_failed", None)
             if passed is not None or failed is not None:
                 test_summary = f"\n\n### Test Results\n- Passed: {passed or 0}\n- Failed: {failed or 0}\n"
-        pr_body = (f"## Task: `{task_id}`\n\n" + f"{blueprint.instructions}\n\n" + f"### Acceptance Criteria\n{criteria_block}" + f"{test_summary}\n\n" + f"### Files Changed\n" + "\n".join(f"- `{fp['path']}`" for fp in files_payload) + "\n\n---\n_Opened automatically by the agent orchestrator._")
+        pr_body = (f"## Task: `{task_id}`\n\n" + f"{blueprint.instructions}\n\n" + f"### Acceptance Criteria\n{criteria_block}" + f"{test_summary}\n\n" + "### Files Changed\n" + "\n".join(f"- `{fp['path']}`" for fp in files_payload) + "\n\n---\n_Opened automatically by the agent orchestrator._")
         pr_title = f"feat({task_id}): {blueprint.instructions[:80]}"
         if len(blueprint.instructions) > 80:
             pr_title = pr_title[:83] + "..."
