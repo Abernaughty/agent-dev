@@ -14,7 +14,6 @@ import pytest
 
 from src.sandbox.e2b_runner import (
     E2BRunner,
-    SandboxProfile,
     SandboxResult,
     _extract_errors,
     _get_template_id,
