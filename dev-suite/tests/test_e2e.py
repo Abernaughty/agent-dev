@@ -35,17 +35,27 @@ from src.orchestrator import (
 
 @pytest.fixture(autouse=True)
 def _no_tools():
-    """Disable MCP tools for all E2E tests.
+    """Disable MCP tools and GitHub PR operations for all E2E tests.
 
     init_tools_config() discovers mcp-config.json in dev-suite/ and loads
     real tool objects. When tools are present, developer_node/qa_node use
     bind_tools() + a tool-call loop. Patching to return no tools keeps the
     tests focused on the core LLM ainvoke() path that the AsyncMock mocks
     exercise.
+
+    github_pr_provider is also patched to prevent publish_code_node from
+    creating real branches and PRs when GITHUB_TOKEN is set in the
+    environment (root cause of PR #174).
     """
-    with patch(
-        "src.orchestrator.init_tools_config",
-        return_value={"configurable": {"tools": []}},
+    with (
+        patch(
+            "src.orchestrator.init_tools_config",
+            return_value={"configurable": {"tools": []}},
+        ),
+        patch(
+            "src.api.github_prs.github_pr_provider",
+            **{"configured": False},
+        ),
     ):
         yield
 

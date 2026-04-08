@@ -32,6 +32,7 @@ import asyncio
 import logging
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 from ..agents.architect import Blueprint
 from ..orchestrator import (
@@ -176,21 +177,50 @@ class TaskRunner:
         start_time = time.time()
         self._dev_tool_baselines[task_id] = 0
 
-        try:
-            task_workspace = (
-                state_manager.workspace_manager.resolve_workspace(workspace)
-                if workspace
-                else state_manager.workspace_manager.default_root
-            )
-        except ValueError as exc:
-            logger.error("Task %s workspace rejected: %s", task_id, exc)
-            task = state_manager.get_task(task_id)
-            if task:
-                task.status = TaskStatus.FAILED
-                task.error_message = str(exc)
-                task.completed_at = datetime.now(timezone.utc)
-            await self._emit_complete(task_id, "failed", str(exc))
-            return
+        # Issue #153: track whether we created a remote workspace for cleanup
+        _remote_workspace_task_id: str | None = None
+        _remote_workspace_path: Path | None = None
+
+        if workspace_type == "github":
+            from ..github_workspace import setup_remote_workspace
+
+            try:
+                task_workspace = await setup_remote_workspace(
+                    repo=github_repo or "",
+                    branch=github_branch or "main",
+                    task_id=task_id,
+                )
+                _remote_workspace_task_id = task_id
+                _remote_workspace_path = task_workspace
+                # Register as ephemeral — don't persist to config
+                state_manager.workspace_manager.add_directory(
+                    task_workspace, ephemeral=True,
+                )
+            except (ValueError, Exception) as exc:
+                logger.error("Task %s remote workspace setup failed: %s", task_id, exc)
+                task = state_manager.get_task(task_id)
+                if task:
+                    task.status = TaskStatus.FAILED
+                    task.error_message = f"GitHub clone failed: {exc}"
+                    task.completed_at = datetime.now(timezone.utc)
+                await self._emit_complete(task_id, "failed", str(exc))
+                return
+        else:
+            try:
+                task_workspace = (
+                    state_manager.workspace_manager.resolve_workspace(workspace)
+                    if workspace
+                    else state_manager.workspace_manager.default_root
+                )
+            except ValueError as exc:
+                logger.error("Task %s workspace rejected: %s", task_id, exc)
+                task = state_manager.get_task(task_id)
+                if task:
+                    task.status = TaskStatus.FAILED
+                    task.error_message = str(exc)
+                    task.completed_at = datetime.now(timezone.utc)
+                await self._emit_complete(task_id, "failed", str(exc))
+                return
 
         trace_config = create_trace_config(
             enabled=True,
@@ -340,6 +370,21 @@ class TaskRunner:
         finally:
             self._dev_tool_baselines.pop(task_id, None)
             trace_config.flush()
+            # Issue #153: clean up remote workspace
+            if _remote_workspace_task_id:
+                from ..github_workspace import cleanup_remote_workspace
+
+                try:
+                    if _remote_workspace_path:
+                        state_manager.workspace_manager.remove_directory(
+                            _remote_workspace_path,
+                        )
+                    cleanup_remote_workspace(_remote_workspace_task_id)
+                except Exception:
+                    logger.warning(
+                        "Failed to cleanup remote workspace for %s",
+                        _remote_workspace_task_id,
+                    )
 
     async def _handle_node_completion(self, task_id, node_name, node_output, state_manager, prev_node):
         """Process a completed node and emit appropriate SSE events."""

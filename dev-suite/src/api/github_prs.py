@@ -73,6 +73,17 @@ class GitHubPRProvider:
         self._cache: dict[str, _CacheEntry] = {}
         self._client: httpx.AsyncClient | None = None
 
+    @classmethod
+    def for_repo(cls, owner: str, repo: str) -> "GitHubPRProvider":
+        """Create a provider instance targeting a specific repo.
+
+        Uses the same GITHUB_TOKEN but overrides owner/repo.
+        """
+        instance = cls()
+        instance._owner = owner
+        instance._repo = repo
+        return instance
+
     @property
     def configured(self) -> bool:
         return bool(self._token)
