@@ -1,6 +1,11 @@
 {
   "_comment": "MCP server configuration — version pinning + subprocess spawning",
   "last_reviewed": "2026-04-01",
+  "blocked_file_patterns": [
+    ".env", ".env.*", ".env.example",
+    "*.pem", "*.key", "*.p12", "*.pfx",
+    "id_rsa", "id_ed25519"
+  ],
   "servers": {
     "filesystem": {
       "package": "@modelcontextprotocol/server-filesystem",

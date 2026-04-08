@@ -22,6 +22,7 @@ Async rationale (issue #27):
     and enables native async MCPToolProvider in issue #13.
 """
 
+import fnmatch
 import os
 from abc import ABC, abstractmethod
 from pathlib import Path, PurePosixPath
@@ -56,8 +57,42 @@ class PathValidationError(Exception):
     """Raised when a filesystem path escapes the allowed workspace root."""
 
 
+class BlockedPathError(PathValidationError):
+    """Raised when a filesystem path matches a blocked security pattern."""
+
+
 class ToolNotFoundError(Exception):
     """Raised when call_tool is invoked with an unknown tool name."""
+
+
+# -- Secrets Blocklist (issue #157) --
+
+DEFAULT_BLOCKED_PATTERNS: list[str] = [
+    ".env", ".env.*", ".env.example",
+    "*.pem", "*.key", "*.p12", "*.pfx",
+    "id_rsa", "id_ed25519",
+]
+
+
+def is_blocked_path(path: str, patterns: list[str] | None = None) -> bool:
+    """Check if a file path matches any blocked security pattern.
+
+    Matches against the filename component only, so nested paths
+    like 'some/dir/.env' are still caught.
+
+    Args:
+        path: File path to check (relative or absolute).
+        patterns: Glob patterns to match against. Defaults to
+            DEFAULT_BLOCKED_PATTERNS.
+
+    Returns:
+        True if the path matches any blocked pattern.
+    """
+    if patterns is None:
+        patterns = DEFAULT_BLOCKED_PATTERNS
+
+    filename = Path(path).name
+    return any(fnmatch.fnmatch(filename, pattern) for pattern in patterns)
 
 
 # -- Abstract Base Class --
@@ -136,8 +171,13 @@ class LocalToolProvider(ToolProvider):
         github_token: str | None = None,
         github_owner: str | None = None,
         github_repo: str | None = None,
+        blocked_patterns: list[str] | None = None,
     ):
         self.workspace_root = Path(workspace_root).resolve()
+        self._blocked_patterns = (
+            blocked_patterns if blocked_patterns is not None
+            else DEFAULT_BLOCKED_PATTERNS
+        )
 
         # Use explicit value if provided (even empty string),
         # otherwise fall back to environment variable.
@@ -319,8 +359,18 @@ class LocalToolProvider(ToolProvider):
 
     # -- Filesystem operations (private handlers) --
 
+    def _check_blocked(self, path: str) -> None:
+        """Raise BlockedPathError if path matches a blocked pattern."""
+        if is_blocked_path(path, self._blocked_patterns):
+            raise BlockedPathError(
+                f"Access to '{Path(path).name}' is blocked by security "
+                f"policy. Sensitive files (.env, private keys) cannot be "
+                f"read or written by agents."
+            )
+
     async def _filesystem_read(self, path: str) -> str:
         """Read a file within the workspace."""
+        self._check_blocked(path)
         validated = _validate_path(path, self.workspace_root)
 
         if not validated.is_file():
@@ -330,6 +380,7 @@ class LocalToolProvider(ToolProvider):
 
     async def _filesystem_write(self, path: str, content: str) -> str:
         """Write content to a file within the workspace."""
+        self._check_blocked(path)
         validated = _validate_path(path, self.workspace_root)
 
         validated.parent.mkdir(parents=True, exist_ok=True)

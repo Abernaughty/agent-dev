@@ -28,7 +28,14 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 from .mcp_bridge import MCPConfig, MCPConfigError
-from .provider import ToolDefinition, ToolNotFoundError, ToolProvider
+from .provider import (
+    DEFAULT_BLOCKED_PATTERNS,
+    BlockedPathError,
+    ToolDefinition,
+    ToolNotFoundError,
+    ToolProvider,
+    is_blocked_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -174,10 +181,17 @@ class MCPToolProvider(ToolProvider):
           auto-connects first
     """
 
+    # Tool names that operate on filesystem paths (ours + MCP native)
+    _FILESYSTEM_TOOL_NAMES = {
+        "filesystem_read", "filesystem_write", "filesystem_list",
+        "read_file", "write_file", "list_directory",
+    }
+
     def __init__(
         self,
         config: MCPConfig,
         workspace_root: str | Path | None = None,
+        blocked_patterns: list[str] | None = None,
     ):
         """Initialize MCPToolProvider.
 
@@ -185,10 +199,16 @@ class MCPToolProvider(ToolProvider):
             config: Parsed MCP config from mcp-config.json.
             workspace_root: Workspace directory for filesystem servers.
                 Used to expand {workspace} in server args.
+            blocked_patterns: File patterns to block from agent access.
+                Defaults to DEFAULT_BLOCKED_PATTERNS.
         """
         self._config = config
         self._workspace_root = (
             Path(workspace_root).resolve() if workspace_root else None
+        )
+        self._blocked_patterns = (
+            blocked_patterns if blocked_patterns is not None
+            else DEFAULT_BLOCKED_PATTERNS
         )
         self._exit_stack: AsyncExitStack | None = None
         self._connections: dict[str, _ServerConnection] = {}
@@ -456,6 +476,16 @@ class MCPToolProvider(ToolProvider):
             ToolNotFoundError: If no server provides this tool.
         """
         await self._ensure_connected()
+
+        # SEC-3: Block sensitive file access before reaching MCP server
+        if name in self._FILESYSTEM_TOOL_NAMES:
+            file_path = arguments.get("path", "")
+            if file_path and is_blocked_path(file_path, self._blocked_patterns):
+                raise BlockedPathError(
+                    f"Access to '{Path(file_path).name}' is blocked by "
+                    f"security policy. Sensitive files (.env, private keys) "
+                    f"cannot be read or written by agents."
+                )
 
         server_name = self._tool_to_server.get(name)
         if not server_name:
