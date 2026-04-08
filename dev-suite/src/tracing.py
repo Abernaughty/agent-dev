@@ -107,24 +107,35 @@ class TracingConfig:
             yield
             return
 
+        # Build the propagation context manager BEFORE yielding, so
+        # setup errors don't interfere with the caller's exceptions.
+        ctx = None
         try:
             from langfuse import propagate_attributes
 
-            # Build kwargs for propagate_attributes
             kwargs: dict = {}
             if self.session_id:
                 kwargs["session_id"] = self.session_id
             if self.tags:
                 kwargs["tags"] = self.tags
             if self.metadata:
-                # Redact and truncate metadata values
                 safe_meta = {}
                 for k, v in self.metadata.items():
                     val = redact_secrets(str(v)) if isinstance(v, str) else str(v)
                     safe_meta[k] = val[:200]
                 kwargs["metadata"] = safe_meta
 
-            with propagate_attributes(**kwargs):
+            ctx = propagate_attributes(**kwargs)
+        except ImportError:
+            logger.warning(
+                "langfuse.propagate_attributes not available — "
+                "upgrade to langfuse>=3.0 for trace context propagation"
+            )
+        except Exception as e:
+            logger.warning("Failed to propagate trace attributes: %s", e)
+
+        if ctx is not None:
+            with ctx:
                 logger.debug(
                     "Propagating trace attributes: session_id=%s, tags=%s, metadata_keys=%s",
                     self.session_id,
@@ -132,15 +143,7 @@ class TracingConfig:
                     list(self.metadata.keys()) if self.metadata else [],
                 )
                 yield
-
-        except ImportError:
-            logger.warning(
-                "langfuse.propagate_attributes not available — "
-                "upgrade to langfuse>=3.0 for trace context propagation"
-            )
-            yield
-        except Exception as e:
-            logger.warning("Failed to propagate trace attributes: %s", e)
+        else:
             yield
 
     def flush(self) -> None:

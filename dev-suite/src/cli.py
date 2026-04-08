@@ -18,6 +18,7 @@ Environment precedence (highest to lowest):
 """
 
 import argparse
+import asyncio
 import json
 import logging
 import os
@@ -485,7 +486,7 @@ def handle_plan(args: argparse.Namespace) -> int:
 
     start = time.time()
     try:
-        result = workflow.invoke(initial_state, config=invoke_config)
+        result = asyncio.run(workflow.ainvoke(initial_state, config=invoke_config))
     except Exception as e:
         print(f"{C.red('Error:')} Architect failed: {e}")
         return 1

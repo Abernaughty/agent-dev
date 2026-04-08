@@ -4,7 +4,7 @@ Unit tests verify graph construction, routing logic, state management,
 and memory_writes accumulation without calling real LLMs.
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.agents.architect import Blueprint
 from src.agents.qa import FailureReport
@@ -135,15 +135,15 @@ class TestAgentState:
 # -- flush_memory_node Tests --
 
 class TestFlushMemoryNode:
-    def test_flush_no_writes(self):
+    async def test_flush_no_writes(self):
         """flush_memory_node handles empty memory_writes gracefully."""
         state: GraphState = {"trace": [], "memory_writes": []}
-        result = flush_memory_node(state)
+        result = await flush_memory_node(state)
         assert "flush_memory: no writes to flush" in result["trace"]
 
     @patch("src.orchestrator._get_memory_store")
     @patch("src.orchestrator.summarize_writes_sync")
-    def test_flush_writes_to_store(self, mock_summarizer, mock_get_store):
+    async def test_flush_writes_to_store(self, mock_summarizer, mock_get_store):
         """flush_memory_node writes entries to the memory store."""
         mock_store = MagicMock()
         mock_get_store.return_value = mock_store
@@ -157,14 +157,14 @@ class TestFlushMemoryNode:
         mock_summarizer.return_value = writes
 
         state: GraphState = {"trace": [], "memory_writes": writes}
-        result = flush_memory_node(state)
+        result = await flush_memory_node(state)
 
         mock_store.add_l1.assert_called_once()
         assert "flush_memory: wrote 1 entries to store" in result["trace"]
 
     @patch("src.orchestrator._get_memory_store")
     @patch("src.orchestrator.summarize_writes_sync")
-    def test_flush_routes_tiers_correctly(self, mock_summarizer, mock_get_store):
+    async def test_flush_routes_tiers_correctly(self, mock_summarizer, mock_get_store):
         """flush_memory_node routes entries to the correct tier methods."""
         mock_store = MagicMock()
         mock_get_store.return_value = mock_store
@@ -177,7 +177,7 @@ class TestFlushMemoryNode:
         mock_summarizer.return_value = writes
 
         state: GraphState = {"trace": [], "memory_writes": writes}
-        flush_memory_node(state)
+        await flush_memory_node(state)
 
         assert mock_store.add_l1.call_count == 1
         assert mock_store.add_l2.call_count == 1
@@ -185,13 +185,13 @@ class TestFlushMemoryNode:
 
     @patch("src.orchestrator._get_memory_store")
     @patch("src.orchestrator.summarize_writes_sync")
-    def test_flush_survives_store_failure(self, mock_summarizer, mock_get_store):
+    async def test_flush_survives_store_failure(self, mock_summarizer, mock_get_store):
         """flush_memory_node degrades gracefully if store is unreachable."""
         mock_get_store.side_effect = Exception("Chroma unreachable")
         mock_summarizer.return_value = [{"content": "test", "tier": "l1"}]
 
         state: GraphState = {"trace": [], "memory_writes": [{"content": "test", "tier": "l1"}]}
-        result = flush_memory_node(state)
+        result = await flush_memory_node(state)
         assert any("store write failed" in t for t in result["trace"])
 
 
@@ -230,13 +230,13 @@ class TestDeveloperMemoryDedup:
         )
 
     @patch("src.orchestrator._get_developer_llm")
-    def test_no_duplicate_on_retry(self, mock_get_llm):
+    async def test_no_duplicate_on_retry(self, mock_get_llm):
         """On retry, developer should replace its memory entry, not duplicate."""
         mock_llm = MagicMock()
         mock_response = MagicMock()
         mock_response.content = "print('hello')"
         mock_response.usage_metadata = {"total_tokens": 100}
-        mock_llm.invoke.return_value = mock_response
+        mock_llm.ainvoke = AsyncMock(return_value=mock_response)
         mock_get_llm.return_value = mock_llm
 
         bp = self._make_blueprint()
@@ -247,7 +247,7 @@ class TestDeveloperMemoryDedup:
             "retry_count": 0, "tokens_used": 0, "status": WorkflowStatus.BUILDING,
             "blueprint": bp, "generated_code": "", "failure_report": None,
         }
-        result1 = developer_node(state, config=None)
+        result1 = await developer_node(state, config=None)
         dev_entries = [w for w in result1["memory_writes"]
                        if w["source_agent"] == "developer" and w["task_id"] == "test-dedup"]
         assert len(dev_entries) == 1
@@ -259,19 +259,19 @@ class TestDeveloperMemoryDedup:
             "status": WorkflowStatus.BUILDING, "blueprint": bp,
             "generated_code": "", "failure_report": None,
         }
-        result2 = developer_node(state2, config=None)
+        result2 = await developer_node(state2, config=None)
         dev_entries2 = [w for w in result2["memory_writes"]
                         if w["source_agent"] == "developer" and w["task_id"] == "test-dedup"]
         assert len(dev_entries2) == 1, f"Expected 1 developer entry, got {len(dev_entries2)}"
 
     @patch("src.orchestrator._get_developer_llm")
-    def test_dedup_preserves_other_agents(self, mock_get_llm):
+    async def test_dedup_preserves_other_agents(self, mock_get_llm):
         """Dedup only affects developer entries for the same task_id."""
         mock_llm = MagicMock()
         mock_response = MagicMock()
         mock_response.content = "print('hello')"
         mock_response.usage_metadata = {"total_tokens": 100}
-        mock_llm.invoke.return_value = mock_response
+        mock_llm.ainvoke = AsyncMock(return_value=mock_response)
         mock_get_llm.return_value = mock_llm
 
         bp = self._make_blueprint()
@@ -284,7 +284,7 @@ class TestDeveloperMemoryDedup:
             "retry_count": 0, "tokens_used": 0, "status": WorkflowStatus.BUILDING,
             "blueprint": bp, "generated_code": "", "failure_report": None,
         }
-        result = developer_node(state, config=None)
+        result = await developer_node(state, config=None)
         assert len(result["memory_writes"]) == 2
         agents = {w["source_agent"] for w in result["memory_writes"]}
         assert agents == {"qa", "developer"}
