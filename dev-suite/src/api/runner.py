@@ -61,7 +61,7 @@ NODE_TO_AGENT = {
 }
 
 # Infrastructure nodes that get SSE events but aren't mapped to agents
-INFRA_NODES = {"apply_code", "sandbox_validate", "publish_code", "flush_memory"}
+INFRA_NODES = {"gather_context", "apply_code", "sandbox_validate", "publish_code", "flush_memory"}
 
 # Map orchestrator WorkflowStatus to API TaskStatus
 WORKFLOW_TO_TASK_STATUS = {
@@ -393,7 +393,23 @@ class TaskRunner:
         if not task:
             return
 
-        if node_name == "apply_code":
+        if node_name == "gather_context":
+            gathered = node_output.get("gathered_context", [])
+            if gathered:
+                n_files = len(gathered)
+                action = f"Gathered {n_files} source file{'s' if n_files != 1 else ''} for Architect context"
+                task.timeline.append(TimelineEvent(
+                    time=_now_str(), agent="arch", action=action, type="info",
+                ))
+                await self._emit_progress(task_id, "context_gathered", "arch", action)
+                await self._emit_log(f"[gather_context] Reading {n_files} files from workspace...")
+                for ctx in gathered:
+                    suffix = " (truncated)" if ctx.get("truncated") else ""
+                    await self._emit_log(f"[gather_context] + {ctx.get('path', '?')}{suffix}")
+            else:
+                await self._emit_log("[gather_context] No relevant files found in workspace")
+
+        elif node_name == "apply_code":
             parsed_files = node_output.get("parsed_files", [])
             if parsed_files:
                 n_files = len(parsed_files)
