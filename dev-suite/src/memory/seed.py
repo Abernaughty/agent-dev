@@ -58,6 +58,26 @@ def _flatten_rule_entries(config: dict) -> list[tuple[str, str]]:
     return entries
 
 
+def _flatten_categorised_section(
+    config: dict, section: str, module_prefix: str
+) -> list[tuple[str, str]]:
+    """Flatten a section with sub-categories into (content, module) pairs.
+
+    Works for structure, relationships, test_conventions, pipeline,
+    and change_patterns sections which all share the same nested format.
+    """
+    entries: list[tuple[str, str]] = []
+    data = config.get(section, {})
+    for category, items in data.items():
+        module = f"{module_prefix}-{category}"
+        if isinstance(items, list):
+            for item in items:
+                entries.append((str(item), module))
+        elif isinstance(items, str):
+            entries.append((str(items), module))
+    return entries
+
+
 def seed_l0_core(
     store: MemoryStore | None = None,
     yaml_path: Path | None = None,
@@ -100,8 +120,28 @@ def seed_l0_core(
 
     stack_entries = _flatten_stack_entries(config)
     rule_entries = _flatten_rule_entries(config)
+    structure_entries = _flatten_categorised_section(config, "structure", "structure")
+    relationship_entries = _flatten_categorised_section(
+        config, "relationships", "relationships"
+    )
+    test_entries = _flatten_categorised_section(
+        config, "test_conventions", "testing"
+    )
+    pipeline_entries = _flatten_categorised_section(config, "pipeline", "pipeline")
+    pattern_entries = _flatten_categorised_section(
+        config, "change_patterns", "patterns"
+    )
 
-    all_entries = project_entries + stack_entries + rule_entries
+    all_entries = (
+        project_entries
+        + stack_entries
+        + rule_entries
+        + structure_entries
+        + relationship_entries
+        + test_entries
+        + pipeline_entries
+        + pattern_entries
+    )
     count = 0
     for content, module in all_entries:
         store.add_l0_core(content, module=module, source_type="static-config")

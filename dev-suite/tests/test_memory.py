@@ -15,7 +15,13 @@ import pytest
 from src.memory.chroma_store import ChromaMemoryStore
 from src.memory.factory import create_memory_store
 from src.memory.protocol import MemoryEntry, MemoryQueryResult, MemoryStore, MemoryTier
-from src.memory.seed import _flatten_rule_entries, _flatten_stack_entries, _load_yaml, seed_l0_core
+from src.memory.seed import (
+    _flatten_categorised_section,
+    _flatten_rule_entries,
+    _flatten_stack_entries,
+    _load_yaml,
+    seed_l0_core,
+)
 
 
 def _unique_name() -> str:
@@ -266,6 +272,105 @@ class TestYamlConfig:
         assert count2 == 0
         stats = store.stats()
         assert stats["by_tier"]["l0-core"] == count1
+
+
+class TestStructuralEnrichment:
+    """Tests for issue #160: L0-Core structural knowledge entries."""
+
+    def test_yaml_has_structure_section(self):
+        config = _load_yaml()
+        assert "structure" in config
+        assert "monorepo" in config["structure"]
+        assert "orchestrator" in config["structure"]
+        assert "dashboard" in config["structure"]
+        assert "tests" in config["structure"]
+        assert "scripts" in config["structure"]
+
+    def test_yaml_has_relationships_section(self):
+        config = _load_yaml()
+        assert "relationships" in config
+        assert "state" in config["relationships"]
+        assert "data_flow" in config["relationships"]
+        assert "tool_injection" in config["relationships"]
+        assert "workspace" in config["relationships"]
+
+    def test_yaml_has_test_conventions_section(self):
+        config = _load_yaml()
+        assert "test_conventions" in config
+        assert "pytest" in config["test_conventions"]
+        assert "dashboard" in config["test_conventions"]
+        assert "linting" in config["test_conventions"]
+
+    def test_yaml_has_pipeline_section(self):
+        config = _load_yaml()
+        assert "pipeline" in config
+        assert "node_order" in config["pipeline"]
+
+    def test_yaml_has_change_patterns_section(self):
+        config = _load_yaml()
+        assert "change_patterns" in config
+        assert "add_sse_event" in config["change_patterns"]
+        assert "add_graphstate_field" in config["change_patterns"]
+        assert "add_graph_node" in config["change_patterns"]
+        assert "modify_agent_behavior" in config["change_patterns"]
+
+    def test_flatten_structure_entries(self):
+        config = _load_yaml()
+        entries = _flatten_categorised_section(config, "structure", "structure")
+        assert len(entries) > 0
+        modules = {m for _, m in entries}
+        assert "structure-monorepo" in modules
+        assert "structure-orchestrator" in modules
+        assert "structure-dashboard" in modules
+
+    def test_flatten_relationships_entries(self):
+        config = _load_yaml()
+        entries = _flatten_categorised_section(config, "relationships", "relationships")
+        assert len(entries) > 0
+        modules = {m for _, m in entries}
+        assert "relationships-state" in modules
+        assert "relationships-data_flow" in modules
+
+    def test_flatten_pipeline_entries(self):
+        config = _load_yaml()
+        entries = _flatten_categorised_section(config, "pipeline", "pipeline")
+        assert len(entries) > 0
+        assert any("gather_context" in c for c, _ in entries)
+
+    def test_flatten_change_patterns_entries(self):
+        config = _load_yaml()
+        entries = _flatten_categorised_section(config, "change_patterns", "patterns")
+        assert len(entries) > 0
+        modules = {m for _, m in entries}
+        assert "patterns-add_sse_event" in modules
+        assert "patterns-add_graphstate_field" in modules
+
+    def test_seed_includes_structural_entries(self, store):
+        count = seed_l0_core(store=store, force=True)
+        # Should have project(2) + stack + rules + structure + relationships
+        # + test_conventions + pipeline + change_patterns
+        assert count > 30  # was ~25 before, now should be 50+
+        # Verify structural entries are queryable
+        results = store.query("monorepo", tiers=[MemoryTier.L0_CORE])
+        assert len(results) >= 1
+        assert any("monorepo" in r.content.lower() for r in results)
+
+    def test_structural_entries_queryable_by_keyword(self, store):
+        seed_l0_core(store=store, force=True)
+        # Test that key structural concepts are findable
+        for keyword in ["GraphState", "SSE event", "pipeline node", "pytest"]:
+            results = store.query(keyword, tiers=[MemoryTier.L0_CORE], min_score=0.3)
+            assert len(results) >= 1, f"No results for keyword: {keyword}"
+
+    def test_structural_entries_have_correct_metadata(self, store):
+        seed_l0_core(store=store, force=True)
+        results = store.query("orchestrator.py contains", tiers=[MemoryTier.L0_CORE])
+        assert len(results) >= 1
+        r = results[0]
+        assert r.source_type == "static-config"
+        assert r.mutable is False
+        assert r.verified is True
+        assert r.source_agent == "human"
 
 
 class TestConfigBackends:
