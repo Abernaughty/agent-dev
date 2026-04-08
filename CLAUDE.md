@@ -198,10 +198,42 @@ agent-dev/
 - `BACKEND_URL` — API base URL
 - `API_SECRET` — Must match API's secret
 
-## GitHub Workflow
+## GitHub
 
 - **Repo**: Abernaughty/agent-dev
 - **Project board**: github.com/users/Abernaughty/projects/3
-- **PR workflow**: Create PR -> Codex auto-reviews -> fix if needed -> merge
-- **Labels**: 18 configured, 3 milestones (Phase 1/2/3)
+- **Labels**: 18 configured + `claude-fix`, 3 milestones (Phase 1/2/3)
 - **PAT**: Fine-grained for Issues/PRs/Contents; classic for Projects v2 GraphQL
+
+## Git Workflow
+
+Always follow this flow for any code changes:
+
+1. **Branch** — Create a feature branch from `main` (e.g., `feat/issue-79-code-pipeline`, `fix/e2b-template-routing`)
+2. **Develop** — Make changes, commit to the feature branch with conventional commit messages
+3. **Test** — Run `uv run pytest tests/ -v -m "not integration"` (Python) and `pnpm check` (dashboard) before pushing
+4. **Push & PR** — Push the branch and create a PR referencing the issue (e.g., "Closes #79")
+5. **CI + Review** — Wait for CI checks and Claude Review action to complete
+6. **Fix** — Address any CI failures or review feedback with follow-up commits
+7. **Merge** — Only merge after all checks are green
+
+Never commit directly to `main`. Never force-push.
+
+### PR Conventions
+
+- Title: short, imperative (e.g., "Add code application pipeline for Dev agent")
+- Body: use the `## Summary` / `## Test plan` format
+- Always link the issue with `Closes #N` or `Refs #N`
+- One logical change per PR — split unrelated work into separate PRs
+
+### Commit Messages
+
+Follow conventional commits: `feat:`, `fix:`, `refactor:`, `test:`, `docs:`, `chore:`
+
+## Working Style
+
+- **Ask before large changes** — If a task involves more than ~3 files or architectural decisions, discuss the approach first
+- **Run tests before PRs** — Don't create a PR until tests pass locally
+- **Keep PRs focused** — One issue = one PR. Don't bundle unrelated fixes
+- **Use plan mode for complex work** — Start with `/plan` for multi-step tasks to align on approach before writing code
+- **Smoke test after orchestrator changes** — Run `bash scripts/smoke-test.sh --dry-run` after touching anything in `src/orchestrator.py`, `src/agents/`, or `src/sandbox/`
