@@ -162,7 +162,7 @@ echo ""
 CANONICAL_PROMPT='Create a Python function called greet in a new file greet.py that takes a name parameter and returns a greeting string'
 
 echo -e "  Submitting canonical test prompt..."
-TASK_RESPONSE=$(curl_post "$API_URL/tasks" "{\"description\": \"$CANONICAL_PROMPT\"}" 2>/dev/null || echo "")
+TASK_RESPONSE=$(curl_post "$API_URL/tasks" "{\"description\": \"$CANONICAL_PROMPT\", \"create_pr\": false}" 2>/dev/null || echo "")
 
 if [ -z "$TASK_RESPONSE" ]; then
     echo -e "  ${RED}FAILED${NC} -- POST /tasks returned empty response"
