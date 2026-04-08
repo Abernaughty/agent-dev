@@ -34,12 +34,14 @@ from src.tools.mcp_bridge import (
     load_mcp_config,
 )
 from src.tools.provider import (
+    BlockedPathError,
     LocalToolProvider,
     PathValidationError,
     ToolDefinition,
     ToolNotFoundError,
     ToolProvider,
     _validate_path,
+    is_blocked_path,
 )
 
 # ============================================================
@@ -705,3 +707,257 @@ class TestCodexFixes:
         tools = get_tools(provider)
         diff_tool = next(t for t in tools if t.name == "github_read_diff")
         assert "Error" in diff_tool.invoke("not_a_number")
+
+
+# ============================================================
+# Secrets Blocklist (issue #157)
+# ============================================================
+
+
+class TestIsBlockedPath:
+    """Unit tests for the is_blocked_path() utility."""
+
+    def test_env_file(self):
+        assert is_blocked_path(".env") is True
+
+    def test_env_local(self):
+        assert is_blocked_path(".env.local") is True
+
+    def test_env_production(self):
+        assert is_blocked_path(".env.production") is True
+
+    def test_env_example(self):
+        assert is_blocked_path(".env.example") is True
+
+    def test_pem_file(self):
+        assert is_blocked_path("cert.pem") is True
+
+    def test_key_file(self):
+        assert is_blocked_path("private.key") is True
+
+    def test_p12_file(self):
+        assert is_blocked_path("cert.p12") is True
+
+    def test_pfx_file(self):
+        assert is_blocked_path("cert.pfx") is True
+
+    def test_id_rsa(self):
+        assert is_blocked_path("id_rsa") is True
+
+    def test_id_ed25519(self):
+        assert is_blocked_path("id_ed25519") is True
+
+    def test_nested_env_path(self):
+        """Nested paths like 'some/dir/.env' are still caught."""
+        assert is_blocked_path("some/dir/.env") is True
+
+    def test_nested_key_path(self):
+        assert is_blocked_path("config/keys/server.key") is True
+
+    def test_normal_python_file(self):
+        assert is_blocked_path("src/orchestrator.py") is False
+
+    def test_normal_json_file(self):
+        assert is_blocked_path("package.json") is False
+
+    def test_env_in_name_but_not_dotenv(self):
+        """Files with 'env' in the name but not matching patterns pass."""
+        assert is_blocked_path("environment.py") is False
+
+    def test_custom_patterns(self):
+        """Custom patterns override defaults."""
+        assert is_blocked_path("secret.yaml", ["*.yaml"]) is True
+        assert is_blocked_path(".env", ["*.yaml"]) is False
+
+    def test_empty_patterns(self):
+        """Empty pattern list blocks nothing."""
+        assert is_blocked_path(".env", []) is False
+
+
+class TestBlockedPathsLocalProvider:
+    """Test that LocalToolProvider blocks sensitive file access."""
+
+    @pytest.fixture
+    def workspace(self, tmp_path):
+        """Create a workspace with both normal and sensitive files."""
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "main.py").write_text("print('hello')")
+        (tmp_path / ".env").write_text("SECRET_KEY=hunter2")
+        (tmp_path / ".env.local").write_text("LOCAL_SECRET=abc")
+        (tmp_path / ".env.example").write_text("SECRET_KEY=changeme")
+        (tmp_path / "certs").mkdir()
+        (tmp_path / "certs" / "server.pem").write_text("-----BEGIN CERT-----")
+        (tmp_path / "certs" / "server.key").write_text("-----BEGIN KEY-----")
+        return tmp_path
+
+    @pytest.fixture
+    def provider(self, workspace):
+        return LocalToolProvider(workspace_root=workspace)
+
+    async def test_read_env_blocked(self, provider):
+        """Reading .env raises BlockedPathError."""
+        with pytest.raises(BlockedPathError, match="blocked by security"):
+            await provider.call_tool("filesystem_read", {"path": ".env"})
+
+    async def test_read_env_local_blocked(self, provider):
+        with pytest.raises(BlockedPathError):
+            await provider.call_tool("filesystem_read", {"path": ".env.local"})
+
+    async def test_read_env_example_blocked(self, provider):
+        with pytest.raises(BlockedPathError):
+            await provider.call_tool("filesystem_read", {"path": ".env.example"})
+
+    async def test_read_pem_blocked(self, provider):
+        with pytest.raises(BlockedPathError):
+            await provider.call_tool("filesystem_read", {"path": "certs/server.pem"})
+
+    async def test_read_key_blocked(self, provider):
+        with pytest.raises(BlockedPathError):
+            await provider.call_tool("filesystem_read", {"path": "certs/server.key"})
+
+    async def test_write_env_blocked(self, provider):
+        """Writing to .env is also blocked."""
+        with pytest.raises(BlockedPathError):
+            await provider.call_tool(
+                "filesystem_write",
+                {"path": ".env", "content": "LEAKED=true"},
+            )
+
+    async def test_read_normal_file_allowed(self, provider):
+        """Normal files are not blocked."""
+        result = await provider.call_tool(
+            "filesystem_read", {"path": "src/main.py"}
+        )
+        assert "hello" in result
+
+    async def test_list_not_blocked(self, provider):
+        """filesystem_list is not subject to blocklist."""
+        result = await provider.call_tool(
+            "filesystem_list", {"path": "."}
+        )
+        assert "src" in result
+
+    async def test_custom_patterns(self, workspace):
+        """Provider respects custom blocked patterns."""
+        provider = LocalToolProvider(
+            workspace_root=workspace,
+            blocked_patterns=["*.py"],
+        )
+        # .env should now be allowed (not in custom patterns)
+        result = await provider.call_tool(
+            "filesystem_read", {"path": ".env"}
+        )
+        assert "SECRET_KEY" in result
+        # But .py files should be blocked
+        with pytest.raises(BlockedPathError):
+            await provider.call_tool(
+                "filesystem_read", {"path": "src/main.py"}
+            )
+
+
+class TestBlockedPathsMCPProvider:
+    """Test that MCPToolProvider blocks sensitive paths before MCP call."""
+
+    async def test_mcp_provider_blocks_read_file(self):
+        """MCPToolProvider intercepts filesystem reads before MCP server."""
+        config = MagicMock(spec=MCPConfig)
+        config.servers = {}
+
+        from src.tools.mcp_provider import MCPToolProvider
+
+        provider = MCPToolProvider(
+            config=config, workspace_root="/tmp/test"
+        )
+        # Manually mark connected + add tool mapping so call_tool proceeds
+        provider._connected = True
+        provider._tool_to_server["read_file"] = "filesystem"
+
+        with pytest.raises(BlockedPathError, match="blocked by security"):
+            await provider.call_tool("read_file", {"path": ".env"})
+
+    async def test_mcp_provider_blocks_write_file(self):
+        config = MagicMock(spec=MCPConfig)
+        config.servers = {}
+
+        from src.tools.mcp_provider import MCPToolProvider
+
+        provider = MCPToolProvider(
+            config=config, workspace_root="/tmp/test"
+        )
+        provider._connected = True
+        provider._tool_to_server["write_file"] = "filesystem"
+
+        with pytest.raises(BlockedPathError):
+            await provider.call_tool(
+                "write_file", {"path": "secrets.key", "content": "data"}
+            )
+
+    async def test_mcp_provider_allows_normal_file(self):
+        """Non-blocked files pass through to server routing."""
+        config = MagicMock(spec=MCPConfig)
+        config.servers = {}
+
+        from src.tools.mcp_provider import MCPToolProvider
+
+        provider = MCPToolProvider(
+            config=config, workspace_root="/tmp/test"
+        )
+        provider._connected = True
+        # Tool not mapped to any server — will raise ToolNotFoundError
+        # (proving the blocklist did NOT intercept it)
+        with pytest.raises(ToolNotFoundError):
+            await provider.call_tool(
+                "read_file", {"path": "src/main.py"}
+            )
+
+    async def test_mcp_provider_custom_patterns(self):
+        """MCPToolProvider respects custom blocked patterns."""
+        config = MagicMock(spec=MCPConfig)
+        config.servers = {}
+
+        from src.tools.mcp_provider import MCPToolProvider
+
+        provider = MCPToolProvider(
+            config=config,
+            workspace_root="/tmp/test",
+            blocked_patterns=["*.yaml"],
+        )
+        provider._connected = True
+        provider._tool_to_server["read_file"] = "filesystem"
+
+        # .yaml should be blocked
+        with pytest.raises(BlockedPathError):
+            await provider.call_tool("read_file", {"path": "secrets.yaml"})
+
+        # .env should pass the blocklist (not in custom patterns).
+        # It will then fail at server routing (no actual connection),
+        # proving the blocklist did NOT intercept it.
+        mock_conn = MagicMock()
+        mock_result = MagicMock()
+        mock_result.content = [MagicMock(text="file contents")]
+        mock_conn.session.call_tool = AsyncMock(return_value=mock_result)
+        provider._connections["filesystem"] = mock_conn
+
+        result = await provider.call_tool("read_file", {"path": ".env"})
+        assert result == "file contents"
+
+
+class TestBlockedPatternsConfig:
+    """Test that blocked patterns flow from config to providers."""
+
+    def test_mcp_config_loads_blocked_patterns(self, tmp_path):
+        """MCPConfig.blocked_file_patterns returns config value."""
+        config_file = tmp_path / "mcp-config.json"
+        config_file.write_text(json.dumps({
+            "servers": {},
+            "blocked_file_patterns": [".env", "*.key"],
+        }))
+        config = MCPConfig(config_file)
+        assert config.blocked_file_patterns == [".env", "*.key"]
+
+    def test_mcp_config_missing_blocked_patterns(self, tmp_path):
+        """Missing blocked_file_patterns returns None."""
+        config_file = tmp_path / "mcp-config.json"
+        config_file.write_text(json.dumps({"servers": {}}))
+        config = MCPConfig(config_file)
+        assert config.blocked_file_patterns is None

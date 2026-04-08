@@ -69,6 +69,11 @@ class MCPConfig:
         return self._data.get("servers", {})
 
     @property
+    def blocked_file_patterns(self) -> list[str] | None:
+        """Return blocked file patterns from config, or None if absent."""
+        return self._data.get("blocked_file_patterns")
+
+    @property
     def last_reviewed(self) -> str:
         """Return the last review date."""
         return self._data.get("last_reviewed", "unknown")
@@ -148,6 +153,8 @@ def create_provider(
     provider_type = os.getenv("TOOL_PROVIDER", "local").lower()
     fallback = os.getenv("TOOL_PROVIDER_FALLBACK", "local").lower()
 
+    blocked_patterns = config.blocked_file_patterns
+
     if provider_type == "mcp":
         try:
             from .mcp_provider import MCPToolProvider
@@ -155,6 +162,7 @@ def create_provider(
             provider = MCPToolProvider(
                 config=config,
                 workspace_root=workspace_root,
+                blocked_patterns=blocked_patterns,
             )
             # Validate commands and env vars exist before returning.
             # Without this, failures would only surface on first
@@ -176,7 +184,10 @@ def create_provider(
     if provider_type == "local":
         from .provider import LocalToolProvider
 
-        return LocalToolProvider(workspace_root=workspace_root)
+        return LocalToolProvider(
+            workspace_root=workspace_root,
+            blocked_patterns=blocked_patterns,
+        )
 
     raise MCPConfigError(
         f"Unknown TOOL_PROVIDER value: '{provider_type}'. "
