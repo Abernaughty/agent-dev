@@ -340,3 +340,71 @@ class TestEnrichedApprovals:
         assert p["sandbox_origin"] == "locked-down"
         assert p["related_files"] == "src/middleware/rateLimit.js"
         assert p["task_id"] == "auth-task"
+
+
+# ============================================================
+# Context Links (issue #110)
+# ============================================================
+
+
+class TestContextLinks:
+    """Test source_step and source_output_ref round-trip through Chroma."""
+
+    def test_l1_context_fields_stored_and_queried(self, store):
+        store.add_l1(
+            "Implemented auth middleware",
+            module="auth",
+            source_agent="developer",
+            source_step="developer",
+            source_output_ref="Implemented: Add JWT validation middleware",
+        )
+        results = store.query("auth middleware", module="auth")
+        assert len(results) >= 1
+        assert results[0].source_step == "developer"
+        assert results[0].source_output_ref == "Implemented: Add JWT validation middleware"
+
+    def test_l0_discovered_context_fields(self, store):
+        store.add_l0_discovered(
+            "Missing rate limiter",
+            module="api",
+            source_agent="qa",
+            source_step="qa",
+            source_output_ref="Architectural: No rate limiting on public endpoints",
+        )
+        results = store.query("rate limiter", module="api")
+        assert len(results) >= 1
+        assert results[0].source_step == "qa"
+        assert results[0].source_output_ref == "Architectural: No rate limiting on public endpoints"
+
+    def test_l2_context_fields(self, store):
+        store.add_l2(
+            "QA passed for task-42",
+            module="global",
+            source_agent="qa",
+            source_step="qa",
+            source_output_ref="QA passed: 12 tests passed",
+        )
+        results = store.query("QA passed task-42")
+        assert len(results) >= 1
+        assert results[0].source_step == "qa"
+        assert results[0].source_output_ref == "QA passed: 12 tests passed"
+
+    def test_backward_compat_missing_fields(self, store):
+        """Entries without context fields default to empty string."""
+        store.add_l1("Legacy entry without context", module="legacy")
+        results = store.query("Legacy entry", module="legacy")
+        assert len(results) >= 1
+        assert results[0].source_step == ""
+        assert results[0].source_output_ref == ""
+
+    def test_memory_entry_model_has_fields(self):
+        """MemoryEntry model includes new fields with defaults."""
+        entry = MemoryEntry(content="test", tier=MemoryTier.L1)
+        assert entry.source_step == ""
+        assert entry.source_output_ref == ""
+
+    def test_memory_query_result_has_fields(self):
+        """MemoryQueryResult model includes new fields with defaults."""
+        result = MemoryQueryResult(content="test", tier="l1")
+        assert result.source_step == ""
+        assert result.source_output_ref == ""

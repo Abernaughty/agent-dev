@@ -60,6 +60,8 @@ class MemoryEntry(BaseModel):
     mutable: bool = True  # false for L0-Core static entries
     created_at: float = 0.0
     expires_at: float = 0.0  # 0.0 = never
+    source_step: str = ""  # orchestrator node: developer | qa | architect | sandbox_validate
+    source_output_ref: str = ""  # brief context snippet for approval UI
 
 
 class MemoryQueryResult(BaseModel):
@@ -77,6 +79,8 @@ class MemoryQueryResult(BaseModel):
     sandbox_origin: str = "none"
     mutable: bool = True
     score: float = 0.0  # similarity score (1.0 = exact match)
+    source_step: str = ""
+    source_output_ref: str = ""
 
 
 # ── TTL Constants ──
@@ -121,6 +125,8 @@ class MemoryStore(Protocol):
         sandbox_origin: str = "none",
         related_files: str = "",
         task_id: str = "",
+        source_step: str = "",
+        source_output_ref: str = "",
     ) -> str:
         """Add an agent-discovered constraint. Expires in 48h if not approved."""
         ...
@@ -135,6 +141,8 @@ class MemoryStore(Protocol):
         sandbox_origin: str = "none",
         related_files: str = "",
         task_id: str = "",
+        source_step: str = "",
+        source_output_ref: str = "",
     ) -> str:
         """Add module-level context."""
         ...
@@ -147,6 +155,8 @@ class MemoryStore(Protocol):
         *,
         related_files: str = "",
         task_id: str = "",
+        source_step: str = "",
+        source_output_ref: str = "",
     ) -> str:
         """Add ephemeral task context. Auto-expires."""
         ...

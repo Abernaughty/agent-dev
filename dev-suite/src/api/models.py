@@ -164,6 +164,8 @@ class MemoryEntryResponse(BaseModel):
     confidence: float = 0.0
     sandbox: str = "locked-down"
     related_files: list[str] = []
+    source_step: str = ""
+    source_output_ref: str = ""
 
 
 class MemoryAction(BaseModel):

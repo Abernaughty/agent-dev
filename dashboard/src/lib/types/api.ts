@@ -165,6 +165,8 @@ export interface MemoryEntry {
 	confidence: number;
 	sandbox: string;
 	related_files: string[];
+	source_step: string;
+	source_output_ref: string;
 }
 
 export interface MemoryActionRequest {

@@ -198,6 +198,8 @@ class StateManager:
         sandbox_origin: str = "locked-down",
         related_files: str = "",
         task_id: str = "",
+        source_step: str = "",
+        source_output_ref: str = "",
     ) -> MemoryEntryResponse:
         """Create a memory entry from flush_memory output and emit SSE event.
 
@@ -239,6 +241,8 @@ class StateManager:
             confidence=confidence,
             sandbox=sandbox_origin,
             related_files=files_list,
+            source_step=source_step,
+            source_output_ref=source_output_ref,
         )
 
         self._memory[entry_id] = entry
@@ -257,6 +261,8 @@ class StateManager:
             "related_files": files_list,
             "expires_at": expires_at,
             "hours_remaining": hours_remaining,
+            "source_step": source_step,
+            "source_output_ref": source_output_ref,
         })
 
         return entry
