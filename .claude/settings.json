@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if echo \"$CLAUDE_TOOL_INPUT\" | jq -r '.command' 2>/dev/null | grep -qE 'git\\s+push.*\\b(origin|upstream)\\s+main\\b'; then echo 'BLOCKED: Direct push to main. Use a PR instead.' >&2; exit 2; fi"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "FILE=$(echo \"$CLAUDE_TOOL_INPUT\" | jq -r '.file_path' 2>/dev/null); if echo \"$FILE\" | grep -q '\\.py$'; then cd /home/maber/Documents/GitHub/agent-dev/dev-suite && uv run ruff format \"$FILE\" 2>/dev/null && uv run ruff check --fix \"$FILE\" 2>/dev/null; exit 0; fi"
+          }
+        ]
+      }
+    ]
+  }
+}
