@@ -9,7 +9,6 @@ from pathlib import Path
 import pytest
 
 from src.orchestrator import (
-    CONTEXT_BUDGET_CHARS,
     GraphState,
     WorkflowStatus,
     _infer_relevant_files,
@@ -17,7 +16,6 @@ from src.orchestrator import (
     _truncate_file,
     gather_context_node,
 )
-
 
 # -- Helpers --
 
