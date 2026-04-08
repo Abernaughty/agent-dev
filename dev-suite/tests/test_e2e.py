@@ -14,7 +14,7 @@ by mocking LLM responses with realistic payloads. They validate:
 No API keys needed -- all LLM calls are mocked.
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -39,9 +39,9 @@ def _no_tools():
 
     init_tools_config() discovers mcp-config.json in dev-suite/ and loads
     real tool objects. When tools are present, developer_node/qa_node use
-    bind_tools() + ainvoke() (async), but the LLM mocks use MagicMock
-    which can't be awaited. Patching to return no tools forces the sync
-    invoke() path that the mocks expect.
+    bind_tools() + a tool-call loop. Patching to return no tools keeps the
+    tests focused on the core LLM ainvoke() path that the AsyncMock mocks
+    exercise.
     """
     with patch(
         "src.orchestrator.init_tools_config",
@@ -135,9 +135,9 @@ class TestE2EHappyPath:
     @patch("src.orchestrator._get_architect_llm")
     def test_full_pipeline_pass(self, mock_arch_llm, mock_dev_llm, mock_qa_llm, mock_memory):
         mock_memory.return_value = ["Project uses Python 3.13", "Use type hints everywhere"]
-        mock_arch_llm.return_value.invoke.return_value = _make_llm_response(SAMPLE_BLUEPRINT.model_dump_json(), total_tokens=800)
-        mock_dev_llm.return_value.invoke.return_value = _make_llm_response(SAMPLE_CODE, total_tokens=1200)
-        mock_qa_llm.return_value.invoke.return_value = _make_llm_response(SAMPLE_QA_PASS.model_dump_json(), total_tokens=400)
+        mock_arch_llm.return_value.ainvoke = AsyncMock(return_value=_make_llm_response(SAMPLE_BLUEPRINT.model_dump_json(), total_tokens=800))
+        mock_dev_llm.return_value.ainvoke = AsyncMock(return_value=_make_llm_response(SAMPLE_CODE, total_tokens=1200))
+        mock_qa_llm.return_value.ainvoke = AsyncMock(return_value=_make_llm_response(SAMPLE_QA_PASS.model_dump_json(), total_tokens=400))
         result = run_task("Create a Python function that validates email addresses", enable_tracing=False)
         assert result.status == WorkflowStatus.PASSED
         assert result.retry_count == 0
@@ -158,11 +158,11 @@ class TestE2EHappyPath:
     @patch("src.orchestrator._get_architect_llm")
     def test_memory_context_included_in_architect_prompt(self, mock_arch_llm, mock_dev_llm, mock_qa_llm, mock_memory):
         mock_memory.return_value = ["Framework: SvelteKit", "Database: CosmosDB"]
-        mock_arch_llm.return_value.invoke.return_value = _make_llm_response(SAMPLE_BLUEPRINT.model_dump_json())
-        mock_dev_llm.return_value.invoke.return_value = _make_llm_response(SAMPLE_CODE)
-        mock_qa_llm.return_value.invoke.return_value = _make_llm_response(SAMPLE_QA_PASS.model_dump_json())
+        mock_arch_llm.return_value.ainvoke = AsyncMock(return_value=_make_llm_response(SAMPLE_BLUEPRINT.model_dump_json()))
+        mock_dev_llm.return_value.ainvoke = AsyncMock(return_value=_make_llm_response(SAMPLE_CODE))
+        mock_qa_llm.return_value.ainvoke = AsyncMock(return_value=_make_llm_response(SAMPLE_QA_PASS.model_dump_json()))
         result = run_task("Build a new endpoint", enable_tracing=False)
-        arch_call_args = mock_arch_llm.return_value.invoke.call_args[0][0]
+        arch_call_args = mock_arch_llm.return_value.ainvoke.call_args[0][0]
         system_msg = arch_call_args[0].content
         assert "SvelteKit" in system_msg
         assert "CosmosDB" in system_msg
@@ -179,14 +179,14 @@ class TestE2ERetryPath:
     @patch("src.orchestrator._get_architect_llm")
     def test_retry_then_pass(self, mock_arch_llm, mock_dev_llm, mock_qa_llm, mock_memory):
         mock_memory.return_value = []
-        mock_arch_llm.return_value.invoke.return_value = _make_llm_response(SAMPLE_BLUEPRINT.model_dump_json(), total_tokens=800)
-        mock_dev_llm.return_value.invoke.return_value = _make_llm_response(SAMPLE_CODE, total_tokens=1200)
-        mock_qa_llm.return_value.invoke.side_effect = [_make_llm_response(SAMPLE_QA_FAIL.model_dump_json(), total_tokens=400), _make_llm_response(SAMPLE_QA_PASS.model_dump_json(), total_tokens=400)]
+        mock_arch_llm.return_value.ainvoke = AsyncMock(return_value=_make_llm_response(SAMPLE_BLUEPRINT.model_dump_json(), total_tokens=800))
+        mock_dev_llm.return_value.ainvoke = AsyncMock(return_value=_make_llm_response(SAMPLE_CODE, total_tokens=1200))
+        mock_qa_llm.return_value.ainvoke = AsyncMock(side_effect=[_make_llm_response(SAMPLE_QA_FAIL.model_dump_json(), total_tokens=400), _make_llm_response(SAMPLE_QA_PASS.model_dump_json(), total_tokens=400)])
         result = run_task("Create email validator", enable_tracing=False)
         assert result.status == WorkflowStatus.PASSED
         assert result.retry_count == 1
-        assert mock_dev_llm.return_value.invoke.call_count == 2
-        assert mock_qa_llm.return_value.invoke.call_count == 2
+        assert mock_dev_llm.return_value.ainvoke.call_count == 2
+        assert mock_qa_llm.return_value.ainvoke.call_count == 2
 
     @patch("src.orchestrator._fetch_memory_context")
     @patch("src.orchestrator._get_qa_llm")
@@ -194,11 +194,11 @@ class TestE2ERetryPath:
     @patch("src.orchestrator._get_architect_llm")
     def test_failure_report_included_in_retry(self, mock_arch_llm, mock_dev_llm, mock_qa_llm, mock_memory):
         mock_memory.return_value = []
-        mock_arch_llm.return_value.invoke.return_value = _make_llm_response(SAMPLE_BLUEPRINT.model_dump_json())
-        mock_dev_llm.return_value.invoke.return_value = _make_llm_response(SAMPLE_CODE)
-        mock_qa_llm.return_value.invoke.side_effect = [_make_llm_response(SAMPLE_QA_FAIL.model_dump_json()), _make_llm_response(SAMPLE_QA_PASS.model_dump_json())]
+        mock_arch_llm.return_value.ainvoke = AsyncMock(return_value=_make_llm_response(SAMPLE_BLUEPRINT.model_dump_json()))
+        mock_dev_llm.return_value.ainvoke = AsyncMock(return_value=_make_llm_response(SAMPLE_CODE))
+        mock_qa_llm.return_value.ainvoke = AsyncMock(side_effect=[_make_llm_response(SAMPLE_QA_FAIL.model_dump_json()), _make_llm_response(SAMPLE_QA_PASS.model_dump_json())])
         result = run_task("Create email validator", enable_tracing=False)
-        dev_calls = mock_dev_llm.return_value.invoke.call_args_list
+        dev_calls = mock_dev_llm.return_value.ainvoke.call_args_list
         assert len(dev_calls) == 2
         retry_msg = dev_calls[1][0][0][1].content
         # Issue #125: retry prompt now uses structured RETRY CONTEXT format
@@ -218,14 +218,14 @@ class TestE2EEscalation:
     @patch("src.orchestrator._get_architect_llm")
     def test_escalation_to_architect(self, mock_arch_llm, mock_dev_llm, mock_qa_llm, mock_memory):
         mock_memory.return_value = []
-        mock_arch_llm.return_value.invoke.return_value = _make_llm_response(SAMPLE_BLUEPRINT.model_dump_json(), total_tokens=800)
-        mock_dev_llm.return_value.invoke.return_value = _make_llm_response(SAMPLE_CODE, total_tokens=1200)
-        mock_qa_llm.return_value.invoke.side_effect = [_make_llm_response(SAMPLE_QA_ESCALATE.model_dump_json(), total_tokens=400), _make_llm_response(SAMPLE_QA_PASS.model_dump_json(), total_tokens=400)]
+        mock_arch_llm.return_value.ainvoke = AsyncMock(return_value=_make_llm_response(SAMPLE_BLUEPRINT.model_dump_json(), total_tokens=800))
+        mock_dev_llm.return_value.ainvoke = AsyncMock(return_value=_make_llm_response(SAMPLE_CODE, total_tokens=1200))
+        mock_qa_llm.return_value.ainvoke = AsyncMock(side_effect=[_make_llm_response(SAMPLE_QA_ESCALATE.model_dump_json(), total_tokens=400), _make_llm_response(SAMPLE_QA_PASS.model_dump_json(), total_tokens=400)])
         result = run_task("Create email validator", enable_tracing=False)
         assert result.status == WorkflowStatus.PASSED
-        assert mock_arch_llm.return_value.invoke.call_count == 2
-        assert mock_dev_llm.return_value.invoke.call_count == 2
-        assert mock_qa_llm.return_value.invoke.call_count == 2
+        assert mock_arch_llm.return_value.ainvoke.call_count == 2
+        assert mock_dev_llm.return_value.ainvoke.call_count == 2
+        assert mock_qa_llm.return_value.ainvoke.call_count == 2
 
     @patch("src.orchestrator._fetch_memory_context")
     @patch("src.orchestrator._get_qa_llm")
@@ -233,11 +233,11 @@ class TestE2EEscalation:
     @patch("src.orchestrator._get_architect_llm")
     def test_escalation_includes_failure_in_architect_prompt(self, mock_arch_llm, mock_dev_llm, mock_qa_llm, mock_memory):
         mock_memory.return_value = []
-        mock_arch_llm.return_value.invoke.return_value = _make_llm_response(SAMPLE_BLUEPRINT.model_dump_json())
-        mock_dev_llm.return_value.invoke.return_value = _make_llm_response(SAMPLE_CODE)
-        mock_qa_llm.return_value.invoke.side_effect = [_make_llm_response(SAMPLE_QA_ESCALATE.model_dump_json()), _make_llm_response(SAMPLE_QA_PASS.model_dump_json())]
+        mock_arch_llm.return_value.ainvoke = AsyncMock(return_value=_make_llm_response(SAMPLE_BLUEPRINT.model_dump_json()))
+        mock_dev_llm.return_value.ainvoke = AsyncMock(return_value=_make_llm_response(SAMPLE_CODE))
+        mock_qa_llm.return_value.ainvoke = AsyncMock(side_effect=[_make_llm_response(SAMPLE_QA_ESCALATE.model_dump_json()), _make_llm_response(SAMPLE_QA_PASS.model_dump_json())])
         result = run_task("Create email validator", enable_tracing=False)
-        arch_calls = mock_arch_llm.return_value.invoke.call_args_list
+        arch_calls = mock_arch_llm.return_value.ainvoke.call_args_list
         assert len(arch_calls) == 2
         replan_msg = arch_calls[1][0][0][1].content
         assert "PREVIOUS ATTEMPT FAILED" in replan_msg
@@ -255,13 +255,13 @@ class TestE2EBudgetLimits:
     @patch("src.orchestrator._get_architect_llm")
     def test_max_retries_stops_pipeline(self, mock_arch_llm, mock_dev_llm, mock_qa_llm, mock_memory):
         mock_memory.return_value = []
-        mock_arch_llm.return_value.invoke.return_value = _make_llm_response(SAMPLE_BLUEPRINT.model_dump_json(), total_tokens=100)
-        mock_dev_llm.return_value.invoke.return_value = _make_llm_response(SAMPLE_CODE, total_tokens=100)
-        mock_qa_llm.return_value.invoke.return_value = _make_llm_response(SAMPLE_QA_FAIL.model_dump_json(), total_tokens=100)
+        mock_arch_llm.return_value.ainvoke = AsyncMock(return_value=_make_llm_response(SAMPLE_BLUEPRINT.model_dump_json(), total_tokens=100))
+        mock_dev_llm.return_value.ainvoke = AsyncMock(return_value=_make_llm_response(SAMPLE_CODE, total_tokens=100))
+        mock_qa_llm.return_value.ainvoke = AsyncMock(return_value=_make_llm_response(SAMPLE_QA_FAIL.model_dump_json(), total_tokens=100))
         result = run_task("Create email validator", enable_tracing=False)
         assert result.retry_count >= MAX_RETRIES
         assert result.status != WorkflowStatus.PASSED
-        assert mock_dev_llm.return_value.invoke.call_count == MAX_RETRIES
+        assert mock_dev_llm.return_value.ainvoke.call_count == MAX_RETRIES
 
     @patch("src.orchestrator.TOKEN_BUDGET", 1000)
     @patch("src.orchestrator._fetch_memory_context")
@@ -270,9 +270,9 @@ class TestE2EBudgetLimits:
     @patch("src.orchestrator._get_architect_llm")
     def test_token_budget_stops_pipeline(self, mock_arch_llm, mock_dev_llm, mock_qa_llm, mock_memory):
         mock_memory.return_value = []
-        mock_arch_llm.return_value.invoke.return_value = _make_llm_response(SAMPLE_BLUEPRINT.model_dump_json(), total_tokens=400)
-        mock_dev_llm.return_value.invoke.return_value = _make_llm_response(SAMPLE_CODE, total_tokens=400)
-        mock_qa_llm.return_value.invoke.return_value = _make_llm_response(SAMPLE_QA_FAIL.model_dump_json(), total_tokens=400)
+        mock_arch_llm.return_value.ainvoke = AsyncMock(return_value=_make_llm_response(SAMPLE_BLUEPRINT.model_dump_json(), total_tokens=400))
+        mock_dev_llm.return_value.ainvoke = AsyncMock(return_value=_make_llm_response(SAMPLE_CODE, total_tokens=400))
+        mock_qa_llm.return_value.ainvoke = AsyncMock(return_value=_make_llm_response(SAMPLE_QA_FAIL.model_dump_json(), total_tokens=400))
         result = run_task("Create email validator", enable_tracing=False)
         assert result.tokens_used >= 1000
 
@@ -284,11 +284,11 @@ class TestE2ENodeFunctions:
 
     @patch("src.orchestrator._fetch_memory_context")
     @patch("src.orchestrator._get_architect_llm")
-    def test_architect_node_produces_blueprint(self, mock_llm, mock_memory):
+    async def test_architect_node_produces_blueprint(self, mock_llm, mock_memory):
         mock_memory.return_value = ["Use Python 3.13"]
-        mock_llm.return_value.invoke.return_value = _make_llm_response(SAMPLE_BLUEPRINT.model_dump_json(), total_tokens=500)
+        mock_llm.return_value.ainvoke = AsyncMock(return_value=_make_llm_response(SAMPLE_BLUEPRINT.model_dump_json(), total_tokens=500))
         state = {"task_description": "Create email validator", "trace": [], "tokens_used": 0, "retry_count": 0}
-        result = architect_node(state)
+        result = await architect_node(state)
         assert result["status"] == WorkflowStatus.BUILDING
         assert result["blueprint"].task_id == "e2e-test-001"
         assert len(result["blueprint"].target_files) == 1
@@ -296,48 +296,48 @@ class TestE2ENodeFunctions:
         assert len(result["memory_context"]) == 1
 
     @patch("src.orchestrator._get_developer_llm")
-    def test_developer_node_generates_code(self, mock_llm):
-        mock_llm.return_value.invoke.return_value = _make_llm_response(SAMPLE_CODE, total_tokens=1200)
+    async def test_developer_node_generates_code(self, mock_llm):
+        mock_llm.return_value.ainvoke = AsyncMock(return_value=_make_llm_response(SAMPLE_CODE, total_tokens=1200))
         state = {"task_description": "Create email validator", "blueprint": SAMPLE_BLUEPRINT, "status": WorkflowStatus.BUILDING, "trace": [], "tokens_used": 0, "retry_count": 0}
-        result = developer_node(state)
+        result = await developer_node(state)
         assert result["status"] == WorkflowStatus.REVIEWING
         assert "validate_email" in result["generated_code"]
         assert result["tokens_used"] == 1200
 
     @patch("src.orchestrator._get_qa_llm")
-    def test_qa_node_returns_pass(self, mock_llm):
-        mock_llm.return_value.invoke.return_value = _make_llm_response(SAMPLE_QA_PASS.model_dump_json(), total_tokens=400)
+    async def test_qa_node_returns_pass(self, mock_llm):
+        mock_llm.return_value.ainvoke = AsyncMock(return_value=_make_llm_response(SAMPLE_QA_PASS.model_dump_json(), total_tokens=400))
         state = {"task_description": "Create email validator", "blueprint": SAMPLE_BLUEPRINT, "generated_code": SAMPLE_CODE, "status": WorkflowStatus.REVIEWING, "trace": [], "tokens_used": 0, "retry_count": 0}
-        result = qa_node(state)
+        result = await qa_node(state)
         assert result["status"] == WorkflowStatus.PASSED
         assert result["failure_report"].status == "pass"
         assert result["failure_report"].tests_passed == 4
 
     @patch("src.orchestrator._get_qa_llm")
-    def test_qa_node_returns_fail(self, mock_llm):
-        mock_llm.return_value.invoke.return_value = _make_llm_response(SAMPLE_QA_FAIL.model_dump_json(), total_tokens=400)
+    async def test_qa_node_returns_fail(self, mock_llm):
+        mock_llm.return_value.ainvoke = AsyncMock(return_value=_make_llm_response(SAMPLE_QA_FAIL.model_dump_json(), total_tokens=400))
         state = {"task_description": "Create email validator", "blueprint": SAMPLE_BLUEPRINT, "generated_code": SAMPLE_CODE, "status": WorkflowStatus.REVIEWING, "retry_count": 0, "trace": [], "tokens_used": 0}
-        result = qa_node(state)
+        result = await qa_node(state)
         assert result["status"] == WorkflowStatus.REVIEWING
         assert result["failure_report"].status == "fail"
         assert result["retry_count"] == 1
 
     @patch("src.orchestrator._get_qa_llm")
-    def test_qa_node_returns_escalate(self, mock_llm):
-        mock_llm.return_value.invoke.return_value = _make_llm_response(SAMPLE_QA_ESCALATE.model_dump_json(), total_tokens=400)
+    async def test_qa_node_returns_escalate(self, mock_llm):
+        mock_llm.return_value.ainvoke = AsyncMock(return_value=_make_llm_response(SAMPLE_QA_ESCALATE.model_dump_json(), total_tokens=400))
         state = {"task_description": "Create email validator", "blueprint": SAMPLE_BLUEPRINT, "generated_code": SAMPLE_CODE, "status": WorkflowStatus.REVIEWING, "retry_count": 0, "trace": [], "tokens_used": 0}
-        result = qa_node(state)
+        result = await qa_node(state)
         assert result["status"] == WorkflowStatus.ESCALATED
         assert result["failure_report"].is_architectural is True
 
     @patch("src.orchestrator._get_architect_llm")
     @patch("src.orchestrator._fetch_memory_context")
-    def test_architect_handles_json_in_code_fence(self, mock_memory, mock_llm):
+    async def test_architect_handles_json_in_code_fence(self, mock_memory, mock_llm):
         mock_memory.return_value = []
         fenced_json = f"```json\n{SAMPLE_BLUEPRINT.model_dump_json()}\n```"
-        mock_llm.return_value.invoke.return_value = _make_llm_response(fenced_json)
+        mock_llm.return_value.ainvoke = AsyncMock(return_value=_make_llm_response(fenced_json))
         state = {"task_description": "Create email validator", "trace": [], "tokens_used": 0, "retry_count": 0}
-        result = architect_node(state)
+        result = await architect_node(state)
         assert result["status"] == WorkflowStatus.BUILDING
         assert result["blueprint"].task_id == "e2e-test-001"
 
@@ -381,9 +381,9 @@ class TestE2ETracingIntegration:
     @patch("src.orchestrator._get_architect_llm")
     def test_tracing_disabled_runs_cleanly(self, mock_arch_llm, mock_dev_llm, mock_qa_llm, mock_memory):
         mock_memory.return_value = []
-        mock_arch_llm.return_value.invoke.return_value = _make_llm_response(SAMPLE_BLUEPRINT.model_dump_json())
-        mock_dev_llm.return_value.invoke.return_value = _make_llm_response(SAMPLE_CODE)
-        mock_qa_llm.return_value.invoke.return_value = _make_llm_response(SAMPLE_QA_PASS.model_dump_json())
+        mock_arch_llm.return_value.ainvoke = AsyncMock(return_value=_make_llm_response(SAMPLE_BLUEPRINT.model_dump_json()))
+        mock_dev_llm.return_value.ainvoke = AsyncMock(return_value=_make_llm_response(SAMPLE_CODE))
+        mock_qa_llm.return_value.ainvoke = AsyncMock(return_value=_make_llm_response(SAMPLE_QA_PASS.model_dump_json()))
         result = run_task("Create email validator", enable_tracing=False)
         assert result.status == WorkflowStatus.PASSED
 
@@ -395,8 +395,8 @@ class TestE2ETracingIntegration:
     def test_tracing_enabled_calls_trace_config(self, mock_arch_llm, mock_dev_llm, mock_qa_llm, mock_memory, mock_trace):
         mock_memory.return_value = []
         mock_trace.return_value = MagicMock(callbacks=[], enabled=False, trace_id=None, flush=MagicMock())
-        mock_arch_llm.return_value.invoke.return_value = _make_llm_response(SAMPLE_BLUEPRINT.model_dump_json())
-        mock_dev_llm.return_value.invoke.return_value = _make_llm_response(SAMPLE_CODE)
-        mock_qa_llm.return_value.invoke.return_value = _make_llm_response(SAMPLE_QA_PASS.model_dump_json())
+        mock_arch_llm.return_value.ainvoke = AsyncMock(return_value=_make_llm_response(SAMPLE_BLUEPRINT.model_dump_json()))
+        mock_dev_llm.return_value.ainvoke = AsyncMock(return_value=_make_llm_response(SAMPLE_CODE))
+        mock_qa_llm.return_value.ainvoke = AsyncMock(return_value=_make_llm_response(SAMPLE_QA_PASS.model_dump_json()))
         result = run_task("Create email validator", enable_tracing=True)
         mock_trace.assert_called_once()

@@ -255,25 +255,33 @@ class TestE2BIntegration:
         return E2BRunner(api_key=api_key)
 
     def test_simple_execution(self, runner):
-        result = runner.run("print('hello from sandbox')")
+        result = runner.run_script(
+            script_file="test_exec.py",
+            project_files={"test_exec.py": "print('hello from sandbox')"},
+        )
         assert result.exit_code == 0
         assert "hello from sandbox" in result.output_summary
 
     def test_error_execution(self, runner):
-        result = runner.run("raise ValueError('test error')")
+        result = runner.run_script(
+            script_file="test_exec.py",
+            project_files={"test_exec.py": "raise ValueError('test error')"},
+        )
         assert result.exit_code == 1
         assert any("ValueError" in e for e in result.errors)
 
     def test_permissive_gets_no_secrets(self, runner):
-        result = runner.run(
-            "import os; print(os.environ.get('SECRET', 'not found'))",
-            profile=SandboxProfile.PERMISSIVE,
+        result = runner.run_tests(
+            commands=["python3 -c \"import os; print(os.environ.get('SECRET', 'not found'))\""],
             env_vars={"SECRET": "should_not_appear"},
         )
         assert "should_not_appear" not in result.output_summary
         assert "not found" in result.output_summary
 
     def test_secret_scanning_in_output(self, runner):
-        result = runner.run("print('key is sk-ant-abc123def456ghi789jkl012mno')")
+        result = runner.run_script(
+            script_file="test_exec.py",
+            project_files={"test_exec.py": "print('key is sk-ant-abc123def456ghi789jkl012mno')"},
+        )
         assert "sk-ant-" not in result.output_summary
         assert "[REDACTED]" in result.output_summary

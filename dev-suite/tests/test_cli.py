@@ -340,7 +340,7 @@ class TestModelOverrides:
     def test_no_overrides_no_env_change(self, valid_env, tmp_path):
         """When no override flags are set, env vars are not modified."""
         parser = build_parser()
-        args = parser.parse_args(["run", "test"])
+        args = parser.parse_args(["run", "test", "--workspace", str(tmp_path)])
 
         # Ensure they're not set
         for key in ["ARCHITECT_MODEL", "DEVELOPER_MODEL", "QA_MODEL"]:

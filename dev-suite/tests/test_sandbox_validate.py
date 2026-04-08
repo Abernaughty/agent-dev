@@ -64,7 +64,7 @@ def _make_state(target_files: list[str], **overrides) -> GraphState:
 class TestSandboxValidateStrategy:
     """Tests for strategy-based dispatch in sandbox_validate_node."""
 
-    def test_script_exec_for_single_python_file(self):
+    async def test_script_exec_for_single_python_file(self):
         """Single .py file without tests should use SCRIPT_EXEC."""
         state = _make_state(["hello_world.py"])
 
@@ -75,7 +75,7 @@ class TestSandboxValidateStrategy:
                 tests_failed=0,
                 output_summary="Hello, World!",
             )
-            result = sandbox_validate_node(state)
+            result = await sandbox_validate_node(state)
 
         assert result["sandbox_result"] is not None
         assert result["sandbox_result"].exit_code == 0
@@ -84,7 +84,7 @@ class TestSandboxValidateStrategy:
         call_kwargs = mock_script.call_args[1]
         assert call_kwargs["script_file"] == "hello_world.py"
 
-    def test_test_suite_for_python_with_tests(self):
+    async def test_test_suite_for_python_with_tests(self):
         """Python files with test files should use TEST_SUITE."""
         state = _make_state(["src/main.py", "tests/test_main.py"])
 
@@ -95,7 +95,7 @@ class TestSandboxValidateStrategy:
                 tests_failed=0,
                 output_summary="5 passed in 1.2s",
             )
-            result = sandbox_validate_node(state)
+            result = await sandbox_validate_node(state)
 
         assert result["sandbox_result"] is not None
         assert result["sandbox_result"].tests_passed == 5
@@ -103,7 +103,7 @@ class TestSandboxValidateStrategy:
         call_kwargs = mock_tests.call_args[1]
         assert call_kwargs["template"] is None
 
-    def test_test_suite_for_frontend_files(self):
+    async def test_test_suite_for_frontend_files(self):
         """Frontend files should use TEST_SUITE with fullstack template."""
         state = _make_state(["dashboard/src/lib/Widget.svelte"])
 
@@ -114,34 +114,34 @@ class TestSandboxValidateStrategy:
                 tests_failed=0,
                 output_summary="svelte-check found 0 errors",
             )
-            result = sandbox_validate_node(state)
+            result = await sandbox_validate_node(state)
 
         assert result["sandbox_result"] is not None
         call_kwargs = mock_tests.call_args[1]
         assert call_kwargs["template"] == "fullstack"
 
-    def test_skip_for_non_code_files(self):
+    async def test_skip_for_non_code_files(self):
         """Non-code files should return None (no sandbox run)."""
         state = _make_state(["schema.sql", "config.yaml"])
 
-        result = sandbox_validate_node(state)
+        result = await sandbox_validate_node(state)
 
         assert result["sandbox_result"] is None
         assert any("skip" in t.lower() for t in result["trace"])
 
-    def test_empty_parsed_files_skips_sandbox(self):
+    async def test_empty_parsed_files_skips_sandbox(self):
         """CR fix: empty parsed_files should skip sandbox dispatch."""
         state = _make_state(
             ["src/main.py", "tests/test_main.py"],
             parsed_files=[],
         )
 
-        result = sandbox_validate_node(state)
+        result = await sandbox_validate_node(state)
 
         assert result["sandbox_result"] is None
         assert any("no parsed files" in t.lower() for t in result["trace"])
 
-    def test_lint_only_for_pyi_stubs(self):
+    async def test_lint_only_for_pyi_stubs(self):
         """CR fix: .pyi-only files should dispatch via LINT_ONLY -> _run_sandbox_tests."""
         state = _make_state(["src/types.pyi"])
 
@@ -152,7 +152,7 @@ class TestSandboxValidateStrategy:
                 tests_failed=None,
                 output_summary="ruff check passed",
             )
-            result = sandbox_validate_node(state)
+            result = await sandbox_validate_node(state)
 
         assert result["sandbox_result"] is not None
         assert result["sandbox_result"].exit_code == 0
@@ -164,7 +164,7 @@ class TestSandboxValidateStrategy:
 class TestSandboxValidateNode:
     """Core sandbox_validate_node tests."""
 
-    def test_python_task_uses_default_template(self):
+    async def test_python_task_uses_default_template(self):
         """Python-only tasks should use the default (None) template."""
         state = _make_state(["src/main.py", "tests/test_main.py"])
 
@@ -175,7 +175,7 @@ class TestSandboxValidateNode:
                 tests_failed=0,
                 output_summary="5 passed in 1.2s",
             )
-            result = sandbox_validate_node(state)
+            result = await sandbox_validate_node(state)
 
         assert result["sandbox_result"] is not None
         assert result["sandbox_result"].exit_code == 0
@@ -183,7 +183,7 @@ class TestSandboxValidateNode:
         call_kwargs = mock_run.call_args[1]
         assert call_kwargs["template"] is None
 
-    def test_svelte_task_uses_fullstack_template(self):
+    async def test_svelte_task_uses_fullstack_template(self):
         """Svelte tasks should use the fullstack template."""
         state = _make_state(["dashboard/src/lib/Widget.svelte"])
 
@@ -194,13 +194,13 @@ class TestSandboxValidateNode:
                 tests_failed=0,
                 output_summary="svelte-check found 0 errors",
             )
-            result = sandbox_validate_node(state)
+            result = await sandbox_validate_node(state)
 
         assert result["sandbox_result"] is not None
         call_kwargs = mock_run.call_args[1]
         assert call_kwargs["template"] == "fullstack"
 
-    def test_mixed_task_uses_fullstack_template(self):
+    async def test_mixed_task_uses_fullstack_template(self):
         """Mixed Python+frontend tasks should use fullstack."""
         state = _make_state(["src/api.py", "dashboard/src/App.svelte"])
 
@@ -211,43 +211,43 @@ class TestSandboxValidateNode:
                 tests_failed=0,
                 output_summary="All checks passed",
             )
-            result = sandbox_validate_node(state)
+            result = await sandbox_validate_node(state)
 
         call_kwargs = mock_run.call_args[1]
         assert call_kwargs["template"] == "fullstack"
 
-    def test_graceful_skip_no_api_key(self):
+    async def test_graceful_skip_no_api_key(self):
         """Should return None when E2B_API_KEY is missing."""
         state = _make_state(["src/main.py", "tests/test_main.py"])
 
         with patch("src.orchestrator._run_sandbox_tests") as mock_run:
             mock_run.return_value = None
-            result = sandbox_validate_node(state)
+            result = await sandbox_validate_node(state)
 
         assert result["sandbox_result"] is None
 
-    def test_no_blueprint_skips(self):
+    async def test_no_blueprint_skips(self):
         """Should skip validation when there's no blueprint."""
         state = _make_state([])
         state["blueprint"] = None
 
-        result = sandbox_validate_node(state)
+        result = await sandbox_validate_node(state)
 
         assert result["sandbox_result"] is None
         assert any("no blueprint" in t.lower() for t in result["trace"])
 
-    def test_sandbox_error_doesnt_crash(self):
+    async def test_sandbox_error_doesnt_crash(self):
         """Sandbox errors should be captured, not raise exceptions."""
         state = _make_state(["src/main.py", "tests/test_main.py"])
 
         with patch("src.orchestrator._run_sandbox_tests") as mock_run:
             mock_run.side_effect = Exception("E2B connection failed")
-            result = sandbox_validate_node(state)
+            result = await sandbox_validate_node(state)
 
         assert result["sandbox_result"] is None
         assert any("error" in t.lower() or "failed" in t.lower() for t in result["trace"])
 
-    def test_failed_validation_still_continues(self):
+    async def test_failed_validation_still_continues(self):
         """Sandbox validation failure should not block QA -- it adds context."""
         state = _make_state(["src/main.py", "tests/test_main.py"])
 
@@ -259,12 +259,12 @@ class TestSandboxValidateNode:
                 errors=["TypeError in auth.js line 42"],
                 output_summary="3 passed, 2 failed",
             )
-            result = sandbox_validate_node(state)
+            result = await sandbox_validate_node(state)
 
         assert result["sandbox_result"] is not None
         assert result["sandbox_result"].tests_failed == 2
 
-    def test_warnings_surfaced_in_trace(self):
+    async def test_warnings_surfaced_in_trace(self):
         """Sandbox warnings should appear in the trace log."""
         state = _make_state(["src/main.py", "tests/test_main.py"])
 
@@ -276,12 +276,12 @@ class TestSandboxValidateNode:
                 output_summary="1 passed",
                 warnings=["[WARN] ruff not available -- lint skipped"],
             )
-            result = sandbox_validate_node(state)
+            result = await sandbox_validate_node(state)
 
         trace_text = " ".join(result.get("trace", []))
         assert "ruff" in trace_text.lower()
 
-    def test_trace_includes_strategy(self):
+    async def test_trace_includes_strategy(self):
         """Trace should include which strategy was selected."""
         state = _make_state(["hello_world.py"])
 
@@ -292,7 +292,7 @@ class TestSandboxValidateNode:
                 tests_failed=0,
                 output_summary="Hello, World!",
             )
-            result = sandbox_validate_node(state)
+            result = await sandbox_validate_node(state)
 
         trace_text = " ".join(result.get("trace", []))
         assert "script_exec" in trace_text.lower()

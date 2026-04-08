@@ -50,14 +50,14 @@ class TestApplyCodeNode:
         base.update(overrides)
         return base
 
-    def test_happy_path_parses_files(self, tmp_path):
+    async def test_happy_path_parses_files(self, tmp_path):
         """Files are parsed from generated_code and stored in state."""
         from src.orchestrator import apply_code_node
 
         state = self._make_state()
 
         with patch("src.orchestrator._get_workspace_root", return_value=tmp_path):
-            result = apply_code_node(state)
+            result = await apply_code_node(state)
 
         assert "parsed_files" in result
         files = result["parsed_files"]
@@ -67,40 +67,40 @@ class TestApplyCodeNode:
         assert files[1]["path"] == "src/utils.py"
         assert "def helper():" in files[1]["content"]
 
-    def test_writes_files_to_workspace(self, tmp_path):
+    async def test_writes_files_to_workspace(self, tmp_path):
         """Parsed files are written to the workspace directory."""
         from src.orchestrator import apply_code_node
 
         state = self._make_state()
 
         with patch("src.orchestrator._get_workspace_root", return_value=tmp_path):
-            apply_code_node(state)
+            await apply_code_node(state)
 
         assert (tmp_path / "src" / "main.py").exists()
         assert (tmp_path / "src" / "utils.py").exists()
         assert "def main():" in (tmp_path / "src" / "main.py").read_text()
 
-    def test_no_generated_code_skips(self):
+    async def test_no_generated_code_skips(self):
         """Missing generated_code results in graceful skip."""
         from src.orchestrator import apply_code_node
 
         state = self._make_state(generated_code="")
-        result = apply_code_node(state)
+        result = await apply_code_node(state)
 
         assert result["parsed_files"] == []
         assert any("no generated_code" in t for t in result["trace"])
 
-    def test_no_blueprint_skips(self):
+    async def test_no_blueprint_skips(self):
         """Missing blueprint results in graceful skip."""
         from src.orchestrator import apply_code_node
 
         state = self._make_state(blueprint=None)
-        result = apply_code_node(state)
+        result = await apply_code_node(state)
 
         assert result["parsed_files"] == []
         assert any("no blueprint" in t for t in result["trace"])
 
-    def test_path_traversal_skipped(self, tmp_path):
+    async def test_path_traversal_skipped(self, tmp_path):
         """Files with traversal/absolute paths are skipped, safe files survive."""
         from src.orchestrator import apply_code_node
 
@@ -117,7 +117,7 @@ class TestApplyCodeNode:
         state = self._make_state(generated_code=dangerous_code)
 
         with patch("src.orchestrator._get_workspace_root", return_value=tmp_path):
-            result = apply_code_node(state)
+            result = await apply_code_node(state)
 
         # The parser raises CodeParserError on the traversal path,
         # so apply_code_node catches it and returns empty parsed_files.
@@ -125,7 +125,7 @@ class TestApplyCodeNode:
         assert len(result["parsed_files"]) == 0
         assert any("parse error" in t for t in result["trace"])
 
-    def test_workspace_containment_filters_unsafe(self, tmp_path):
+    async def test_workspace_containment_filters_unsafe(self, tmp_path):
         """Files that escape workspace via validate_paths_for_workspace are filtered."""
         from src.orchestrator import apply_code_node
 
@@ -138,25 +138,25 @@ class TestApplyCodeNode:
         state = self._make_state(generated_code=safe_code)
 
         with patch("src.orchestrator._get_workspace_root", return_value=tmp_path):
-            result = apply_code_node(state)
+            result = await apply_code_node(state)
 
         assert len(result["parsed_files"]) == 1
         assert result["parsed_files"][0]["path"] == "src/safe.py"
 
-    def test_trace_entries_added(self, tmp_path):
+    async def test_trace_entries_added(self, tmp_path):
         """Trace entries are added for the apply_code step."""
         from src.orchestrator import apply_code_node
 
         state = self._make_state()
 
         with patch("src.orchestrator._get_workspace_root", return_value=tmp_path):
-            result = apply_code_node(state)
+            result = await apply_code_node(state)
 
         trace = result["trace"]
         assert any("apply_code: starting" in t for t in trace)
         assert any("2 files" in t for t in trace)
 
-    def test_creates_nested_directories(self, tmp_path):
+    async def test_creates_nested_directories(self, tmp_path):
         """Nested directories are created automatically."""
         from src.orchestrator import apply_code_node
 
@@ -164,18 +164,18 @@ class TestApplyCodeNode:
         state = self._make_state(generated_code=code)
 
         with patch("src.orchestrator._get_workspace_root", return_value=tmp_path):
-            apply_code_node(state)
+            await apply_code_node(state)
 
         assert (tmp_path / "src" / "lib" / "deep" / "nested" / "file.py").exists()
 
-    def test_status_not_changed(self, tmp_path):
+    async def test_status_not_changed(self, tmp_path):
         """apply_code_node should NOT change the workflow status."""
         from src.orchestrator import apply_code_node
 
         state = self._make_state()
 
         with patch("src.orchestrator._get_workspace_root", return_value=tmp_path):
-            result = apply_code_node(state)
+            result = await apply_code_node(state)
 
         # status should not be in the result (unchanged)
         assert "status" not in result
@@ -212,7 +212,7 @@ class TestApplyCodeDiskRead:
         base.update(overrides)
         return base
 
-    def test_prefers_disk_over_parser_when_tools_used(self, tmp_path):
+    async def test_prefers_disk_over_parser_when_tools_used(self, tmp_path):
         """When filesystem_write was used, read files from disk instead of re-parsing."""
         from src.orchestrator import apply_code_node
 
@@ -228,14 +228,14 @@ class TestApplyCodeDiskRead:
             ],
         )
 
-        result = apply_code_node(state)
+        result = await apply_code_node(state)
 
         assert len(result["parsed_files"]) == 1
         assert result["parsed_files"][0]["path"] == "app.py"
         assert result["parsed_files"][0]["content"] == "print('hello from disk')\n"
         assert any("tool-written" in t for t in result["trace"])
 
-    def test_falls_back_to_parser_without_tools(self, tmp_path):
+    async def test_falls_back_to_parser_without_tools(self, tmp_path):
         """Without filesystem_write calls, uses the parser as before."""
         from src.orchestrator import apply_code_node
 
@@ -246,13 +246,13 @@ class TestApplyCodeDiskRead:
         )
 
         with patch("src.orchestrator._get_workspace_root", return_value=tmp_path):
-            result = apply_code_node(state)
+            result = await apply_code_node(state)
 
         assert len(result["parsed_files"]) == 1
         assert "from parser" in result["parsed_files"][0]["content"]
         assert not any("tool-written" in t for t in result["trace"])
 
-    def test_falls_back_when_disk_files_missing(self, tmp_path):
+    async def test_falls_back_when_disk_files_missing(self, tmp_path):
         """If tool-written files aren't on disk, falls back to parser."""
         from src.orchestrator import apply_code_node
 
@@ -266,13 +266,13 @@ class TestApplyCodeDiskRead:
             ],
         )
 
-        result = apply_code_node(state)
+        result = await apply_code_node(state)
 
         assert len(result["parsed_files"]) == 1
         assert "fallback" in result["parsed_files"][0]["content"]
         assert any("falling back" in t for t in result["trace"])
 
-    def test_ignores_failed_filesystem_write(self, tmp_path):
+    async def test_ignores_failed_filesystem_write(self, tmp_path):
         """Failed filesystem_write calls don't trigger disk-read path."""
         from src.orchestrator import apply_code_node
 
@@ -286,7 +286,7 @@ class TestApplyCodeDiskRead:
         )
 
         with patch("src.orchestrator._get_workspace_root", return_value=tmp_path):
-            result = apply_code_node(state)
+            result = await apply_code_node(state)
 
         # Should use parser path since the write failed
         assert len(result["parsed_files"]) == 1

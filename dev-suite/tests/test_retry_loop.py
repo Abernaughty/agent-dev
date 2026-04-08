@@ -7,7 +7,7 @@ Covers:
 - _build_retry_file_context and _build_retry_sandbox_context helpers
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -328,13 +328,13 @@ class TestDeveloperRetryPrompt:
         )
 
     @patch("src.orchestrator._get_developer_llm")
-    def test_retry_includes_file_context(self, mock_get_llm, tmp_path):
+    async def test_retry_includes_file_context(self, mock_get_llm, tmp_path):
         """On retry, developer_node should inject current file contents."""
         mock_llm = MagicMock()
         mock_response = MagicMock()
         mock_response.content = "# --- FILE: triforce.py ---\nprint('fixed')"
         mock_response.usage_metadata = {"total_tokens": 100}
-        mock_llm.invoke.return_value = mock_response
+        mock_llm.ainvoke = AsyncMock(return_value=mock_response)
         mock_get_llm.return_value = mock_llm
 
         # Write a file to disk
@@ -360,11 +360,11 @@ class TestDeveloperRetryPrompt:
             "workspace_root": str(tmp_path),
         }
 
-        result = developer_node(state, config=None)
+        result = await developer_node(state, config=None)
 
         # Verify the LLM was called
-        assert mock_llm.invoke.called
-        call_args = mock_llm.invoke.call_args[0][0]
+        assert mock_llm.ainvoke.called
+        call_args = mock_llm.ainvoke.call_args[0][0]
 
         # System message should be retry-specific
         system_msg = call_args[0].content
@@ -382,13 +382,13 @@ class TestDeveloperRetryPrompt:
         assert any("injected file context" in t for t in result["trace"])
 
     @patch("src.orchestrator._get_developer_llm")
-    def test_retry_includes_sandbox_output(self, mock_get_llm, tmp_path):
+    async def test_retry_includes_sandbox_output(self, mock_get_llm, tmp_path):
         """On retry, developer_node should inject sandbox stdout."""
         mock_llm = MagicMock()
         mock_response = MagicMock()
         mock_response.content = "print('fixed')"
         mock_response.usage_metadata = {"total_tokens": 100}
-        mock_llm.invoke.return_value = mock_response
+        mock_llm.ainvoke = AsyncMock(return_value=mock_response)
         mock_get_llm.return_value = mock_llm
 
         (tmp_path / "triforce.py").write_text("old code")
@@ -413,19 +413,19 @@ class TestDeveloperRetryPrompt:
             "workspace_root": str(tmp_path),
         }
 
-        result = developer_node(state, config=None)
+        result = await developer_node(state, config=None)
 
         # Trace should note sandbox output injection
         assert any("injected sandbox output" in t for t in result["trace"])
 
     @patch("src.orchestrator._get_developer_llm")
-    def test_first_attempt_uses_standard_prompt(self, mock_get_llm):
+    async def test_first_attempt_uses_standard_prompt(self, mock_get_llm):
         """First attempt (no failure_report) should use standard prompt."""
         mock_llm = MagicMock()
         mock_response = MagicMock()
         mock_response.content = "print('hello')"
         mock_response.usage_metadata = {"total_tokens": 100}
-        mock_llm.invoke.return_value = mock_response
+        mock_llm.ainvoke = AsyncMock(return_value=mock_response)
         mock_get_llm.return_value = mock_llm
 
         state: GraphState = {
@@ -440,9 +440,9 @@ class TestDeveloperRetryPrompt:
             "failure_report": None,
         }
 
-        developer_node(state, config=None)
+        await developer_node(state, config=None)
 
-        call_args = mock_llm.invoke.call_args[0][0]
+        call_args = mock_llm.ainvoke.call_args[0][0]
         system_msg = call_args[0].content
 
         # Standard prompt, not retry prompt
@@ -451,13 +451,13 @@ class TestDeveloperRetryPrompt:
         assert "RETRY CONTEXT" not in call_args[1].content
 
     @patch("src.orchestrator._get_developer_llm")
-    def test_architectural_failure_uses_standard_prompt(self, mock_get_llm):
+    async def test_architectural_failure_uses_standard_prompt(self, mock_get_llm):
         """Architectural failures go to Architect, not retry Dev prompt."""
         mock_llm = MagicMock()
         mock_response = MagicMock()
         mock_response.content = "print('hello')"
         mock_response.usage_metadata = {"total_tokens": 100}
-        mock_llm.invoke.return_value = mock_response
+        mock_llm.ainvoke = AsyncMock(return_value=mock_response)
         mock_get_llm.return_value = mock_llm
 
         arch_failure = FailureReport(
@@ -483,9 +483,9 @@ class TestDeveloperRetryPrompt:
             "failure_report": arch_failure,
         }
 
-        developer_node(state, config=None)
+        await developer_node(state, config=None)
 
-        call_args = mock_llm.invoke.call_args[0][0]
+        call_args = mock_llm.ainvoke.call_args[0][0]
         system_msg = call_args[0].content
 
         # Should NOT use retry prompt for architectural failures
@@ -502,13 +502,13 @@ class TestQALeniency:
     """Issue #125: QA should be lenient when no acceptance criteria exist."""
 
     @patch("src.orchestrator._get_qa_llm")
-    def test_qa_prompt_includes_leniency_for_empty_criteria(self, mock_get_llm):
+    async def test_qa_prompt_includes_leniency_for_empty_criteria(self, mock_get_llm):
         """QA system prompt should include leniency text when criteria are empty."""
         mock_llm = MagicMock()
         mock_response = MagicMock()
         mock_response.content = '{"task_id": "t1", "status": "pass", "tests_passed": 1, "tests_failed": 0, "errors": [], "failed_files": [], "is_architectural": false, "recommendation": ""}'
         mock_response.usage_metadata = {"total_tokens": 100}
-        mock_llm.invoke.return_value = mock_response
+        mock_llm.ainvoke = AsyncMock(return_value=mock_response)
         mock_get_llm.return_value = mock_llm
 
         state: GraphState = {
@@ -528,21 +528,21 @@ class TestQALeniency:
             "generated_code": "print('hello world')",
         }
 
-        qa_node(state, config=None)
+        await qa_node(state, config=None)
 
-        call_args = mock_llm.invoke.call_args[0][0]
+        call_args = mock_llm.ainvoke.call_args[0][0]
         system_msg = call_args[0].content
         assert "NO ACCEPTANCE CRITERIA PROVIDED" in system_msg
         assert "Do NOT invent strict formatting" in system_msg
 
     @patch("src.orchestrator._get_qa_llm")
-    def test_qa_prompt_no_leniency_with_criteria(self, mock_get_llm):
+    async def test_qa_prompt_no_leniency_with_criteria(self, mock_get_llm):
         """Leniency should NOT be added when criteria exist."""
         mock_llm = MagicMock()
         mock_response = MagicMock()
         mock_response.content = '{"task_id": "t1", "status": "pass", "tests_passed": 1, "tests_failed": 0, "errors": [], "failed_files": [], "is_architectural": false, "recommendation": ""}'
         mock_response.usage_metadata = {"total_tokens": 100}
-        mock_llm.invoke.return_value = mock_response
+        mock_llm.ainvoke = AsyncMock(return_value=mock_response)
         mock_get_llm.return_value = mock_llm
 
         state: GraphState = {
@@ -562,8 +562,8 @@ class TestQALeniency:
             "generated_code": "print('hello world')",
         }
 
-        qa_node(state, config=None)
+        await qa_node(state, config=None)
 
-        call_args = mock_llm.invoke.call_args[0][0]
+        call_args = mock_llm.ainvoke.call_args[0][0]
         system_msg = call_args[0].content
         assert "NO ACCEPTANCE CRITERIA PROVIDED" not in system_msg

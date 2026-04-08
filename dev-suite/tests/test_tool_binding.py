@@ -232,7 +232,8 @@ class TestDeveloperNodeTools:
     def base_state(self, blueprint):
         return {"task_description": "Test task", "blueprint": blueprint, "generated_code": "", "failure_report": None, "status": "building", "retry_count": 0, "tokens_used": 0, "error_message": "", "memory_context": [], "memory_writes": [], "trace": [], "sandbox_result": None, "parsed_files": [], "tool_calls_log": []}
 
-    def test_dev_with_tools_uses_bind_tools(self, base_state):
+    @pytest.mark.asyncio
+    async def test_dev_with_tools_uses_bind_tools(self, base_state):
         """When tools are in config, developer should bind them to the LLM."""
         from src.orchestrator import developer_node
         tools = [FakeTool("filesystem_read"), FakeTool("filesystem_write")]
@@ -241,29 +242,32 @@ class TestDeveloperNodeTools:
         mock_llm.bind_tools.return_value = mock_llm_bound
         mock_llm_bound.ainvoke.return_value = FakeResponse(content="# --- FILE: src/main.py ---\ndef main(): pass")
         with patch("src.orchestrator._get_developer_llm", return_value=mock_llm):
-            result = developer_node(base_state, make_config(tools))
+            result = await developer_node(base_state, make_config(tools))
         mock_llm.bind_tools.assert_called_once()
         assert result["generated_code"] != ""
         assert result["status"].value == "reviewing"
 
-    def test_dev_without_tools_single_shot(self, base_state):
+    @pytest.mark.asyncio
+    async def test_dev_without_tools_single_shot(self, base_state):
         from src.orchestrator import developer_node
         mock_llm = MagicMock()
-        mock_llm.invoke.return_value = FakeResponse(content="# --- FILE: src/main.py ---\ndef main(): pass")
+        mock_llm.ainvoke = AsyncMock(return_value=FakeResponse(content="# --- FILE: src/main.py ---\ndef main(): pass"))
         with patch("src.orchestrator._get_developer_llm", return_value=mock_llm):
-            result = developer_node(base_state, make_config([]))
-        mock_llm.invoke.assert_called_once()
+            result = await developer_node(base_state, make_config([]))
+        mock_llm.ainvoke.assert_called_once()
         mock_llm.bind_tools.assert_not_called()
 
-    def test_dev_no_config_single_shot(self, base_state):
+    @pytest.mark.asyncio
+    async def test_dev_no_config_single_shot(self, base_state):
         from src.orchestrator import developer_node
         mock_llm = MagicMock()
-        mock_llm.invoke.return_value = FakeResponse(content="code here")
+        mock_llm.ainvoke = AsyncMock(return_value=FakeResponse(content="code here"))
         with patch("src.orchestrator._get_developer_llm", return_value=mock_llm):
-            result = developer_node(base_state, None)
-        mock_llm.invoke.assert_called_once()
+            result = await developer_node(base_state, None)
+        mock_llm.ainvoke.assert_called_once()
 
-    def test_dev_tool_calls_logged_in_state(self, base_state):
+    @pytest.mark.asyncio
+    async def test_dev_tool_calls_logged_in_state(self, base_state):
         from src.orchestrator import developer_node
         tool = FakeTool("filesystem_read", result="existing code")
         first_resp = FakeResponse(content="")
@@ -273,12 +277,13 @@ class TestDeveloperNodeTools:
         mock_llm.bind_tools.return_value = mock_llm_bound
         mock_llm_bound.ainvoke.side_effect = [first_resp, FakeResponse(content="# --- FILE: src/main.py ---\ncode")]
         with patch("src.orchestrator._get_developer_llm", return_value=mock_llm):
-            result = developer_node(base_state, make_config([tool]))
+            result = await developer_node(base_state, make_config([tool]))
         assert len(result["tool_calls_log"]) == 1
         assert result["tool_calls_log"][0]["tool"] == "filesystem_read"
         assert result["tool_calls_log"][0]["agent"] == "developer"
 
-    def test_dev_tools_filtered_to_dev_set(self, base_state):
+    @pytest.mark.asyncio
+    async def test_dev_tools_filtered_to_dev_set(self, base_state):
         """Fix 2: DEV_TOOL_NAMES no longer includes github_create_pr."""
         from src.orchestrator import DEV_TOOL_NAMES, developer_node
         all_tools = [FakeTool(n) for n in ["filesystem_read", "filesystem_write", "filesystem_list", "github_read_diff", "github_create_pr", "unexpected_tool"]]
@@ -287,7 +292,7 @@ class TestDeveloperNodeTools:
         mock_llm.bind_tools.return_value = mock_llm_bound
         mock_llm_bound.ainvoke.return_value = FakeResponse(content="code")
         with patch("src.orchestrator._get_developer_llm", return_value=mock_llm):
-            developer_node(base_state, make_config(all_tools))
+            await developer_node(base_state, make_config(all_tools))
         bound_names = {t.name for t in mock_llm.bind_tools.call_args[0][0]}
         assert bound_names == DEV_TOOL_NAMES
         assert "github_create_pr" not in bound_names
@@ -300,7 +305,8 @@ class TestQANodeTools:
         bp = Blueprint(task_id="test-qa", target_files=["src/main.py"], instructions="Implement feature", constraints=[], acceptance_criteria=["Tests pass"])
         return {"task_description": "Test task", "blueprint": bp, "generated_code": "# --- FILE: src/main.py ---\ndef main(): pass", "failure_report": None, "status": "reviewing", "retry_count": 0, "tokens_used": 0, "error_message": "", "memory_context": [], "memory_writes": [], "trace": [], "sandbox_result": None, "parsed_files": [], "tool_calls_log": []}
 
-    def test_qa_with_tools_gets_read_only(self, qa_state):
+    @pytest.mark.asyncio
+    async def test_qa_with_tools_gets_read_only(self, qa_state):
         from src.orchestrator import QA_TOOL_NAMES, qa_node
         all_tools = [FakeTool(n) for n in ["filesystem_read", "filesystem_write", "filesystem_list", "github_read_diff", "github_create_pr"]]
         mock_llm = MagicMock()
@@ -309,19 +315,20 @@ class TestQANodeTools:
         qa_json = json.dumps({"task_id": "test-qa", "status": "pass", "tests_passed": 1, "tests_failed": 0, "errors": [], "failed_files": [], "is_architectural": False, "failure_type": None, "recommendation": "All good"})
         mock_llm_bound.ainvoke.return_value = FakeResponse(content=qa_json)
         with patch("src.orchestrator._get_qa_llm", return_value=mock_llm):
-            qa_node(qa_state, make_config(all_tools))
+            await qa_node(qa_state, make_config(all_tools))
         bound_names = {t.name for t in mock_llm.bind_tools.call_args[0][0]}
         assert bound_names == QA_TOOL_NAMES
         assert "filesystem_write" not in bound_names
 
-    def test_qa_without_tools(self, qa_state):
+    @pytest.mark.asyncio
+    async def test_qa_without_tools(self, qa_state):
         from src.orchestrator import qa_node
         mock_llm = MagicMock()
         qa_json = json.dumps({"task_id": "test-qa", "status": "pass", "tests_passed": 1, "tests_failed": 0, "errors": [], "failed_files": [], "is_architectural": False, "failure_type": None, "recommendation": "All good"})
-        mock_llm.invoke.return_value = FakeResponse(content=qa_json)
+        mock_llm.ainvoke = AsyncMock(return_value=FakeResponse(content=qa_json))
         with patch("src.orchestrator._get_qa_llm", return_value=mock_llm):
-            result = qa_node(qa_state, make_config([]))
-        mock_llm.invoke.assert_called_once()
+            result = await qa_node(qa_state, make_config([]))
+        mock_llm.ainvoke.assert_called_once()
         assert result["failure_report"].status == "pass"
 
 
