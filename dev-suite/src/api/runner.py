@@ -105,12 +105,31 @@ class TaskRunner:
         self._tasks: dict[str, asyncio.Task] = {}
         self._dev_tool_baselines: dict[str, int] = {}
 
-    def submit(self, task_id: str, description: str, workspace: str = "", publish_pr: bool | None = None) -> None:
+    def submit(
+        self,
+        task_id: str,
+        description: str,
+        workspace: str = "",
+        create_pr: bool | None = None,
+        workspace_type: str = "local",
+        github_repo: str | None = None,
+        github_branch: str | None = None,
+        github_feature_branch: str | None = None,
+    ) -> None:
         """Submit a task for background execution."""
         if task_id in self._tasks:
             logger.warning("Task %s already running, ignoring duplicate submit", task_id)
             return
-        coro = self._run_task(task_id, description, workspace=workspace, publish_pr=publish_pr)
+        coro = self._run_task(
+            task_id,
+            description,
+            workspace=workspace,
+            create_pr=create_pr,
+            workspace_type=workspace_type,
+            github_repo=github_repo,
+            github_branch=github_branch,
+            github_feature_branch=github_feature_branch,
+        )
         async_task = asyncio.create_task(coro, name=f"orchestrator-{task_id}")
         self._tasks[task_id] = async_task
         async_task.add_done_callback(lambda t: self._tasks.pop(task_id, None))
@@ -140,7 +159,17 @@ class TaskRunner:
     def running_count(self) -> int:
         return len(self._tasks)
 
-    async def _run_task(self, task_id: str, description: str, workspace: str = "", publish_pr: bool | None = None) -> None:
+    async def _run_task(
+        self,
+        task_id: str,
+        description: str,
+        workspace: str = "",
+        create_pr: bool | None = None,
+        workspace_type: str = "local",
+        github_repo: str | None = None,
+        github_branch: str | None = None,
+        github_feature_branch: str | None = None,
+    ) -> None:
         """Run the orchestrator via astream() and emit SSE events."""
         from .state import state_manager
 
@@ -193,7 +222,7 @@ class TaskRunner:
             else:
                 await self._emit_log("[orchestrator] No tools configured (single-shot mode)")
 
-            # Issue #89: publish_pr defaults to True, API can override
+            # Issue #89/#153: create_pr defaults to True, API can override
             initial_state: GraphState = {
                 "task_description": description,
                 "blueprint": None,
@@ -208,7 +237,11 @@ class TaskRunner:
                 "parsed_files": [],
                 "tool_calls_log": [],
                 "workspace_root": str(task_workspace),
-                "publish_pr": True if publish_pr is None else publish_pr,
+                "create_pr": True if create_pr is None else create_pr,
+                "workspace_type": workspace_type,
+                "github_repo": github_repo,
+                "github_branch": github_branch,
+                "github_feature_branch": github_feature_branch,
             }
 
             stream_config = {

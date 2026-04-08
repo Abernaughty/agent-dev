@@ -124,9 +124,16 @@
 				return;
 			}
 			lines = [...lines, { type: 'info', text: `[orchestrator] Processing: "${desc}"...` }];
-			const options = workspacesStore.isSelectedProtected && workspacesStore.verifiedPin
-				? { pin: workspacesStore.verifiedPin }
-				: undefined;
+			const options: Record<string, unknown> = {};
+			if (workspacesStore.isSelectedProtected && workspacesStore.verifiedPin) {
+				options.pin = workspacesStore.verifiedPin;
+			}
+			if (workspacesStore.workspaceType === 'github') {
+				options.workspace_type = 'github';
+				options.github_repo = workspacesStore.githubRepo;
+				options.github_branch = workspacesStore.githubBranch;
+				if (workspacesStore.githubFeatureBranch) options.github_feature_branch = workspacesStore.githubFeatureBranch;
+			}
 			const taskId = await tasksStore.create(desc, workspacesStore.selected, options);
 			if (taskId) {
 				lines = [...lines, { type: 'success', text: `[orchestrator] Task ${taskId} created` }];

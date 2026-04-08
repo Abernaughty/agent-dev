@@ -46,7 +46,7 @@ function getBackoffDelay(): number {
  * Validates all required fields are present with correct types
  * before passing to the store handler.
  */
-function isToolCallEvent(payload: Record<string, unknown>): payload is ToolCallEvent {
+function isToolCallEvent(payload: Record<string, unknown>): payload is Record<string, unknown> & ToolCallEvent {
 	return (
 		typeof payload.task_id === 'string' &&
 		typeof payload.agent === 'string' &&
@@ -61,7 +61,7 @@ function isToolCallEvent(payload: Record<string, unknown>): payload is ToolCallE
  * Issue #106 Phase B. Validates all required fields including
  * the warnings array (CodeRabbit fix #2).
  */
-function isPlannerMessageEvent(payload: Record<string, unknown>): payload is PlannerMessageEvent {
+function isPlannerMessageEvent(payload: Record<string, unknown>): payload is Record<string, unknown> & PlannerMessageEvent {
 	return (
 		typeof payload.session_id === 'string' &&
 		typeof payload.message === 'string' &&

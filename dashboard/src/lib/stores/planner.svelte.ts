@@ -255,8 +255,16 @@ export const plannerStore = {
 	 *
 	 * Calls POST /api/planner/{id}/submit. On success, creates
 	 * the task and transitions to 'submitted' phase.
+	 *
+	 * Issue #153: forwards create_pr and workspace type fields.
 	 */
-	async submit(): Promise<string | null> {
+	async submit(options?: {
+		create_pr?: boolean | null;
+		workspace_type?: 'local' | 'github';
+		github_repo?: string | null;
+		github_branch?: string | null;
+		github_feature_branch?: string | null;
+	}): Promise<string | null> {
 		if (!sessionId || !ready) return null;
 
 		const generation = requestGeneration;
@@ -265,9 +273,12 @@ export const plannerStore = {
 		phase = 'submitting';
 
 		try {
-			const res = await fetch(`/api/planner/${currentSessionId}/submit`, {
-				method: 'POST'
-			});
+			const fetchOptions: RequestInit = { method: 'POST' };
+			if (options) {
+				fetchOptions.headers = { 'Content-Type': 'application/json' };
+				fetchOptions.body = JSON.stringify(options);
+			}
+			const res = await fetch(`/api/planner/${currentSessionId}/submit`, fetchOptions);
 			const body = await res.json();
 
 			// Stale-response guard (CodeRabbit fix #3)

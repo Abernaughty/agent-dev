@@ -30,8 +30,9 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel as PydanticBaseModel
 from sse_starlette import EventSourceResponse
 
 from .auth import require_auth
@@ -198,7 +199,16 @@ async def create_task(body: CreateTaskRequest, _auth: str | None = Depends(requi
             _error("Invalid PIN for protected workspace.", 403)
 
     task_id = await state_manager.create_task(body.description, workspace=body.workspace)
-    task_runner.submit(task_id, body.description, workspace=body.workspace, publish_pr=body.publish_pr)
+    task_runner.submit(
+        task_id,
+        body.description,
+        workspace=body.workspace,
+        create_pr=body.create_pr,
+        workspace_type=body.workspace_type,
+        github_repo=body.github_repo,
+        github_branch=body.github_branch,
+        github_feature_branch=body.github_feature_branch,
+    )
     return _ok(CreateTaskResponse(task_id=task_id))
 
 
@@ -400,9 +410,19 @@ async def send_planner_msg(
     return _ok(resp)
 
 
+class PlannerSubmitRequest(PydanticBaseModel):
+    """Optional body for planner submit with workspace/PR overrides."""
+    create_pr: bool | None = None
+    workspace_type: str = "local"
+    github_repo: str | None = None
+    github_branch: str | None = None
+    github_feature_branch: str | None = None
+
+
 @app.post("/tasks/plan/{session_id}/submit", response_model=ApiResponse)
 async def submit_planner_session(
     session_id: str,
+    body: PlannerSubmitRequest | None = Body(None),
     _auth: str | None = Depends(require_auth),
 ):
     """Submit a Planner session to the Architect.
@@ -461,7 +481,16 @@ async def submit_planner_session(
 
     # Create task via existing flow
     task_id = await state_manager.create_task(description, workspace=workspace)
-    task_runner.submit(task_id, description, workspace=workspace)
+    task_runner.submit(
+        task_id,
+        description,
+        workspace=workspace,
+        create_pr=body.create_pr if body else None,
+        workspace_type=body.workspace_type if body else "local",
+        github_repo=body.github_repo if body else None,
+        github_branch=body.github_branch if body else None,
+        github_feature_branch=body.github_feature_branch if body else None,
+    )
 
     # Mark session as submitted
     session.submitted = True

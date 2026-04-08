@@ -41,6 +41,16 @@
 	let headerExpanded = $state(false);
 	let specPreviewExpanded = $state(false);
 
+	/** Issue #153: PR creation toggle. */
+	let createPr = $state(true);
+
+	/** Dynamic helper text for the PR checkbox. */
+	const prHelperText = $derived.by(() => {
+		if (createPr) return 'Pushes to feature branch and opens a PR against the target branch';
+		if (workspacesStore.workspaceType === 'github') return 'Changes will be pushed to a feature branch but no PR will be opened';
+		return 'Changes will remain in the local workspace only';
+	});
+
 	// -- Scroll to bottom when messages change --
 
 	async function scrollToBottom() {
@@ -222,9 +232,15 @@
 
 	async function handleSubmit() {
 		if (!plannerStore.canSubmit) return;
-		const taskId = await plannerStore.submit();
+		const taskId = await plannerStore.submit({
+			create_pr: createPr,
+			workspace_type: workspacesStore.workspaceType,
+			github_repo: workspacesStore.workspaceType === 'github' ? workspacesStore.githubRepo : null,
+			github_branch: workspacesStore.workspaceType === 'github' ? workspacesStore.githubBranch : null,
+			github_feature_branch: workspacesStore.workspaceType === 'github' && workspacesStore.githubFeatureBranch ? workspacesStore.githubFeatureBranch : null,
+		});
 		if (taskId) {
-			tasksStore.refresh();
+			await tasksStore.refresh();
 		}
 	}
 
@@ -285,6 +301,27 @@
 <div class="flex h-full flex-col" style="font-family: var(--font-mono);">
 	<!-- Workspace selector -->
 	<WorkspaceSelector />
+
+	<!-- Issue #153: Create PR checkbox -->
+	<div
+		class="flex items-center gap-2 border-b px-4 py-1.5"
+		style="border-color: var(--color-border); font-family: var(--font-mono);"
+	>
+		<label class="flex cursor-pointer items-center gap-2">
+			<input
+				type="checkbox"
+				bind:checked={createPr}
+				class="accent-[var(--color-accent-cyan)]"
+				style="cursor: pointer;"
+			/>
+			<span class="text-[10px]" style="color: var(--color-text-bright);">
+				Create PR for this task
+			</span>
+		</label>
+		<span class="text-[9px]" style="color: var(--color-text-dim);">
+			{prHelperText}
+		</span>
+	</div>
 
 	<!-- ═══ Pinned Readiness Header ═══ -->
 	<div

@@ -10,7 +10,7 @@
  * Issue #85: Added handleToolCall() for TOOL_CALL SSE events
  * Issue #92: handleProgress() now pushes timeline events + budget updates;
  *            handleComplete() sets completed_at
- * Issue #106: create() accepts workspace, pin, publish_pr
+ * Issue #106: create() accepts workspace, pin. Issue #153: create_pr + github fields
  * Issue #107: handleProgress() attaches sandbox output fields for sandbox_validated events
  * Issue #108: fetchDetail() for on-demand TaskDetail loading;
  *            handleComplete() stores completion_detail;
@@ -256,18 +256,30 @@ export const tasksStore = {
 	 * Create a new task with workspace context.
 	 *
 	 * Issue #106: Now requires workspace (from workspacesStore.selected).
-	 * Optional pin for protected workspaces, publish_pr to control PR creation.
+	 * Optional pin for protected workspaces, create_pr to control PR creation.
+	 * Issue #153: workspace_type and GitHub fields for remote workspace support.
 	 * Returns the task_id on success, null on failure.
 	 */
 	async create(
 		description: string,
 		workspace: string,
-		options?: { pin?: string; publish_pr?: boolean | null }
+		options?: {
+			pin?: string;
+			create_pr?: boolean | null;
+			workspace_type?: 'local' | 'github';
+			github_repo?: string | null;
+			github_branch?: string | null;
+			github_feature_branch?: string | null;
+		}
 	): Promise<string | null> {
 		try {
 			const payload: Record<string, unknown> = { description, workspace };
 			if (options?.pin) payload.pin = options.pin;
-			if (options?.publish_pr !== undefined) payload.publish_pr = options.publish_pr;
+			if (options?.create_pr !== undefined) payload.create_pr = options.create_pr;
+			if (options?.workspace_type) payload.workspace_type = options.workspace_type;
+			if (options?.github_repo) payload.github_repo = options.github_repo;
+			if (options?.github_branch) payload.github_branch = options.github_branch;
+			if (options?.github_feature_branch) payload.github_feature_branch = options.github_feature_branch;
 
 			const res = await fetch('/api/tasks', {
 				method: 'POST',

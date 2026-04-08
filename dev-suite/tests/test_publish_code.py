@@ -1,4 +1,4 @@
-"""Tests for publish_code_node — Issue #89.
+"""Tests for publish_code_node — Issue #89/#153.
 
 Tests the guard chain, branch creation, file push, PR opening,
 and error handling. All GitHub API calls are mocked via
@@ -45,7 +45,7 @@ def _make_state(**overrides) -> GraphState:
         ],
         "tool_calls_log": [],
         "workspace_root": "/tmp/test-workspace",
-        "publish_pr": True,
+        "create_pr": True,
     }
     defaults.update(overrides)
     return defaults
@@ -63,36 +63,36 @@ class TestPublishCodeGuards:
     """Test the guard chain that skips publishing gracefully."""
 
     @patch("src.api.github_prs.github_pr_provider")
-    def test_skips_when_no_github_token(self, mock_provider):
-        """Guard 1: No GITHUB_TOKEN \u2192 skip."""
+    async def test_skips_when_no_github_token(self, mock_provider):
+        """Guard 1: No GITHUB_TOKEN -> skip."""
         mock_provider.configured = False
         state = _make_state()
-        result = publish_code_node(state)
+        result = await publish_code_node(state)
         assert "skipped -- no GITHUB_TOKEN" in result["trace"][-1]
         assert "pr_url" not in result
 
     @patch("src.api.github_prs.github_pr_provider")
-    def test_skips_when_publish_pr_false(self, mock_provider):
-        """Guard 2: publish_pr=False \u2192 skip."""
+    async def test_skips_when_create_pr_false(self, mock_provider):
+        """Guard 2: create_pr=False -> skip."""
         mock_provider.configured = True
-        state = _make_state(publish_pr=False)
-        result = publish_code_node(state)
-        assert "publish_pr=False" in result["trace"][-1]
+        state = _make_state(create_pr=False)
+        result = await publish_code_node(state)
+        assert "create_pr=False" in result["trace"][-1]
 
     @patch("src.api.github_prs.github_pr_provider")
-    def test_skips_when_no_parsed_files(self, mock_provider):
-        """Guard 3: No parsed_files \u2192 skip."""
+    async def test_skips_when_no_parsed_files(self, mock_provider):
+        """Guard 3: No parsed_files -> skip."""
         mock_provider.configured = True
         state = _make_state(parsed_files=[])
-        result = publish_code_node(state)
+        result = await publish_code_node(state)
         assert "no parsed_files" in result["trace"][-1]
 
     @patch("src.api.github_prs.github_pr_provider")
-    def test_skips_when_no_blueprint(self, mock_provider):
-        """Guard 4: No blueprint \u2192 skip."""
+    async def test_skips_when_no_blueprint(self, mock_provider):
+        """Guard 4: No blueprint -> skip."""
         mock_provider.configured = True
         state = _make_state(blueprint=None)
-        result = publish_code_node(state)
+        result = await publish_code_node(state)
         assert "no blueprint" in result["trace"][-1]
 
 
@@ -100,8 +100,8 @@ class TestPublishCodeHappyPath:
     """Test successful branch creation, file push, and PR opening."""
 
     @patch("src.api.github_prs.github_pr_provider")
-    def test_creates_branch_pushes_files_opens_pr(self, mock_provider):
-        """Full happy path: branch \u2192 files \u2192 PR."""
+    async def test_creates_branch_pushes_files_opens_pr(self, mock_provider):
+        """Full happy path: branch -> files -> PR."""
         mock_provider.configured = True
         mock_provider.owner = "Abernaughty"
         mock_provider.repo = "agent-dev"
@@ -110,7 +110,7 @@ class TestPublishCodeHappyPath:
         mock_provider.create_pr = AsyncMock(return_value=_make_pr_summary(142))
 
         state = _make_state()
-        result = publish_code_node(state)
+        result = await publish_code_node(state)
 
         assert result["working_branch"] == "agent/test-auth-rls"
         assert result["pr_number"] == 142
@@ -129,7 +129,7 @@ class TestPublishCodeHappyPath:
         assert "test-auth-rls" in pr_call.kwargs["title"]
 
     @patch("src.api.github_prs.github_pr_provider")
-    def test_branch_name_sanitized(self, mock_provider):
+    async def test_branch_name_sanitized(self, mock_provider):
         """Branch name should have special chars replaced."""
         mock_provider.configured = True
         mock_provider.owner = "Abernaughty"
@@ -140,67 +140,99 @@ class TestPublishCodeHappyPath:
 
         bp = _make_blueprint(task_id="fix auth & session handling!")
         state = _make_state(blueprint=bp)
-        result = publish_code_node(state)
+        result = await publish_code_node(state)
 
         branch = result["working_branch"]
         assert " " not in branch
         assert "&" not in branch
         assert "!" not in branch
 
+    @patch("src.api.github_prs.github_pr_provider")
+    async def test_uses_github_feature_branch(self, mock_provider):
+        """Issue #153: custom feature branch name is used when provided."""
+        mock_provider.configured = True
+        mock_provider.owner = "Abernaughty"
+        mock_provider.repo = "agent-dev"
+        mock_provider.create_branch = AsyncMock(return_value=True)
+        mock_provider.push_files_batch = AsyncMock(return_value=True)
+        mock_provider.create_pr = AsyncMock(return_value=_make_pr_summary(200))
+
+        state = _make_state(github_feature_branch="feature/custom-branch")
+        result = await publish_code_node(state)
+
+        assert result["working_branch"] == "feature/custom-branch"
+        mock_provider.create_branch.assert_called_once_with("feature/custom-branch")
+
+    @patch("src.api.github_prs.github_pr_provider")
+    async def test_uses_github_branch_as_pr_base(self, mock_provider):
+        """Issue #153: github_branch overrides 'main' as PR base."""
+        mock_provider.configured = True
+        mock_provider.owner = "Abernaughty"
+        mock_provider.repo = "agent-dev"
+        mock_provider.create_branch = AsyncMock(return_value=True)
+        mock_provider.push_files_batch = AsyncMock(return_value=True)
+        mock_provider.create_pr = AsyncMock(return_value=_make_pr_summary(201))
+
+        state = _make_state(github_branch="develop")
+        result = await publish_code_node(state)
+
+        pr_call = mock_provider.create_pr.call_args
+        assert pr_call.kwargs["base"] == "develop"
+
 
 class TestPublishCodeErrorHandling:
     """Test error handling for various failure scenarios."""
 
     @patch("src.api.github_prs.github_pr_provider")
-    def test_branch_creation_fails(self, mock_provider):
-        """Branch creation failure \u2192 no files pushed, no PR."""
+    async def test_branch_creation_fails(self, mock_provider):
+        """Branch creation failure -> no files pushed, no PR."""
         mock_provider.configured = True
         mock_provider.create_branch = AsyncMock(return_value=False)
 
         state = _make_state()
-        result = publish_code_node(state)
+        result = await publish_code_node(state)
 
         assert "FAILED to create branch" in result["trace"][-1]
         assert "pr_url" not in result
         assert "working_branch" not in result
 
     @patch("src.api.github_prs.github_pr_provider")
-    def test_file_push_fails(self, mock_provider):
-        """File push failure \u2192 branch exists but no PR."""
+    async def test_file_push_fails(self, mock_provider):
+        """File push failure -> branch exists but no PR."""
         mock_provider.configured = True
         mock_provider.create_branch = AsyncMock(return_value=True)
         mock_provider.push_files_batch = AsyncMock(return_value=False)
 
         state = _make_state()
-        result = publish_code_node(state)
+        result = await publish_code_node(state)
 
         assert "FAILED to push files" in result["trace"][-1]
         assert result["working_branch"] == "agent/test-auth-rls"
         assert "pr_url" not in result
 
     @patch("src.api.github_prs.github_pr_provider")
-    def test_pr_creation_fails(self, mock_provider):
-        """PR creation failure \u2192 branch + files exist, no PR URL."""
+    async def test_pr_creation_fails(self, mock_provider):
+        """PR creation failure -> branch + files exist, no PR URL."""
         mock_provider.configured = True
         mock_provider.create_branch = AsyncMock(return_value=True)
         mock_provider.push_files_batch = AsyncMock(return_value=True)
         mock_provider.create_pr = AsyncMock(return_value=None)
 
         state = _make_state()
-        result = publish_code_node(state)
+        result = await publish_code_node(state)
 
         assert "FAILED to open PR" in result["trace"][-1]
         assert result["working_branch"] == "agent/test-auth-rls"
         assert "pr_url" not in result
 
     @patch("src.api.github_prs.github_pr_provider")
-    def test_unexpected_exception_caught(self, mock_provider):
+    async def test_unexpected_exception_caught(self, mock_provider):
         """Unexpected exceptions are caught and traced."""
         mock_provider.configured = True
         mock_provider.create_branch = AsyncMock(side_effect=RuntimeError("network down"))
 
         state = _make_state()
-        result = publish_code_node(state)
+        result = await publish_code_node(state)
 
         assert "error -- RuntimeError" in result["trace"][-1]
 
@@ -238,11 +270,15 @@ class TestPublishCodeGraphIntegration:
         assert route_after_qa(state) == "flush_memory"
 
     def test_graphstate_has_publish_fields(self):
-        """GraphState TypedDict includes the new #89 fields."""
+        """GraphState TypedDict includes the #89/#153 fields."""
         from src.orchestrator import GraphState
 
         hints = GraphState.__annotations__
-        assert "publish_pr" in hints
+        assert "create_pr" in hints
+        assert "workspace_type" in hints
+        assert "github_repo" in hints
+        assert "github_branch" in hints
+        assert "github_feature_branch" in hints
         assert "working_branch" in hints
         assert "pr_url" in hints
         assert "pr_number" in hints
