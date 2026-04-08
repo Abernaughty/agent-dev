@@ -15,7 +15,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from enum import Enum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 # -- Envelope --
 
@@ -301,10 +301,10 @@ class CreateTaskRequest(BaseModel):
 
     description: str = Field(..., min_length=1, max_length=2000)
     workspace: str = Field(
-        ...,
-        min_length=1,
+        default="",
         description="Target workspace directory (absolute path). "
-        "Must be in the allowed directories list.",
+        "Must be in the allowed directories list. "
+        "Optional when workspace_type='github'.",
     )
     pin: str | None = Field(
         default=None,
@@ -333,6 +333,25 @@ class CreateTaskRequest(BaseModel):
         default=None,
         description="Feature branch name. Auto-generated as 'agent/{task_id}' if blank.",
     )
+
+    @model_validator(mode="after")
+    def _validate_workspace_fields(self) -> "CreateTaskRequest":
+        if self.workspace_type == "github":
+            if not self.github_repo or "/" not in self.github_repo:
+                raise ValueError(
+                    "github_repo must be in 'owner/repo' format "
+                    "when workspace_type is 'github'."
+                )
+            if not self.github_branch:
+                raise ValueError(
+                    "github_branch is required when workspace_type is 'github'."
+                )
+        else:
+            if not self.workspace:
+                raise ValueError(
+                    "workspace is required when workspace_type is 'local'."
+                )
+        return self
 
 
 class CreateTaskResponse(BaseModel):

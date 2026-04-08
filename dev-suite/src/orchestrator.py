@@ -1183,10 +1183,24 @@ async def flush_memory_node(state: GraphState) -> dict:
 
 
 async def _publish_code_async(state: dict) -> dict:
-    from .api.github_prs import github_pr_provider
+    from .api.github_prs import GitHubPRProvider, github_pr_provider
+
     trace = list(state.get("trace", []))
     trace.append("publish_code: starting")
-    if not github_pr_provider.configured:
+
+    # Issue #153: use dynamic provider for remote workspaces
+    workspace_type = state.get("workspace_type", "local")
+    github_repo_str = state.get("github_repo")
+    provider_is_dynamic = False
+
+    if workspace_type == "github" and github_repo_str and "/" in github_repo_str:
+        owner, repo_name = github_repo_str.split("/", 1)
+        provider = GitHubPRProvider.for_repo(owner, repo_name)
+        provider_is_dynamic = True
+    else:
+        provider = github_pr_provider
+
+    if not provider.configured:
         trace.append("publish_code: skipped -- no GITHUB_TOKEN configured")
         logger.info("[PUBLISH] Skipped: no GITHUB_TOKEN")
         return {"trace": trace}
@@ -1212,15 +1226,18 @@ async def _publish_code_async(state: dict) -> dict:
     branch_name = re.sub(r"[^a-zA-Z0-9/_-]", "-", branch_name)
     try:
         trace.append(f"publish_code: creating branch '{branch_name}'")
-        branch_ok = await github_pr_provider.create_branch(branch_name)
+        pr_base = state.get("github_branch") or "main"
+        branch_ok = await provider.create_branch(branch_name, from_branch=pr_base)
         if not branch_ok:
             trace.append("publish_code: FAILED to create branch")
             logger.error("[PUBLISH] Failed to create branch '%s'", branch_name)
             return {"trace": trace}
         trace.append(f"publish_code: pushing {len(parsed_files)} file(s)")
         workspace_root = state.get("workspace_root", "")
+        # Issue #153: skip repo_subdir detection for remote workspaces —
+        # files in a remote clone are already relative to repo root.
         repo_subdir = ""
-        if workspace_root:
+        if workspace_type != "github" and workspace_root:
             ws = Path(workspace_root).resolve()
             for parent in [ws, *ws.parents]:
                 if (parent / ".git").exists():
@@ -1235,7 +1252,7 @@ async def _publish_code_async(state: dict) -> dict:
             if repo_subdir and repo_subdir != ".":
                 repo_path = f"{repo_subdir}/{pf['path']}"
             files_payload.append({"path": repo_path, "content": pf["content"]})
-        push_ok = await github_pr_provider.push_files_batch(files=files_payload, branch=branch_name, message=f"feat({task_id}): implement {blueprint.instructions[:60]}")
+        push_ok = await provider.push_files_batch(files=files_payload, branch=branch_name, message=f"feat({task_id}): implement {blueprint.instructions[:60]}")
         if not push_ok:
             trace.append("publish_code: FAILED to push files")
             logger.error("[PUBLISH] Failed to push files to '%s'", branch_name)
@@ -1254,13 +1271,11 @@ async def _publish_code_async(state: dict) -> dict:
         if len(blueprint.instructions) > 80:
             pr_title = pr_title[:83] + "..."
         trace.append("publish_code: opening PR")
-        # Issue #153: use github_branch as PR base for remote workspaces
-        pr_base = state.get("github_branch") or "main"
-        pr_result = await github_pr_provider.create_pr(head=branch_name, base=pr_base, title=pr_title, body=pr_body)
+        pr_result = await provider.create_pr(head=branch_name, base=pr_base, title=pr_title, body=pr_body)
         if pr_result:
             trace.append(f"publish_code: PR #{pr_result.number} opened -> {pr_result.id}")
             logger.info("[PUBLISH] PR #%d opened: %s", pr_result.number, pr_title)
-            return {"working_branch": branch_name, "pr_url": f"https://github.com/{github_pr_provider.owner}/{github_pr_provider.repo}/pull/{pr_result.number}", "pr_number": pr_result.number, "trace": trace}
+            return {"working_branch": branch_name, "pr_url": f"https://github.com/{provider.owner}/{provider.repo}/pull/{pr_result.number}", "pr_number": pr_result.number, "trace": trace}
         else:
             trace.append("publish_code: FAILED to open PR (files pushed to branch)")
             logger.error("[PUBLISH] Failed to open PR (files are on branch '%s')", branch_name)
@@ -1269,6 +1284,9 @@ async def _publish_code_async(state: dict) -> dict:
         trace.append(f"publish_code: error -- {type(e).__name__}: {e}")
         logger.error("[PUBLISH] Unexpected error: %s", e, exc_info=True)
         return {"trace": trace}
+    finally:
+        if provider_is_dynamic:
+            await provider.close()
 
 
 async def publish_code_node(state: GraphState) -> dict:

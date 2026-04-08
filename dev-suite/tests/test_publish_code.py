@@ -118,7 +118,7 @@ class TestPublishCodeHappyPath:
         assert "PR #142 opened" in result["trace"][-1]
 
         # Verify API calls
-        mock_provider.create_branch.assert_called_once_with("agent/test-auth-rls")
+        mock_provider.create_branch.assert_called_once_with("agent/test-auth-rls", from_branch="main")
         mock_provider.push_files_batch.assert_called_once()
         mock_provider.create_pr.assert_called_once()
 
@@ -161,7 +161,7 @@ class TestPublishCodeHappyPath:
         result = await publish_code_node(state)
 
         assert result["working_branch"] == "feature/custom-branch"
-        mock_provider.create_branch.assert_called_once_with("feature/custom-branch")
+        mock_provider.create_branch.assert_called_once_with("feature/custom-branch", from_branch="main")
 
     @patch("src.api.github_prs.github_pr_provider")
     async def test_uses_github_branch_as_pr_base(self, mock_provider):

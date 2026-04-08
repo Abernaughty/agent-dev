@@ -182,11 +182,16 @@ class WorkspaceManager:
             })
         return result
 
-    def add_directory(self, path: str | Path) -> bool:
+    def add_directory(self, path: str | Path, *, ephemeral: bool = False) -> bool:
         """Add a directory to the allowed list.
 
         Returns True if added, False if already present or invalid.
         The directory must exist on the filesystem.
+
+        Args:
+            path: Directory to add.
+            ephemeral: If True, skip persisting to config (used for
+                temp remote workspace dirs that shouldn't survive restart).
         """
         resolved = Path(path).resolve()
         if not resolved.is_dir():
@@ -198,8 +203,9 @@ class WorkspaceManager:
         if resolved in self._allowed_dirs:
             return False
         self._allowed_dirs.append(resolved)
-        self._save_config()
-        logger.info("Added allowed directory: %s", resolved)
+        if not ephemeral:
+            self._save_config()
+        logger.info("Added allowed directory: %s (ephemeral=%s)", resolved, ephemeral)
         return True
 
     def remove_directory(self, path: str | Path) -> bool:

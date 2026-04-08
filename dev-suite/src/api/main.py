@@ -78,6 +78,13 @@ async def lifespan(app: FastAPI):
     ws_mgr = state_manager.workspace_manager
     ws_count = len(ws_mgr.list_directories())
     ws_root = ws_mgr.default_root
+    # Issue #153: clean up stale remote workspaces on startup
+    from ..github_workspace import cleanup_stale_workspaces
+
+    stale_count = cleanup_stale_workspaces(max_age_hours=24)
+    if stale_count:
+        logger.info("Cleaned up %d stale remote workspace(s)", stale_count)
+
     logger.info(
         "Dev Suite API starting | auth=%s | cors=%s | workspaces=%d | workspace_root=%s",
         "enabled" if secret_set else "disabled (dev mode)",
@@ -170,33 +177,44 @@ async def get_task(task_id: str, _auth: str | None = Depends(require_auth)):
 
 @app.post("/tasks", response_model=ApiResponse, status_code=201)
 async def create_task(body: CreateTaskRequest, _auth: str | None = Depends(require_auth)):
-    """Create a new task with workspace validation (Issue #105).
+    """Create a new task with workspace validation (Issue #105, #153).
 
-    Validates that the workspace is in the allowed directories list.
-    If the workspace is protected, the PIN must be provided and verified.
+    For local workspaces: validates the directory is in the allowed list
+    and verifies the PIN if the workspace is protected.
+    For GitHub workspaces: validates the token can access the repo.
     """
     from .runner import task_runner
 
     ws_mgr = state_manager.workspace_manager
 
-    # Validate workspace is in the allowed list
-    if not ws_mgr.is_allowed(body.workspace):
-        _error(
-            f"Workspace '{body.workspace}' is not in the allowed directories list. "
-            f"Add it via POST /workspaces first.",
-            403,
-        )
+    if body.workspace_type == "github":
+        # Issue #153: validate GitHub token can access the target repo
+        from ..github_workspace import validate_github_token_async
 
-    # For protected workspaces, verify PIN inline
-    if ws_mgr.is_protected(body.workspace):
-        if not body.pin:
+        token_ok = await validate_github_token_async(body.github_repo)  # type: ignore[arg-type]
+        if not token_ok:
             _error(
-                f"Workspace '{body.workspace}' is protected. "
-                f"Provide 'pin' field for authorization.",
+                f"GITHUB_TOKEN cannot access repository '{body.github_repo}'. "
+                f"Verify the token has 'Contents' and 'Pull requests' scopes.",
                 403,
             )
-        if not ws_mgr.verify_pin(body.pin):
-            _error("Invalid PIN for protected workspace.", 403)
+    else:
+        # Local workspace validation (existing behaviour)
+        if not ws_mgr.is_allowed(body.workspace):
+            _error(
+                f"Workspace '{body.workspace}' is not in the allowed directories list. "
+                f"Add it via POST /workspaces first.",
+                403,
+            )
+        if ws_mgr.is_protected(body.workspace):
+            if not body.pin:
+                _error(
+                    f"Workspace '{body.workspace}' is protected. "
+                    f"Provide 'pin' field for authorization.",
+                    403,
+                )
+            if not ws_mgr.verify_pin(body.pin):
+                _error("Invalid PIN for protected workspace.", 403)
 
     task_id = await state_manager.create_task(body.description, workspace=body.workspace)
     task_runner.submit(
