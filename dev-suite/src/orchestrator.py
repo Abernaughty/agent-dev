@@ -50,6 +50,10 @@ from .memory.factory import create_memory_store
 from .memory.protocol import MemoryStore
 from .memory.summarizer import summarize_writes_sync
 from .sandbox.e2b_runner import E2BRunner, SandboxResult
+from .sandbox.project_runner import (
+    ProjectValidationRunner,
+    load_project_validation_config,
+)
 from .sandbox.validation_commands import (
     ValidationStrategy,
     get_validation_plan,
@@ -988,7 +992,28 @@ The user did not specify acceptance criteria for this task. In this case:
             user_msg += f"  Errors: {', '.join(sandbox_result.errors)}\n"
         if sandbox_result.output_summary:
             user_msg += f"  Output:\n{sandbox_result.output_summary}\n"
-        user_msg += "\nUse these real test results to inform your review. If sandbox tests passed, weigh that heavily in your verdict."
+        # Project-aware validation results (issue #159)
+        pv = sandbox_result.project_validation
+        if pv is not None:
+            user_msg += "\n\nProject Validation Results (full project context):\n"
+            user_msg += f"  Overall: {'PASS' if pv.overall_pass else 'FAIL'}\n"
+            user_msg += f"  Tests: {pv.tests_passed} passed, {pv.tests_failed} failed\n"
+            user_msg += f"  Lint errors: {pv.lint_errors}\n"
+            user_msg += f"  Type errors: {pv.type_errors}\n"
+            user_msg += f"  Install: {'OK' if pv.install_ok else 'FAILED'}\n"
+            if pv.errors:
+                user_msg += "  Errors:\n"
+                for err in pv.errors[:10]:
+                    user_msg += f"    - {err}\n"
+            for cr in pv.command_results:
+                if cr.exit_code != 0:
+                    user_msg += f"\n  [{cr.phase}] `{cr.command}` (exit {cr.exit_code}):\n"
+                    output = (cr.stdout[-500:] + "\n" + cr.stderr[-500:]).strip()
+                    if output:
+                        user_msg += f"    {output}\n"
+            user_msg += "\nProject validation ran the FULL test suite against the actual project. Weight these results very heavily."
+        else:
+            user_msg += "\nUse these real test results to inform your review. If sandbox tests passed, weigh that heavily in your verdict."
     else:
         user_msg += "\n\nNote: Sandbox validation was not available for this review. Evaluate the code based on the Blueprint criteria only."
     messages = [SystemMessage(content=system_prompt), HumanMessage(content=user_msg)]
@@ -1043,6 +1068,21 @@ def _run_sandbox_script(script_file, template, parsed_files=None, timeout=30):
     return runner.run_script(script_file=script_file, project_files=project_files, timeout=timeout, template=template)
 
 
+def _run_project_validation(config, workspace_root, parsed_files=None, template=None):
+    """Run project-aware validation in E2B sandbox (issue #159)."""
+    api_key = os.getenv("E2B_API_KEY")
+    if not api_key:
+        return None
+    runner = ProjectValidationRunner(api_key=api_key)
+    changed_files = {pf["path"]: pf["content"] for pf in parsed_files} if parsed_files else {}
+    return runner.run_project_validation(
+        config=config,
+        workspace_root=Path(workspace_root),
+        changed_files=changed_files,
+        template=template,
+    )
+
+
 async def sandbox_validate_node(state: GraphState) -> dict:
     trace = list(state.get("trace", []))
     trace.append("sandbox_validate: starting")
@@ -1050,7 +1090,13 @@ async def sandbox_validate_node(state: GraphState) -> dict:
     if not blueprint:
         trace.append("sandbox_validate: no blueprint -- skipping")
         return {"sandbox_result": None, "trace": trace}
-    plan = get_validation_plan(blueprint.target_files)
+
+    # Check for project-aware validation config (issue #159)
+    ws_root = state.get("workspace_root", "")
+    workspace_path = Path(ws_root).resolve() if ws_root else _get_workspace_root()
+    project_config = load_project_validation_config(workspace_path)
+
+    plan = get_validation_plan(blueprint.target_files, project_config=project_config)
     trace.append(f"sandbox_validate: {plan.description}")
     if plan.strategy == ValidationStrategy.SKIP:
         trace.append("sandbox_validate: no code validation needed -- skipping")
@@ -1065,7 +1111,15 @@ async def sandbox_validate_node(state: GraphState) -> dict:
     trace.append(f"sandbox_validate: strategy={plan.strategy.value}, template={template_label}")
     try:
         result = None
-        if plan.strategy == ValidationStrategy.SCRIPT_EXEC:
+        if plan.strategy == ValidationStrategy.PROJECT:
+            trace.append(f"sandbox_validate: running project validation ({len(plan.commands)} commands)")
+            result = _run_project_validation(
+                config=plan.project_config,
+                workspace_root=workspace_path,
+                parsed_files=parsed_files if parsed_files else None,
+                template=plan.template,
+            )
+        elif plan.strategy == ValidationStrategy.SCRIPT_EXEC:
             trace.append(f"sandbox_validate: executing script {plan.script_file}")
             result = _run_sandbox_script(script_file=plan.script_file, template=plan.template, parsed_files=parsed_files if parsed_files else None)
         elif plan.strategy in {ValidationStrategy.TEST_SUITE, ValidationStrategy.LINT_ONLY}:

@@ -48,6 +48,32 @@ class SandboxProfile(str, Enum):
 
 # -- Structured Output --
 
+class CommandResult(BaseModel):
+    """Result of a single validation command."""
+    command: str
+    exit_code: int
+    stdout: str = ""
+    stderr: str = ""
+    phase: str  # "install" | "test" | "lint" | "type"
+
+
+class ProjectValidationResult(BaseModel):
+    """Structured result from project-aware validation (issue #159).
+
+    Returned when a workspace has a .dev-suite.json with validation
+    config enabled. Contains per-command results plus aggregated counts.
+    """
+    overall_pass: bool
+    command_results: list[CommandResult] = []
+    tests_passed: int = 0
+    tests_failed: int = 0
+    lint_errors: int = 0
+    type_errors: int = 0
+    install_ok: bool = True
+    errors: list[str] = []
+    duration_seconds: float = 0.0
+
+
 class SandboxResult(BaseModel):
     """Structured output from sandbox execution.
 
@@ -62,6 +88,7 @@ class SandboxResult(BaseModel):
     timed_out: bool = False
     validation_skipped: bool = False
     warnings: list[str] = []
+    project_validation: ProjectValidationResult | None = None
 
 
 # -- Secret Patterns for Scanning --
