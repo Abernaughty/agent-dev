@@ -1,0 +1,16 @@
+{
+  "validation": {
+    "enabled": true,
+    "install_commands": [
+      "cd dev-suite && pip install -e '.[dev]' 2>/dev/null || pip install -e . 2>/dev/null || echo 'install skipped'"
+    ],
+    "test_commands": [
+      "cd dev-suite && python -m pytest tests/ -x --tb=short -q"
+    ],
+    "lint_commands": [
+      "cd dev-suite && ruff check src/ --select=E,F,W --no-fix"
+    ],
+    "type_commands": [],
+    "timeout": 180
+  }
+}

@@ -14,11 +14,17 @@ Previously, all Python tasks got ruff + pytest even when no test
 suite existed, causing misleading "passed" results.
 """
 
+from __future__ import annotations
+
 import os
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import TYPE_CHECKING
 
 from .e2b_runner import select_template_for_files
+
+if TYPE_CHECKING:
+    from .project_runner import ProjectValidationConfig
 
 # -- File Extension Categories --
 
@@ -46,6 +52,7 @@ class ValidationStrategy(str, Enum):
     SCRIPT_EXEC = "script_exec"
     LINT_ONLY = "lint_only"
     SKIP = "skip"
+    PROJECT = "project"
 
 
 @dataclass
@@ -65,6 +72,7 @@ class ValidationPlan:
     commands: list[str] = field(default_factory=list)
     script_file: str | None = None
     description: str = ""
+    project_config: ProjectValidationConfig | None = None
 
 
 # -- Command Sets --
@@ -155,10 +163,14 @@ def _get_primary_script(target_files: list[str]) -> str | None:
     return py_files[0]
 
 
-def get_validation_plan(target_files: list[str]) -> ValidationPlan:
+def get_validation_plan(
+    target_files: list[str],
+    project_config: ProjectValidationConfig | None = None,
+) -> ValidationPlan:
     """Determine the validation plan based on target file types.
 
     Strategy selection:
+      - Project config enabled -> PROJECT (full project validation)
       - No files -> SKIP
       - Non-code files only -> SKIP
       - Frontend files -> TEST_SUITE (pnpm check + tsc)
@@ -170,10 +182,31 @@ def get_validation_plan(target_files: list[str]) -> ValidationPlan:
 
     Args:
         target_files: List of file paths from the Blueprint.
+        project_config: Optional workspace-level validation config.
 
     Returns:
         ValidationPlan with strategy, template, commands, and description.
     """
+    # Project-aware validation takes precedence when configured
+    if project_config is not None:
+        all_commands = (
+            project_config.test_commands
+            + project_config.lint_commands
+            + project_config.type_commands
+        )
+        return ValidationPlan(
+            strategy=ValidationStrategy.PROJECT,
+            template=select_template_for_files(target_files) if target_files else None,
+            commands=all_commands,
+            project_config=project_config,
+            description=(
+                f"Project validation: {len(target_files)} file(s) against "
+                f"full project ({len(project_config.test_commands)} test, "
+                f"{len(project_config.lint_commands)} lint, "
+                f"{len(project_config.type_commands)} type commands)"
+            ),
+        )
+
     if not target_files:
         return ValidationPlan(
             strategy=ValidationStrategy.SKIP,
@@ -278,6 +311,27 @@ def format_validation_summary(plan: ValidationPlan) -> str:
     """
     if plan.strategy == ValidationStrategy.SKIP:
         return plan.description
+
+    if plan.strategy == ValidationStrategy.PROJECT:
+        lines = [plan.description]
+        if plan.project_config:
+            if plan.project_config.install_commands:
+                lines.append("Install:")
+                for cmd in plan.project_config.install_commands:
+                    lines.append(f"  $ {cmd}")
+            if plan.project_config.lint_commands:
+                lines.append("Lint:")
+                for cmd in plan.project_config.lint_commands:
+                    lines.append(f"  $ {cmd}")
+            if plan.project_config.test_commands:
+                lines.append("Test:")
+                for cmd in plan.project_config.test_commands:
+                    lines.append(f"  $ {cmd}")
+            if plan.project_config.type_commands:
+                lines.append("Type check:")
+                for cmd in plan.project_config.type_commands:
+                    lines.append(f"  $ {cmd}")
+        return "\n".join(lines)
 
     if plan.strategy == ValidationStrategy.SCRIPT_EXEC:
         lines = [plan.description]
