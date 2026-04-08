@@ -240,7 +240,7 @@
 			github_feature_branch: workspacesStore.workspaceType === 'github' && workspacesStore.githubFeatureBranch ? workspacesStore.githubFeatureBranch : null,
 		});
 		if (taskId) {
-			tasksStore.refresh();
+			await tasksStore.refresh();
 		}
 	}
 

@@ -245,19 +245,16 @@
 	</div>
 
 	{#if workspacesStore.workspaceType === 'github'}
-		<!-- Remote GitHub workspace fields -->
+		<!-- Remote GitHub workspace fields (2-column grid) -->
 		<div class="remote-fields">
 			<div class="remote-field">
-				<span class="field-label">TOKEN</span>
-				<div class="field-row">
-					<input
-						class="remote-input"
-						value={workspacesStore.githubTokenEnvVar}
-						oninput={(e) => workspacesStore.setGithubTokenEnvVar(e.currentTarget.value)}
-						placeholder="GITHUB_TOKEN"
-					/>
-					<span class="field-hint">(env var)</span>
-				</div>
+				<span class="field-label">TOKEN <span class="field-hint">(env var)</span></span>
+				<input
+					class="remote-input"
+					value={workspacesStore.githubTokenEnvVar}
+					oninput={(e) => workspacesStore.setGithubTokenEnvVar(e.currentTarget.value)}
+					placeholder="GITHUB_TOKEN"
+				/>
 			</div>
 			<div class="remote-field">
 				<span class="field-label">REPOSITORY</span>
@@ -285,7 +282,6 @@
 					oninput={(e) => workspacesStore.setGithubFeatureBranch(e.currentTarget.value)}
 					placeholder="auto — e.g. agent/task-..."
 				/>
-				<span class="field-hint-block">Leave blank to let the planner decide</span>
 			</div>
 		</div>
 	{:else}
@@ -522,32 +518,27 @@
 		color: var(--color-text-muted);
 	}
 
-	/* -- Issue #153: Remote fields -- */
+	/* -- Issue #153: Remote fields (compact 2-col grid) -- */
 	.remote-fields {
-		display: flex;
-		flex-direction: column;
-		gap: 6px;
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		gap: 4px 8px;
 	}
 	.remote-field {
 		display: flex;
 		flex-direction: column;
-		gap: 2px;
+		gap: 1px;
 	}
 	.field-label {
 		font-size: 9px;
 		color: var(--color-text-dim);
 		letter-spacing: 0.5px;
 	}
-	.field-row {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-	}
 	.remote-input {
 		background: var(--color-bg-input);
 		border: 1px solid var(--color-border);
 		border-radius: 3px;
-		padding: 4px 8px;
+		padding: 3px 6px;
 		color: var(--color-text-bright);
 		font-family: var(--font-mono);
 		font-size: 11px;
@@ -561,13 +552,10 @@
 		color: var(--color-text-dim);
 	}
 	.field-hint {
-		font-size: 9px;
+		font-size: 8px;
 		color: var(--color-text-dim);
-		flex-shrink: 0;
-	}
-	.field-hint-block {
-		font-size: 9px;
-		color: var(--color-text-dim);
+		font-weight: 400;
+		letter-spacing: 0;
 	}
 
 	.selector-bar {
