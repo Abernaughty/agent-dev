@@ -105,11 +105,17 @@ export interface TaskDetail extends TaskSummary {
 	error_message: string;
 }
 
+export type WorkspaceType = 'local' | 'github';
+
 export interface CreateTaskRequest {
 	description: string;
 	workspace: string;
 	pin?: string | null;
-	publish_pr?: boolean | null;
+	create_pr?: boolean | null;
+	workspace_type?: WorkspaceType;
+	github_repo?: string | null;
+	github_branch?: string | null;
+	github_feature_branch?: string | null;
 }
 
 export interface CreateTaskResponse {

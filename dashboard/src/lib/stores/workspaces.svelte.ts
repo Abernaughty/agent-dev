@@ -6,9 +6,10 @@
  * Handles PIN verification for protected workspaces.
  *
  * Issue #106: Planner + chat task creation
+ * Issue #153: Remote GitHub workspace support
  */
 
-import type { WorkspaceInfo, VerifyWorkspaceAuthResponse } from '$lib/types/api.js';
+import type { WorkspaceInfo, WorkspaceType, VerifyWorkspaceAuthResponse } from '$lib/types/api.js';
 
 let workspaces = $state<WorkspaceInfo[]>([]);
 let selectedPath = $state<string>('');
@@ -20,6 +21,13 @@ let pinVerified = $state(false);
 let pinError = $state<string | null>(null);
 /** Stores the verified PIN so it can be forwarded to task creation. */
 let storedPin = $state<string | null>(null);
+
+/** Issue #153: Remote workspace state. */
+let workspaceType = $state<WorkspaceType>('local');
+let githubRepo = $state<string>('');
+let githubBranch = $state<string>('main');
+let githubFeatureBranch = $state<string>('');
+let githubTokenEnvVar = $state<string>('GITHUB_TOKEN');
 
 export const workspacesStore = {
 	get list() {
@@ -45,6 +53,52 @@ export const workspacesStore = {
 		return storedPin;
 	},
 
+	/** Issue #153: Remote workspace getters/setters. */
+	get workspaceType() {
+		return workspaceType;
+	},
+	get githubRepo() {
+		return githubRepo;
+	},
+	get githubBranch() {
+		return githubBranch;
+	},
+	get githubFeatureBranch() {
+		return githubFeatureBranch;
+	},
+	get githubTokenEnvVar() {
+		return githubTokenEnvVar;
+	},
+
+	setWorkspaceType(type: WorkspaceType) {
+		workspaceType = type;
+		if (type === 'local') {
+			// Reset remote fields when switching back to local
+			githubRepo = '';
+			githubBranch = 'main';
+			githubFeatureBranch = '';
+			githubTokenEnvVar = 'GITHUB_TOKEN';
+		}
+	},
+	setGithubRepo(repo: string) {
+		githubRepo = repo;
+	},
+	setGithubBranch(branch: string) {
+		githubBranch = branch;
+	},
+	setGithubFeatureBranch(branch: string) {
+		githubFeatureBranch = branch;
+	},
+	setGithubTokenEnvVar(envVar: string) {
+		githubTokenEnvVar = envVar;
+	},
+
+	/** Whether the remote workspace config is valid for task creation. */
+	get isRemoteReady(): boolean {
+		if (workspaceType !== 'github') return true;
+		return githubRepo.includes('/') && githubRepo.length > 2;
+	},
+
 	/** Whether the currently selected workspace is protected. */
 	get isSelectedProtected(): boolean {
 		const ws = workspaces.find((w) => w.path === selectedPath);
@@ -53,6 +107,7 @@ export const workspacesStore = {
 
 	/** Whether the selected workspace is ready for task creation. */
 	get canCreateTask(): boolean {
+		if (workspaceType === 'github') return this.isRemoteReady;
 		if (!selectedPath) return false;
 		if (this.isSelectedProtected && !pinVerified) return false;
 		return true;
@@ -154,5 +209,10 @@ export const workspacesStore = {
 		pinVerified = false;
 		pinError = null;
 		storedPin = null;
+		workspaceType = 'local';
+		githubRepo = '';
+		githubBranch = 'main';
+		githubFeatureBranch = '';
+		githubTokenEnvVar = 'GITHUB_TOKEN';
 	}
 };

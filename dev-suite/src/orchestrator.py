@@ -111,7 +111,11 @@ class GraphState(TypedDict, total=False):
     tool_calls_log: list[dict]
     memory_writes_flushed: list[dict]
     workspace_root: str
-    publish_pr: bool
+    create_pr: bool
+    workspace_type: str
+    github_repo: str | None
+    github_branch: str | None
+    github_feature_branch: str | None
     working_branch: str | None
     pr_url: str | None
     pr_number: int | None
@@ -133,7 +137,11 @@ class AgentState(BaseModel):
     parsed_files: list[dict] = []
     tool_calls_log: list[dict] = []
     workspace_root: str = ""
-    publish_pr: bool = True
+    create_pr: bool = True
+    workspace_type: str = "local"
+    github_repo: str | None = None
+    github_branch: str | None = None
+    github_feature_branch: str | None = None
     working_branch: str | None = None
     pr_url: str | None = None
     pr_number: int | None = None
@@ -896,10 +904,10 @@ async def _publish_code_async(state: dict) -> dict:
         trace.append("publish_code: skipped -- no GITHUB_TOKEN configured")
         logger.info("[PUBLISH] Skipped: no GITHUB_TOKEN")
         return {"trace": trace}
-    publish_pr = state.get("publish_pr", True)
-    if not publish_pr:
-        trace.append("publish_code: skipped -- publish_pr=False (user opted out)")
-        logger.info("[PUBLISH] Skipped: publish_pr=False")
+    create_pr = state.get("create_pr", True)
+    if not create_pr:
+        trace.append("publish_code: skipped -- create_pr=False (user opted out)")
+        logger.info("[PUBLISH] Skipped: create_pr=False")
         return {"trace": trace}
     parsed_files = state.get("parsed_files", [])
     if not parsed_files:
@@ -912,7 +920,9 @@ async def _publish_code_async(state: dict) -> dict:
         logger.info("[PUBLISH] Skipped: no blueprint")
         return {"trace": trace}
     task_id = blueprint.task_id
-    branch_name = f"agent/{task_id}"
+    # Issue #153: use custom feature branch name if provided
+    github_feature_branch = state.get("github_feature_branch")
+    branch_name = github_feature_branch if github_feature_branch else f"agent/{task_id}"
     branch_name = re.sub(r"[^a-zA-Z0-9/_-]", "-", branch_name)
     try:
         trace.append(f"publish_code: creating branch '{branch_name}'")
@@ -958,7 +968,9 @@ async def _publish_code_async(state: dict) -> dict:
         if len(blueprint.instructions) > 80:
             pr_title = pr_title[:83] + "..."
         trace.append("publish_code: opening PR")
-        pr_result = await github_pr_provider.create_pr(head=branch_name, base="main", title=pr_title, body=pr_body)
+        # Issue #153: use github_branch as PR base for remote workspaces
+        pr_base = state.get("github_branch") or "main"
+        pr_result = await github_pr_provider.create_pr(head=branch_name, base=pr_base, title=pr_title, body=pr_body)
         if pr_result:
             trace.append(f"publish_code: PR #{pr_result.number} opened -> {pr_result.id}")
             logger.info("[PUBLISH] PR #%d opened: %s", pr_result.number, pr_title)
@@ -1053,8 +1065,8 @@ def run_task(task_description, enable_tracing=True, session_id=None, tags=None):
     trace_config = create_trace_config(enabled=enable_tracing, task_description=task_description, session_id=session_id, tags=tags or ["orchestrator"], metadata={"max_retries": str(MAX_RETRIES), "token_budget": str(TOKEN_BUDGET)})
     workflow = create_workflow()
     tools_config = init_tools_config()
-    publish_pr = bool(os.getenv("GITHUB_TOKEN"))
-    initial_state: GraphState = {"task_description": task_description, "blueprint": None, "generated_code": "", "failure_report": None, "status": WorkflowStatus.PLANNING, "retry_count": 0, "tokens_used": 0, "error_message": "", "memory_context": [], "memory_writes": [], "trace": [], "sandbox_result": None, "parsed_files": [], "tool_calls_log": [], "publish_pr": publish_pr}
+    create_pr = bool(os.getenv("GITHUB_TOKEN"))
+    initial_state: GraphState = {"task_description": task_description, "blueprint": None, "generated_code": "", "failure_report": None, "status": WorkflowStatus.PLANNING, "retry_count": 0, "tokens_used": 0, "error_message": "", "memory_context": [], "memory_writes": [], "trace": [], "sandbox_result": None, "parsed_files": [], "tool_calls_log": [], "create_pr": create_pr, "workspace_type": "local"}
     invoke_config = {"recursion_limit": 25, **tools_config}
     if trace_config.callbacks:
         invoke_config["callbacks"] = trace_config.callbacks

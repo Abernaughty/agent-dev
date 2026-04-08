@@ -4,7 +4,7 @@ These define the contract between the FastAPI backend and the SvelteKit
 dashboard. All endpoints return an ApiResponse envelope.
 
 Issue #19: Added AuditLogEntry, confidence/sandbox/related_files to MemoryEntryResponse
-Issue #89: Added publish_pr to CreateTaskRequest, pr_url/working_branch/pr_number to TaskSummary
+Issue #89: Added create_pr to CreateTaskRequest, pr_url/working_branch/pr_number to TaskSummary
 Issue #105: Added workspace models, workspace field to CreateTaskRequest/TaskSummary
 Issue #106: Added Planner session models (PlannerStartRequest, PlannerMessageRequest, etc.)
 Issue #107: Added sandbox output fields to TimelineEvent
@@ -290,7 +290,7 @@ class MergePRRequest(BaseModel):
 class CreateTaskRequest(BaseModel):
     """Request body for creating a new task.
 
-    Issue #89: publish_pr controls whether a PR is opened after QA passes.
+    Issue #89/#153: create_pr controls whether a PR is opened after QA passes.
     Defaults to True when GITHUB_TOKEN is configured.
     Issue #105: workspace is required. The dashboard pre-fills it with
     WORKSPACE_ROOT, but it must be explicitly sent. For protected
@@ -309,10 +309,27 @@ class CreateTaskRequest(BaseModel):
         description="Admin PIN for protected workspaces. "
         "Required when workspace is protected.",
     )
-    publish_pr: bool | None = Field(
+    create_pr: bool | None = Field(
         default=None,
         description="Whether to create a branch and open a PR after QA passes. "
         "Defaults to True if GITHUB_TOKEN is configured, False otherwise.",
+    )
+    workspace_type: str = Field(
+        default="local",
+        pattern="^(local|github)$",
+        description="Workspace mode: 'local' for local directory, 'github' for remote repo.",
+    )
+    github_repo: str | None = Field(
+        default=None,
+        description="GitHub repository in 'owner/repo' format. Required when workspace_type='github'.",
+    )
+    github_branch: str | None = Field(
+        default=None,
+        description="Target branch the PR will merge into. Required when workspace_type='github'.",
+    )
+    github_feature_branch: str | None = Field(
+        default=None,
+        description="Feature branch name. Auto-generated as 'agent/{task_id}' if blank.",
     )
 
 

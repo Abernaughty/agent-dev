@@ -226,39 +226,103 @@
 </script>
 
 <div class="workspace-selector" style="font-family: var(--font-mono);" bind:this={selectorEl}>
-	<!-- Selector bar -->
-	<div class="selector-bar">
-		<span class="label">WORKSPACE</span>
+	<!-- Issue #153: Local/Remote toggle -->
+	<div class="mode-toggle">
 		<button
-			class="selector-button"
-			onclick={() => (showDropdown = !showDropdown)}
-			title={workspacesStore.selected || 'Select workspace'}
+			class="mode-btn"
+			class:active={workspacesStore.workspaceType === 'local'}
+			onclick={() => workspacesStore.setWorkspaceType('local')}
 		>
-			{#if workspacesStore.isSelectedProtected}
-				<span class="lock-icon">🔒</span>
-			{/if}
-			<span class="path-text">{displayPath(workspacesStore.selected)}</span>
-			<span class="chevron">{showDropdown ? '▲' : '▼'}</span>
+			Local
 		</button>
-		{#if workspacesStore.isSelectedProtected && !workspacesStore.pinVerified}
-			<button
-				class="pin-trigger"
-				onclick={() => {
-					showPinInput = !showPinInput;
-					pinValue = '';
-				}}
-				title="PIN required"
-			>
-				PIN
-			</button>
-		{/if}
-		{#if workspacesStore.isSelectedProtected && workspacesStore.pinVerified}
-			<span class="verified-badge">✓</span>
-		{/if}
+		<button
+			class="mode-btn"
+			class:active={workspacesStore.workspaceType === 'github'}
+			onclick={() => workspacesStore.setWorkspaceType('github')}
+		>
+			Remote
+		</button>
 	</div>
 
-	<!-- Dropdown -->
-	{#if showDropdown}
+	{#if workspacesStore.workspaceType === 'github'}
+		<!-- Remote GitHub workspace fields -->
+		<div class="remote-fields">
+			<div class="remote-field">
+				<span class="field-label">TOKEN</span>
+				<div class="field-row">
+					<input
+						class="remote-input"
+						value={workspacesStore.githubTokenEnvVar}
+						oninput={(e) => workspacesStore.setGithubTokenEnvVar(e.currentTarget.value)}
+						placeholder="GITHUB_TOKEN"
+					/>
+					<span class="field-hint">(env var)</span>
+				</div>
+			</div>
+			<div class="remote-field">
+				<span class="field-label">REPOSITORY</span>
+				<input
+					class="remote-input"
+					value={workspacesStore.githubRepo}
+					oninput={(e) => workspacesStore.setGithubRepo(e.currentTarget.value)}
+					placeholder="owner/repo"
+				/>
+			</div>
+			<div class="remote-field">
+				<span class="field-label">TARGET BRANCH</span>
+				<input
+					class="remote-input"
+					value={workspacesStore.githubBranch}
+					oninput={(e) => workspacesStore.setGithubBranch(e.currentTarget.value)}
+					placeholder="main"
+				/>
+			</div>
+			<div class="remote-field">
+				<span class="field-label">FEATURE BRANCH</span>
+				<input
+					class="remote-input"
+					value={workspacesStore.githubFeatureBranch}
+					oninput={(e) => workspacesStore.setGithubFeatureBranch(e.currentTarget.value)}
+					placeholder="auto — e.g. agent/task-..."
+				/>
+				<span class="field-hint-block">Leave blank to let the planner decide</span>
+			</div>
+		</div>
+	{:else}
+		<!-- Local workspace selector bar (existing) -->
+		<div class="selector-bar">
+			<span class="label">WORKSPACE</span>
+			<button
+				class="selector-button"
+				onclick={() => (showDropdown = !showDropdown)}
+				title={workspacesStore.selected || 'Select workspace'}
+			>
+				{#if workspacesStore.isSelectedProtected}
+					<span class="lock-icon">🔒</span>
+				{/if}
+				<span class="path-text">{displayPath(workspacesStore.selected)}</span>
+				<span class="chevron">{showDropdown ? '▲' : '▼'}</span>
+			</button>
+			{#if workspacesStore.isSelectedProtected && !workspacesStore.pinVerified}
+				<button
+					class="pin-trigger"
+					onclick={() => {
+						showPinInput = !showPinInput;
+						pinValue = '';
+					}}
+					title="PIN required"
+				>
+					PIN
+				</button>
+			{/if}
+			{#if workspacesStore.isSelectedProtected && workspacesStore.pinVerified}
+				<span class="verified-badge">✓</span>
+			{/if}
+		</div>
+	{/if}
+
+	<!-- Dropdown (local mode only) -->
+	{#if showDropdown && workspacesStore.workspaceType === 'local'}
 		<div class="dropdown">
 			{#each workspacesStore.list as ws}
 				<button
@@ -387,8 +451,8 @@
 		</div>
 	{/if}
 
-	<!-- PIN input -->
-	{#if showPinInput && workspacesStore.isSelectedProtected && !workspacesStore.pinVerified}
+	<!-- PIN input (local mode only) -->
+	{#if showPinInput && workspacesStore.workspaceType === 'local' && workspacesStore.isSelectedProtected && !workspacesStore.pinVerified}
 		<div class="pin-row">
 			<span class="pin-label">PIN:</span>
 			<input
@@ -423,6 +487,89 @@
 		padding: 6px 16px;
 		position: relative;
 	}
+
+	/* -- Issue #153: Mode toggle -- */
+	.mode-toggle {
+		display: flex;
+		gap: 0;
+		margin-bottom: 6px;
+		border: 1px solid var(--color-border);
+		border-radius: 4px;
+		overflow: hidden;
+		width: fit-content;
+	}
+	.mode-btn {
+		background: transparent;
+		border: none;
+		color: var(--color-text-dim);
+		font-family: var(--font-mono);
+		font-size: 9px;
+		letter-spacing: 0.5px;
+		padding: 3px 12px;
+		cursor: pointer;
+		text-transform: uppercase;
+		font-weight: 600;
+	}
+	.mode-btn:not(:last-child) {
+		border-right: 1px solid var(--color-border);
+	}
+	.mode-btn.active {
+		background: var(--color-accent-cyan)15;
+		color: var(--color-accent-cyan);
+	}
+	.mode-btn:hover:not(.active) {
+		background: var(--color-bg-surface);
+		color: var(--color-text-muted);
+	}
+
+	/* -- Issue #153: Remote fields -- */
+	.remote-fields {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+	}
+	.remote-field {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+	}
+	.field-label {
+		font-size: 9px;
+		color: var(--color-text-dim);
+		letter-spacing: 0.5px;
+	}
+	.field-row {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+	}
+	.remote-input {
+		background: var(--color-bg-input);
+		border: 1px solid var(--color-border);
+		border-radius: 3px;
+		padding: 4px 8px;
+		color: var(--color-text-bright);
+		font-family: var(--font-mono);
+		font-size: 11px;
+		outline: none;
+		width: 100%;
+	}
+	.remote-input:focus {
+		border-color: var(--color-accent-cyan);
+	}
+	.remote-input::placeholder {
+		color: var(--color-text-dim);
+	}
+	.field-hint {
+		font-size: 9px;
+		color: var(--color-text-dim);
+		flex-shrink: 0;
+	}
+	.field-hint-block {
+		font-size: 9px;
+		color: var(--color-text-dim);
+	}
+
 	.selector-bar {
 		display: flex;
 		align-items: center;
