@@ -37,6 +37,7 @@ class TestGraphConstruction:
         graph = build_graph()
         compiled = graph.compile()
         node_names = set(compiled.get_graph().nodes.keys())
+        assert "gather_context" in node_names
         assert "architect" in node_names
         assert "developer" in node_names
         assert "qa" in node_names
