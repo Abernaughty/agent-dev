@@ -44,7 +44,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel
 
-from .agents.architect import Blueprint
+from .agents.architect import Blueprint, TaskDecomposition
 from .agents.qa import FailureReport
 from .memory.factory import create_memory_store
 from .memory.protocol import MemoryStore
@@ -85,6 +85,8 @@ MAX_RETRY_FILE_CHARS = _safe_int("MAX_RETRY_FILE_CHARS", 30000)
 CONTEXT_BUDGET_CHARS = _safe_int("CONTEXT_BUDGET_CHARS", 120000)  # ~30k tokens
 CONTEXT_FILE_MAX_LINES = _safe_int("CONTEXT_FILE_MAX_LINES", 500)
 CONTEXT_FILE_TAIL_LINES = _safe_int("CONTEXT_FILE_TAIL_LINES", 50)
+DECOMPOSE_FILE_THRESHOLD = _safe_int("DECOMPOSE_FILE_THRESHOLD", 5)
+DECOMPOSE_DIR_THRESHOLD = _safe_int("DECOMPOSE_DIR_THRESHOLD", 2)
 
 
 def _get_workspace_root() -> Path:
@@ -127,6 +129,9 @@ class GraphState(TypedDict, total=False):
     pr_url: str | None
     pr_number: int | None
     gathered_context: list[dict] | None
+    decomposition: TaskDecomposition | None
+    current_subtask_index: int
+    completed_subtasks: list[dict]
 
 
 class AgentState(BaseModel):
@@ -154,6 +159,9 @@ class AgentState(BaseModel):
     pr_url: str | None = None
     pr_number: int | None = None
     gathered_context: list[dict] | None = None
+    decomposition: TaskDecomposition | None = None
+    current_subtask_index: int = 0
+    completed_subtasks: list[dict] = []
 
 
 # -- LLM Provider Auto-Detection --
@@ -656,6 +664,125 @@ async def gather_context_node(state: GraphState) -> dict:
     return {"gathered_context": gathered, "trace": trace}
 
 
+# -- Task Decomposition (Issue #58) --
+
+def _needs_decomposition(task_description: str, gathered_context: list[dict] | None) -> bool:
+    """Determine if a task is large enough to warrant decomposition.
+
+    Returns True if gathered context has >= DECOMPOSE_FILE_THRESHOLD files
+    OR files span >= DECOMPOSE_DIR_THRESHOLD top-level directories.
+    """
+    if not gathered_context:
+        return False
+    file_paths = [ctx["path"] for ctx in gathered_context]
+    if len(file_paths) >= DECOMPOSE_FILE_THRESHOLD:
+        return True
+    top_dirs = {p.split("/")[0] for p in file_paths if "/" in p}
+    return len(top_dirs) >= DECOMPOSE_DIR_THRESHOLD
+
+
+def _build_decomposition_prompt(task_description: str, file_paths: list[str]) -> str:
+    """Build the system prompt for the decomposition LLM call."""
+    files_block = "\n".join(f"- {p}" for p in file_paths)
+    return f"""You are a task decomposition specialist. Given a complex coding task and the relevant files,
+break it down into sequenced sub-tasks that can each be implemented and tested independently.
+
+Each sub-task should:
+- Target a coherent subset of files (ideally within one module/directory)
+- Have clear instructions that can stand alone
+- List dependencies on prior sub-tasks
+
+Respond with ONLY a valid JSON object matching this schema:
+{{
+  "parent_task_id": "string (short ID for the overall task)",
+  "sub_tasks": [
+    {{
+      "sub_task_id": "string (e.g. parent_task_id-1)",
+      "parent_task_id": "string (same as above)",
+      "sequence": 0,
+      "depends_on": [],
+      "target_files": ["list of file paths for this sub-task"],
+      "instructions": "detailed instructions for this sub-task",
+      "description": "one-line summary"
+    }}
+  ],
+  "rationale": "why this decomposition was chosen"
+}}
+
+Do not include any text before or after the JSON.
+
+## Relevant Files
+{files_block}"""
+
+
+async def decompose_task_node(state: GraphState) -> dict:
+    """Decompose large tasks into ordered sub-tasks (Issue #58).
+
+    For tasks below the threshold, passes through with decomposition=None.
+    For large tasks, calls the architect LLM to produce a TaskDecomposition.
+    """
+    trace = list(state.get("trace", []))
+    trace.append("decompose_task: evaluating scope")
+
+    task_description = state.get("task_description", "")
+    gathered_context = state.get("gathered_context") or []
+
+    if not _needs_decomposition(task_description, gathered_context):
+        trace.append("decompose_task: below threshold, skipping decomposition")
+        logger.info("[DECOMPOSE] Task below decomposition threshold, single-blueprint path")
+        return {"decomposition": None, "current_subtask_index": 0, "completed_subtasks": [], "trace": trace}
+
+    file_paths = [ctx["path"] for ctx in gathered_context]
+    trace.append(f"decompose_task: {len(file_paths)} files detected, decomposing")
+    logger.info("[DECOMPOSE] %d files across workspace, invoking LLM decomposition", len(file_paths))
+
+    system_prompt = _build_decomposition_prompt(task_description, file_paths)
+    llm = _get_architect_llm()
+    tokens_used = state.get("tokens_used", 0)
+
+    try:
+        response = await llm.ainvoke([
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=task_description),
+        ])
+        raw = _extract_text_content(response.content)
+        decomp_data = _extract_json(raw)
+        decomposition = TaskDecomposition(**decomp_data)
+        tokens_used += _extract_token_count(response)
+    except (json.JSONDecodeError, Exception) as e:
+        trace.append(f"decompose_task: LLM decomposition failed ({e}), falling back to single blueprint")
+        logger.warning("[DECOMPOSE] Decomposition failed: %s, falling back", e)
+        return {"decomposition": None, "current_subtask_index": 0, "completed_subtasks": [], "trace": trace, "tokens_used": tokens_used}
+
+    # Validate: check for overlapping target_files across sub-tasks
+    all_files: list[str] = []
+    has_overlap = False
+    for st in decomposition.sub_tasks:
+        for f in st.target_files:
+            if f in all_files:
+                has_overlap = True
+                break
+            all_files.append(f)
+        if has_overlap:
+            break
+
+    if has_overlap:
+        trace.append("decompose_task: overlapping target_files detected, falling back to single blueprint")
+        logger.warning("[DECOMPOSE] Sub-tasks have overlapping files, falling back to single blueprint")
+        return {"decomposition": None, "current_subtask_index": 0, "completed_subtasks": [], "trace": trace, "tokens_used": tokens_used}
+
+    trace.append(f"decompose_task: created {len(decomposition.sub_tasks)} sub-tasks")
+    logger.info("[DECOMPOSE] Created %d sub-tasks: %s", len(decomposition.sub_tasks), [st.description for st in decomposition.sub_tasks])
+
+    return {
+        "decomposition": decomposition,
+        "current_subtask_index": 0,
+        "completed_subtasks": [],
+        "tokens_used": tokens_used,
+        "trace": trace,
+    }
+
+
 # -- Node Functions --
 # CRITICAL: All graph nodes MUST be async def on Python 3.13+.
 # Sync nodes cause "generator didn't stop after throw()" under astream().
@@ -699,7 +826,27 @@ Respond with ONLY a valid JSON object matching this schema:
 }}
 
 Do not include any text before or after the JSON.{memory_block}{source_block}"""
-    user_msg = state.get("task_description", "")
+    # Issue #58: scope architect to current sub-task when decomposed
+    decomposition = state.get("decomposition")
+    if decomposition is not None:
+        current_idx = state.get("current_subtask_index", 0)
+        current_sub = decomposition.sub_tasks[current_idx]
+        user_msg = (
+            f"## Sub-Task {current_idx + 1}/{len(decomposition.sub_tasks)}: {current_sub.description}\n\n"
+            f"{current_sub.instructions}\n\n"
+            f"Target files: {', '.join(current_sub.target_files)}\n\n"
+            f"Overall task: {state.get('task_description', '')}"
+        )
+        completed = state.get("completed_subtasks", [])
+        if completed:
+            completed_block = "\n".join(
+                f"- Sub-task {i + 1}: {c['description']} (PASSED, files: {', '.join(c['blueprint']['target_files']) if c.get('blueprint') else 'n/a'})"
+                for i, c in enumerate(completed)
+            )
+            system_prompt += f"\n\n## Previously Completed Sub-Tasks\n{completed_block}"
+        trace.append(f"architect: scoped to sub-task {current_idx + 1}/{len(decomposition.sub_tasks)}: {current_sub.description}")
+    else:
+        user_msg = state.get("task_description", "")
     failure_report = state.get("failure_report")
     if failure_report and failure_report.is_architectural:
         user_msg += "\n\nPREVIOUS ATTEMPT FAILED (architectural issue):\n"
@@ -1294,6 +1441,63 @@ async def publish_code_node(state: GraphState) -> dict:
     return await _publish_code_async(state)
 
 
+async def advance_subtask_node(state: GraphState) -> dict:
+    """Snapshot completed sub-task and reset per-sub-task state (Issue #58).
+
+    Only meaningful when decomposition is active. For simple tasks,
+    this is a pass-through so route_next_subtask sends it to flush_memory.
+    """
+    trace = list(state.get("trace", []))
+    decomposition = state.get("decomposition")
+    if decomposition is None:
+        trace.append("advance_subtask: no decomposition, pass-through")
+        return {"trace": trace}
+
+    current_idx = state.get("current_subtask_index", 0)
+    sub_tasks = decomposition.sub_tasks
+    current_sub = sub_tasks[current_idx] if current_idx < len(sub_tasks) else None
+
+    completed = list(state.get("completed_subtasks", []))
+    if current_sub:
+        blueprint = state.get("blueprint")
+        completed.append({
+            "sub_task_id": current_sub.sub_task_id,
+            "status": "passed",
+            "blueprint": blueprint.model_dump() if blueprint else None,
+            "description": current_sub.description,
+        })
+
+    next_idx = current_idx + 1
+    trace.append(f"advance_subtask: completed sub-task {current_idx + 1}/{len(sub_tasks)}")
+    logger.info("[ADVANCE] Completed sub-task %d/%d", current_idx + 1, len(sub_tasks))
+
+    return {
+        "current_subtask_index": next_idx,
+        "completed_subtasks": completed,
+        "blueprint": None,
+        "generated_code": "",
+        "failure_report": None,
+        "retry_count": 0,
+        "parsed_files": [],
+        "sandbox_result": None,
+        "tool_calls_log": [],
+        "trace": trace,
+    }
+
+
+def route_next_subtask(state: GraphState) -> Literal["architect", "flush_memory"]:
+    """Route to next sub-task or finish (Issue #58)."""
+    decomposition = state.get("decomposition")
+    if decomposition is None:
+        return "flush_memory"
+    current_idx = state.get("current_subtask_index", 0)
+    if current_idx < len(decomposition.sub_tasks):
+        logger.info("[ROUTER] Advancing to sub-task %d/%d", current_idx + 1, len(decomposition.sub_tasks))
+        return "architect"
+    logger.info("[ROUTER] All %d sub-tasks complete", len(decomposition.sub_tasks))
+    return "flush_memory"
+
+
 def route_after_qa(state: GraphState) -> Literal["publish_code", "flush_memory", "developer", "architect", "__end__"]:
     status = state.get("status", WorkflowStatus.FAILED)
     retry_count = state.get("retry_count", 0)
@@ -1315,21 +1519,25 @@ def route_after_qa(state: GraphState) -> Literal["publish_code", "flush_memory",
 def build_graph() -> StateGraph:
     graph = StateGraph(GraphState)
     graph.add_node("gather_context", gather_context_node)
+    graph.add_node("decompose_task", decompose_task_node)
     graph.add_node("architect", architect_node)
     graph.add_node("developer", developer_node)
     graph.add_node("apply_code", apply_code_node)
     graph.add_node("sandbox_validate", sandbox_validate_node)
     graph.add_node("qa", qa_node)
     graph.add_node("publish_code", publish_code_node)
+    graph.add_node("advance_subtask", advance_subtask_node)
     graph.add_node("flush_memory", flush_memory_node)
     graph.add_edge(START, "gather_context")
-    graph.add_edge("gather_context", "architect")
+    graph.add_edge("gather_context", "decompose_task")
+    graph.add_edge("decompose_task", "architect")
     graph.add_edge("architect", "developer")
     graph.add_edge("developer", "apply_code")
     graph.add_edge("apply_code", "sandbox_validate")
     graph.add_edge("sandbox_validate", "qa")
     graph.add_conditional_edges("qa", route_after_qa)
-    graph.add_edge("publish_code", "flush_memory")
+    graph.add_edge("publish_code", "advance_subtask")
+    graph.add_conditional_edges("advance_subtask", route_next_subtask)
     graph.add_edge("flush_memory", END)
     return graph
 
@@ -1372,8 +1580,8 @@ def run_task(task_description, enable_tracing=True, session_id=None, tags=None):
     workflow = create_workflow()
     tools_config = init_tools_config()
     create_pr = bool(os.getenv("GITHUB_TOKEN"))
-    initial_state: GraphState = {"task_description": task_description, "blueprint": None, "generated_code": "", "failure_report": None, "status": WorkflowStatus.PLANNING, "retry_count": 0, "tokens_used": 0, "error_message": "", "memory_context": [], "memory_writes": [], "trace": [], "sandbox_result": None, "parsed_files": [], "tool_calls_log": [], "create_pr": create_pr, "workspace_type": "local"}
-    invoke_config = {"recursion_limit": 25, **tools_config}
+    initial_state: GraphState = {"task_description": task_description, "blueprint": None, "generated_code": "", "failure_report": None, "status": WorkflowStatus.PLANNING, "retry_count": 0, "tokens_used": 0, "error_message": "", "memory_context": [], "memory_writes": [], "trace": [], "sandbox_result": None, "parsed_files": [], "tool_calls_log": [], "create_pr": create_pr, "workspace_type": "local", "decomposition": None, "current_subtask_index": 0, "completed_subtasks": []}
+    invoke_config = {"recursion_limit": 50, **tools_config}
     if trace_config.callbacks:
         invoke_config["callbacks"] = trace_config.callbacks
     with trace_config.propagation_context():

@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.agents.architect import Blueprint
+from src.agents.architect import Blueprint, SubTask, TaskDecomposition
 from src.agents.qa import FailureReport
 from src.memory.chroma_store import ChromaMemoryStore
 from src.orchestrator import (
@@ -410,3 +410,231 @@ class TestE2ETracingIntegration:
         mock_qa_llm.return_value.ainvoke = AsyncMock(return_value=_make_llm_response(SAMPLE_QA_PASS.model_dump_json()))
         result = run_task("Create email validator", enable_tracing=True)
         mock_trace.assert_called_once()
+
+
+# -- Decomposition E2E Tests (Issue #58) --
+
+
+DECOMPOSITION_RESPONSE = TaskDecomposition(
+    parent_task_id="decomp-e2e",
+    sub_tasks=[
+        SubTask(
+            sub_task_id="decomp-e2e-1",
+            parent_task_id="decomp-e2e",
+            sequence=0,
+            target_files=["src/models/user.py", "src/models/post.py"],
+            instructions="Create User and Post data models with Pydantic",
+            description="Add data models",
+        ),
+        SubTask(
+            sub_task_id="decomp-e2e-2",
+            parent_task_id="decomp-e2e",
+            sequence=1,
+            depends_on=["decomp-e2e-1"],
+            target_files=["src/api/users.py", "src/api/posts.py"],
+            instructions="Create REST API endpoints for users and posts",
+            description="Add API endpoints",
+        ),
+    ],
+    rationale="Separate models from API for independent testing",
+)
+
+BLUEPRINT_SUB1 = Blueprint(
+    task_id="decomp-e2e-1",
+    target_files=["src/models/user.py", "src/models/post.py"],
+    instructions="Create User and Post data models",
+    constraints=["Use Pydantic"],
+    acceptance_criteria=["Models validate correctly"],
+)
+
+BLUEPRINT_SUB2 = Blueprint(
+    task_id="decomp-e2e-2",
+    target_files=["src/api/users.py", "src/api/posts.py"],
+    instructions="Create REST API endpoints",
+    constraints=["Use FastAPI"],
+    acceptance_criteria=["Endpoints return 200"],
+)
+
+CODE_SUB1 = '''# --- FILE: src/models/user.py ---
+from pydantic import BaseModel
+
+class User(BaseModel):
+    name: str
+    email: str
+
+# --- FILE: src/models/post.py ---
+from pydantic import BaseModel
+
+class Post(BaseModel):
+    title: str
+    body: str
+'''
+
+CODE_SUB2 = '''# --- FILE: src/api/users.py ---
+from fastapi import APIRouter
+router = APIRouter()
+
+@router.get("/users")
+def list_users():
+    return []
+
+# --- FILE: src/api/posts.py ---
+from fastapi import APIRouter
+router = APIRouter()
+
+@router.get("/posts")
+def list_posts():
+    return []
+'''
+
+QA_PASS_SUB1 = FailureReport(
+    task_id="decomp-e2e-1",
+    status="pass",
+    tests_passed=2,
+    tests_failed=0,
+    errors=[],
+    failed_files=[],
+    is_architectural=False,
+    recommendation="Models look good.",
+)
+
+QA_PASS_SUB2 = FailureReport(
+    task_id="decomp-e2e-2",
+    status="pass",
+    tests_passed=2,
+    tests_failed=0,
+    errors=[],
+    failed_files=[],
+    is_architectural=False,
+    recommendation="API endpoints work.",
+)
+
+
+class TestE2EDecomposition:
+    """E2E tests for multi-file task decomposition (Issue #58).
+
+    These mock a 6-file task that triggers decomposition into 2 sub-tasks,
+    each going through the full architect -> developer -> QA loop.
+    """
+
+    @patch("src.orchestrator._fetch_memory_context")
+    @patch("src.orchestrator._get_qa_llm")
+    @patch("src.orchestrator._get_developer_llm")
+    @patch("src.orchestrator._get_architect_llm")
+    def test_decomposed_pipeline_both_subtasks_pass(
+        self, mock_arch_llm, mock_dev_llm, mock_qa_llm, mock_memory
+    ):
+        """Full pipeline: decompose -> sub-task 1 pass -> sub-task 2 pass -> PASSED."""
+        mock_memory.return_value = []
+
+        # Architect LLM is called 3 times:
+        # 1) decompose_task_node (returns TaskDecomposition)
+        # 2) architect_node for sub-task 1 (returns Blueprint)
+        # 3) architect_node for sub-task 2 (returns Blueprint)
+        mock_arch_llm.return_value.ainvoke = AsyncMock(
+            side_effect=[
+                _make_llm_response(DECOMPOSITION_RESPONSE.model_dump_json(), total_tokens=600),
+                _make_llm_response(BLUEPRINT_SUB1.model_dump_json(), total_tokens=400),
+                _make_llm_response(BLUEPRINT_SUB2.model_dump_json(), total_tokens=400),
+            ]
+        )
+
+        # Developer called twice (once per sub-task)
+        mock_dev_llm.return_value.ainvoke = AsyncMock(
+            side_effect=[
+                _make_llm_response(CODE_SUB1, total_tokens=800),
+                _make_llm_response(CODE_SUB2, total_tokens=800),
+            ]
+        )
+
+        # QA called twice (once per sub-task, both pass)
+        mock_qa_llm.return_value.ainvoke = AsyncMock(
+            side_effect=[
+                _make_llm_response(QA_PASS_SUB1.model_dump_json(), total_tokens=300),
+                _make_llm_response(QA_PASS_SUB2.model_dump_json(), total_tokens=300),
+            ]
+        )
+
+        # Need gathered_context with 5+ files to trigger decomposition.
+        # Patch gather_context_node to return enough files.
+        large_context = [
+            {"path": f"src/models/file{i}.py", "content": f"# file{i}", "truncated": False}
+            for i in range(6)
+        ]
+        with patch("src.orchestrator.gather_context_node", new=AsyncMock(
+            return_value={"gathered_context": large_context, "trace": ["gather_context: 6 files"]}
+        )):
+            result = run_task(
+                "Build a user management system with models and API endpoints",
+                enable_tracing=False,
+            )
+
+        assert result.status == WorkflowStatus.PASSED
+        assert result.decomposition is not None
+        assert len(result.decomposition.sub_tasks) == 2
+        assert len(result.completed_subtasks) == 2
+        assert result.completed_subtasks[0]["sub_task_id"] == "decomp-e2e-1"
+        assert result.completed_subtasks[1]["sub_task_id"] == "decomp-e2e-2"
+        # Tokens: 600 (decomp) + 400+800+300 (sub1) + 400+800+300 (sub2) = 3600
+        assert result.tokens_used == 3600
+        assert mock_arch_llm.return_value.ainvoke.call_count == 3
+        assert mock_dev_llm.return_value.ainvoke.call_count == 2
+        assert mock_qa_llm.return_value.ainvoke.call_count == 2
+
+    @patch("src.orchestrator._fetch_memory_context")
+    @patch("src.orchestrator._get_qa_llm")
+    @patch("src.orchestrator._get_developer_llm")
+    @patch("src.orchestrator._get_architect_llm")
+    def test_decomposed_pipeline_subtask_failure_skips_remaining(
+        self, mock_arch_llm, mock_dev_llm, mock_qa_llm, mock_memory
+    ):
+        """Sub-task 1 fails after max retries -> remaining sub-tasks skipped."""
+        mock_memory.return_value = []
+
+        mock_arch_llm.return_value.ainvoke = AsyncMock(
+            side_effect=[
+                _make_llm_response(DECOMPOSITION_RESPONSE.model_dump_json(), total_tokens=600),
+                _make_llm_response(BLUEPRINT_SUB1.model_dump_json(), total_tokens=400),
+            ]
+        )
+
+        # Developer produces code each time
+        mock_dev_llm.return_value.ainvoke = AsyncMock(
+            return_value=_make_llm_response(CODE_SUB1, total_tokens=800)
+        )
+
+        # QA always fails for sub-task 1 (triggers max retries -> flush_memory -> END)
+        qa_fail = FailureReport(
+            task_id="decomp-e2e-1",
+            status="fail",
+            tests_passed=0,
+            tests_failed=2,
+            errors=["Test failure"],
+            failed_files=["src/models/user.py"],
+            is_architectural=False,
+            recommendation="Fix the models.",
+        )
+        mock_qa_llm.return_value.ainvoke = AsyncMock(
+            return_value=_make_llm_response(qa_fail.model_dump_json(), total_tokens=300)
+        )
+
+        large_context = [
+            {"path": f"src/models/file{i}.py", "content": f"# file{i}", "truncated": False}
+            for i in range(6)
+        ]
+        with patch("src.orchestrator.gather_context_node", new=AsyncMock(
+            return_value={"gathered_context": large_context, "trace": ["gather_context: 6 files"]}
+        )):
+            result = run_task(
+                "Build a user management system",
+                enable_tracing=False,
+            )
+
+        # Sub-task 1 failed after retries, sub-task 2 was never attempted
+        assert result.status != WorkflowStatus.PASSED
+        assert result.decomposition is not None
+        assert len(result.completed_subtasks) == 0  # no sub-task passed
+        # Developer was called multiple times (initial + retries for sub-task 1)
+        assert mock_dev_llm.return_value.ainvoke.call_count >= 2
+        # Sub-task 2 architect was never called (only decomp + sub-task 1 blueprint)
+        assert mock_arch_llm.return_value.ainvoke.call_count == 2

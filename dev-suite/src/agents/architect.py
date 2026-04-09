@@ -23,8 +23,21 @@ class Blueprint(BaseModel):
     acceptance_criteria: list[str]
 
 
-# TODO Step 4:
-# - Define architect prompt template
-# - Configure Gemini model via langchain-google-genai
-# - Implement blueprint generation with structured output
-# - Wire into LangGraph node
+class SubTask(BaseModel):
+    """A single sub-task within a multi-file task decomposition."""
+
+    sub_task_id: str
+    parent_task_id: str
+    sequence: int
+    depends_on: list[str] = []
+    target_files: list[str]
+    instructions: str
+    description: str
+
+
+class TaskDecomposition(BaseModel):
+    """Decomposition of a complex task into ordered sub-tasks."""
+
+    parent_task_id: str
+    sub_tasks: list[SubTask]
+    rationale: str
