@@ -74,3 +74,93 @@ rules:
     - "GitHub MCP push_files silently fails at ~60KB total — use sequential create_or_update_file for large pushes"
     - "SvelteKit PUBLIC_* env vars use import from $env/static/public, not import.meta.env"
     - "Google Fonts @import must precede @import tailwindcss in app.css"
+
+# ── Repository Structure ──
+# Detailed breakdown of the agent-dev monorepo layout.
+# Helps the Architect know where functionality lives.
+
+structure:
+  monorepo:
+    - "agent-dev is a monorepo with two top-level packages: dev-suite/ (Python orchestrator) and dashboard/ (SvelteKit frontend)"
+    - "dev-suite/ uses uv with PEP 735 dependency-groups in pyproject.toml; dashboard/ uses pnpm"
+  orchestrator:
+    - "dev-suite/src/orchestrator.py contains the LangGraph state machine, GraphState, AgentState, all node functions, and the router"
+    - "dev-suite/src/agents/ has agent definitions: architect.py (Blueprint generation), developer.py (code writing), qa.py (test/audit)"
+    - "dev-suite/src/memory/ has Chroma store (chroma_store.py), protocol (protocol.py), seed (seed.py), factory (factory.py), and l0_core.yaml"
+    - "dev-suite/src/sandbox/ has E2B runner (e2b_runner.py) with template routing and structured JSON output wrappers"
+    - "dev-suite/src/tools/ has MCP bridge (mcp_bridge.py) and tool providers (provider.py, mcp_provider.py) for filesystem/GitHub access"
+    - "dev-suite/src/api/ has FastAPI backend: main.py (app + routes), auth.py, events.py (SSE), models.py, state.py (StateManager), runner.py"
+    - "dev-suite/src/workspace.py manages per-task workspace directories; github_workspace.py handles remote GitHub workspace cloning"
+    - "dev-suite/src/cli.py is the CLI entry point; src/tracing.py integrates Langfuse observability"
+  dashboard:
+    - "dashboard/src/lib/ has stores (agents, tasks, memory, prs, connection, dashboard), SSE client, context API, and components"
+    - "dashboard/src/routes/ has +layout.svelte (chrome shell) and +page.svelte (renders MainContent via context)"
+    - "Dashboard context uses setDashboardContext/getDashboardContext from dashboard.svelte.ts"
+  tests:
+    - "dev-suite/tests/ contains 30+ test files with 860+ tests covering orchestrator, API, sandbox, memory, tools, and E2B"
+  scripts:
+    - "scripts/smoke-test.sh runs 3-stage E2E test (infra check, dry-run, live LLM); scripts/verify-stack.sh runs 14 health checks"
+
+# ── Key Relationships ──
+# How core components interact. Critical for making informed
+# architectural decisions during self-development.
+
+relationships:
+  state:
+    - "GraphState (TypedDict) is the single source of truth passed between all LangGraph nodes; AgentState (Pydantic model) mirrors it for validation"
+    - "StateManager in src/api/state.py is a singleton that holds in-memory API-layer state populated by orchestrator runs and Chroma queries"
+  data_flow:
+    - "SSE event flow: orchestrator nodes call publish_event() -> events.py broadcasts via EventManager -> dashboard SSE client dispatches window events -> Svelte stores update"
+    - "Blueprint flow: Architect produces Blueprint JSON -> Developer consumes it to write code -> apply_code_node parses FILE: markers and writes to workspace -> sandbox_validate runs tests"
+    - "Memory flow: gather_context_node reads workspace files + _fetch_memory_context queries L0-Core -> both injected into Architect system prompt as context"
+  tool_injection:
+    - "Tools are passed to agent LLMs via RunnableConfig['configurable']['tools'] and bound with bind_tools() in developer_node and qa_node"
+    - "ToolProvider ABC (provider.py) has two implementations: LocalToolProvider (direct filesystem) and MCPToolProvider (via MCP bridge)"
+  workspace:
+    - "Each task gets an isolated workspace directory under workspace_root; workspace.py creates it, apply_code_node writes files into it"
+    - "Remote GitHub workspace (github_workspace.py) clones a repo into a temp dir; publish_code_node pushes results back as a PR"
+
+# ── Test Conventions ──
+# How tests are structured so the Architect can plan test
+# changes alongside code changes.
+
+test_conventions:
+  pytest:
+    - "All Python tests live in dev-suite/tests/ and follow test_<module>.py naming"
+    - "Run all tests: uv run pytest tests/ -v --tb=short -q"
+    - "Integration tests requiring real credentials are marked with @pytest.mark.integration and skipped in CI"
+    - "conftest.py provides shared fixtures: ephemeral memory stores, mock sandboxes, temp workspaces"
+  dashboard:
+    - "Dashboard type checking: cd dashboard && pnpm check"
+    - "Dashboard linting uses ESLint configured in the dashboard package"
+  linting:
+    - "Python linting: uv run ruff check dev-suite/src/ dev-suite/tests/"
+    - "Always run ruff lint, pytest, and pnpm check before committing"
+
+# ── Pipeline Node Order ──
+# Execution flow of the LangGraph state machine, including
+# retry routing and terminal states.
+
+pipeline:
+  node_order:
+    - "Pipeline: START -> gather_context -> architect -> developer -> apply_code -> sandbox_validate -> qa -> [router]"
+    - "QA router (route_after_qa): PASSED -> publish_code -> flush_memory -> END; NEEDS_RETRY -> developer (retry loop); FAILED -> END; retry_count >= MAX_RETRIES -> flush_memory -> END"
+    - "gather_context_node reads workspace files by priority: explicit RELATED_FILES markers, auto-inferred matches, then project manifests (pyproject.toml, package.json)"
+    - "apply_code_node parses '# --- FILE: path ---' markers from developer output and writes files to the task workspace"
+    - "sandbox_validate_node uploads workspace files to an E2B sandbox and runs the project's test/lint commands"
+    - "publish_code_node creates a Git branch, pushes files, and opens a PR via GitHub REST API (skipped when create_pr=false or GITHUB_TOKEN is missing)"
+    - "flush_memory_node writes agent-discovered knowledge (memory_writes) to Chroma L1/L2 tiers"
+
+# ── Common Change Patterns ──
+# Recipes for common modifications. Helps the Architect produce
+# accurate blueprints for self-development tasks.
+
+change_patterns:
+  add_sse_event:
+    - "To add a new SSE event: 1) Define event type in api/models.py 2) Add publish call in the relevant orchestrator node 3) Handle in dashboard SSE client (lib/sse.ts) 4) Update the relevant Svelte store"
+  add_graphstate_field:
+    - "To add a GraphState field: 1) Add to GraphState TypedDict in orchestrator.py 2) Add matching field to AgentState Pydantic model 3) Set/read the field in the relevant node functions 4) Update tests that construct GraphState dicts"
+  add_graph_node:
+    - "To add a new graph node: 1) Write an async node function in orchestrator.py that takes GraphState and returns a partial dict 2) Register with graph.add_node() 3) Wire edges with add_edge() or add_conditional_edges() 4) Update pipeline tests"
+  modify_agent_behavior:
+    - "To modify agent behavior: 1) Edit the system prompt in agents/<agent>.py 2) If adding tools, update the tool list in the node function and bind via bind_tools() 3) If changing output format, update the parser in the consuming node 4) Add test cases for new behavior"
