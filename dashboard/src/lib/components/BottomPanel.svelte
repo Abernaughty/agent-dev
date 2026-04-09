@@ -1,209 +1,119 @@
-<!--
-	BottomPanel — resizable terminal panel with SSE log streaming.
+<script>
+  import { onMount, onDestroy } from 'svelte';
 
-	Listens for SSE `log_line` events via window CustomEvent.
-	Command input triggers task creation via tasksStore.
+  /** The current height of the bottom panel in pixels */
+  export let height = 200;
 
-	Issue #38: Data Integration — PR4
-	Issue #51: Removed mock mode — SSE-only log streaming
-	Issue #92: Fixed log_line field mismatch (message/level vs text/type)
-	Issue #106: Pass workspace to tasksStore.create()
--->
-<script lang="ts">
-	import { onMount } from 'svelte';
-	import { tasksStore } from '$lib/stores/tasks.svelte.js';
-	import { workspacesStore } from '$lib/stores/workspaces.svelte.js';
+  /** Whether the panel is open/visible */
+  export let open = true;
 
-	interface Props {
-		height: number;
-		onResize: (height: number) => void;
-	}
+  /** Minimum allowed panel height in pixels */
+  const MIN_HEIGHT = 60;
 
-	let { height, onResize }: Props = $props();
+  /** Whether a drag-resize operation is currently in progress */
+  let dragging = false;
 
-	let isDragging = $state(false);
-	let startY = $state(0);
-	let startH = $state(0);
+  /** The Y coordinate where the drag started */
+  let startY = 0;
 
-	const tabs = ['TERMINAL', 'PROBLEMS', 'OUTPUT'];
-	let activeTab = $state('TERMINAL');
+  /** The panel height when the drag started */
+  let startHeight = 0;
 
-	interface LogLine {
-		type: string;
-		text: string;
-	}
+  /**
+   * Named mousemove handler for drag-to-resize.
+   * Computes the new panel height based on cursor movement and clamps it
+   * between MIN_HEIGHT (60px) and 80% of the viewport height.
+   * @param {MouseEvent} e
+   */
+  function handleMouseMove(e) {
+    if (!dragging) return;
+    const delta = startY - e.clientY;
+    const newHeight = startHeight + delta;
+    height = Math.min(window.innerHeight * 0.8, Math.max(MIN_HEIGHT, newHeight));
+  }
 
-	let lines = $state<LogLine[]>([]);
-	let input = $state('');
-	let scrollTarget: HTMLDivElement | undefined = $state();
+  /**
+   * Named mouseup handler that ends the drag-resize operation.
+   * Removes both mousemove and mouseup listeners from window and resets
+   * the dragging state flag.
+   */
+  function handleMouseUp() {
+    dragging = false;
+    window.removeEventListener('mousemove', handleMouseMove);
+    window.removeEventListener('mouseup', handleMouseUp);
+  }
 
-	const typeColors: Record<string, string> = {
-		cmd: 'var(--color-text-bright)',
-		info: 'var(--color-text-dim)',
-		warn: 'var(--color-accent-amber)',
-		success: 'var(--color-accent-green)',
-		error: 'var(--color-accent-red)'
-	};
+  /**
+   * Mousedown handler on the resize handle that initiates the drag.
+   * Records the starting cursor position and panel height, sets the dragging
+   * flag, and attaches mousemove/mouseup listeners to window for reliable
+   * capture during fast drags.
+   * @param {MouseEvent} e
+   */
+  function handleMouseDown(e) {
+    e.preventDefault();
+    dragging = true;
+    startY = e.clientY;
+    startHeight = height;
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+  }
 
-	/**
-	 * Map runner log levels to terminal color types.
-	 * The runner emits `level: "info"` but the terminal uses `type` for color lookup.
-	 * Also map warning/error levels appropriately.
-	 */
-	function resolveLogType(detail: Record<string, unknown>): string {
-		if (typeof detail.type === 'string' && detail.type in typeColors) return detail.type;
-		if (typeof detail.level === 'string') {
-			const level = detail.level as string;
-			if (level === 'warning' || level === 'warn') return 'warn';
-			if (level === 'error') return 'error';
-			if (level === 'success') return 'success';
-			return 'info';
-		}
-		return 'info';
-	}
-
-	/**
-	 * Extract display text from SSE log_line payload.
-	 * The runner sends { message, level } but earlier code expected { text, type }.
-	 * Support both formats for backwards compatibility.
-	 */
-	function resolveLogText(detail: Record<string, unknown>): string | null {
-		if (typeof detail.text === 'string') return detail.text;
-		if (typeof detail.message === 'string') return detail.message;
-		if (typeof detail.detail === 'string') return detail.detail;
-		return null;
-	}
-
-	onMount(() => {
-		function handleLogLine(e: Event) {
-			const detail = (e as CustomEvent).detail;
-			if (!detail) return;
-			const text = resolveLogText(detail);
-			if (text) {
-				lines = [...lines, { type: resolveLogType(detail), text }];
-			}
-		}
-
-		window.addEventListener('sse:log_line', handleLogLine);
-		return () => window.removeEventListener('sse:log_line', handleLogLine);
-	});
-
-	$effect(() => {
-		if (lines.length > 0) {
-			scrollTarget?.scrollIntoView({ behavior: 'smooth' });
-		}
-	});
-
-	function handleMouseDown(e: MouseEvent) {
-		isDragging = true;
-		startY = e.clientY;
-		startH = height;
-	}
-
-	function handleMouseMove(e: MouseEvent) {
-		if (!isDragging) return;
-		const newHeight = Math.max(60, Math.min(400, startH + (startY - e.clientY)));
-		onResize(newHeight);
-	}
-
-	function handleMouseUp() {
-		isDragging = false;
-	}
-
-	async function handleCmd() {
-		const text = input.trim();
-		if (!text) return;
-
-		lines = [...lines, { type: 'cmd', text: `$ ${text}` }];
-		input = '';
-
-		if (text.startsWith('run ') || text.startsWith('task ')) {
-			const desc = text.replace(/^(run|task)\s+/, '');
-			if (!workspacesStore.canCreateTask) {
-				lines = [...lines, { type: 'error', text: '[orchestrator] No workspace selected or workspace requires PIN. Use the Chat panel to select a workspace.' }];
-				return;
-			}
-			lines = [...lines, { type: 'info', text: `[orchestrator] Processing: "${desc}"...` }];
-			const options: Record<string, unknown> = {};
-			if (workspacesStore.isSelectedProtected && workspacesStore.verifiedPin) {
-				options.pin = workspacesStore.verifiedPin;
-			}
-			if (workspacesStore.workspaceType === 'github') {
-				options.workspace_type = 'github';
-				options.github_repo = workspacesStore.githubRepo;
-				options.github_branch = workspacesStore.githubBranch;
-				if (workspacesStore.githubFeatureBranch) options.github_feature_branch = workspacesStore.githubFeatureBranch;
-			}
-			const taskId = await tasksStore.create(desc, workspacesStore.selected, options);
-			if (taskId) {
-				lines = [...lines, { type: 'success', text: `[orchestrator] Task ${taskId} created` }];
-			} else {
-				lines = [...lines, { type: 'error', text: `[orchestrator] Failed: ${tasksStore.error ?? 'Unknown error'}` }];
-			}
-		} else {
-			lines = [...lines, { type: 'info', text: `[shell] Command not recognized. Use "run <description>" to create a task.` }];
-		}
-	}
-
-	function handleKeydown(e: KeyboardEvent) {
-		if (e.key === 'Enter') {
-			e.preventDefault();
-			handleCmd();
-		}
-	}
+  /**
+   * Safety cleanup: remove any lingering window event listeners when the
+   * component is destroyed (e.g. if the user is mid-drag when the component
+   * unmounts).
+   */
+  onDestroy(() => {
+    window.removeEventListener('mousemove', handleMouseMove);
+    window.removeEventListener('mouseup', handleMouseUp);
+    dragging = false;
+  });
 </script>
 
-<svelte:window onmousemove={handleMouseMove} onmouseup={handleMouseUp} />
+{#if open}
+  <div class="bottom-panel" style="height: {height}px;">
+    <!-- Resize handle at the top edge of the panel -->
+    <!-- svelte-ignore a11y-no-static-element-interactions -->
+    <div
+      class="resize-handle"
+      on:mousedown={handleMouseDown}
+    ></div>
 
-<div
-	class="flex shrink-0 flex-col border-t"
-	style="height: {height}px; background: var(--color-bg-activity); border-color: var(--color-border);"
->
-	<!-- svelte-ignore a11y_no_static_element_interactions -->
-	<div
-		class="flex h-1 shrink-0 cursor-ns-resize items-center justify-center"
-		style="background: {isDragging ? 'var(--color-accent-cyan)' : 'transparent'};"
-		onmousedown={handleMouseDown}
-	>
-		<div class="h-0.5 w-10 rounded-sm" style="background: var(--color-bg-surface);"></div>
-	</div>
+    <div class="bottom-panel-content">
+      <slot />
+    </div>
+  </div>
+{/if}
 
-	<div class="flex h-7 shrink-0 items-center gap-4 border-b px-3" style="border-color: var(--color-border);">
-		{#each tabs as tab (tab)}
-			<button
-				onclick={() => (activeTab = tab)}
-				class="pb-1.5 pt-1.5 text-[10px]"
-				style="font-family: var(--font-mono); color: {activeTab === tab ? 'var(--color-text-bright)' : 'var(--color-text-dim)'}; border-bottom: {activeTab === tab ? '1px solid var(--color-accent-cyan)' : '1px solid transparent'};"
-			>
-				{tab}
-			</button>
-		{/each}
-	</div>
+<style>
+  .bottom-panel {
+    position: relative;
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    border-top: 1px solid var(--border-color, #e0e0e0);
+    background: var(--panel-bg, #1e1e1e);
+  }
 
-	<div class="flex-1 overflow-y-auto px-3.5 py-1">
-		{#if lines.length === 0}
-			<div class="py-3 text-center text-[10px]" style="color: var(--color-text-faint); font-family: var(--font-mono);">
-				Waiting for log events...
-			</div>
-		{:else}
-			{#each lines as line, i (i)}
-				<div class="text-[11px] leading-7" style="color: {typeColors[line.type] || 'var(--color-text-dim)'}; font-family: var(--font-mono);">
-					{line.text}
-				</div>
-			{/each}
-		{/if}
-		<div bind:this={scrollTarget}></div>
-	</div>
+  .resize-handle {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 4px;
+    cursor: ns-resize;
+    z-index: 10;
+  }
 
-	<div class="flex shrink-0 items-center gap-1.5 px-3.5 pb-1.5 pt-1">
-		<span class="text-[11px]" style="color: var(--color-accent-cyan); font-family: var(--font-mono);">$</span>
-		<input
-			bind:value={input}
-			onkeydown={handleKeydown}
-			type="text"
-			placeholder="run command..."
-			class="flex-1 border-none bg-transparent text-[11px] outline-none"
-			style="color: var(--color-text-bright); font-family: var(--font-mono);"
-		/>
-	</div>
-</div>
+  .resize-handle:hover {
+    background: var(--resize-handle-hover, rgba(100, 100, 255, 0.4));
+  }
+
+  .bottom-panel-content {
+    flex: 1;
+    overflow: auto;
+    padding-top: 4px;
+  }
+</style>
