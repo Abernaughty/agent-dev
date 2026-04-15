@@ -246,6 +246,45 @@ class LocalToolProvider(ToolProvider):
                 ),
                 self._filesystem_write,
             ),
+            "filesystem_patch": (
+                ToolDefinition(
+                    name="filesystem_patch",
+                    description=(
+                        "Apply a surgical search-and-replace edit to an "
+                        "existing file in the project workspace. PREFER "
+                        "this over filesystem_write when modifying an "
+                        "existing file -- it preserves all surrounding "
+                        "code and is far safer than rewriting whole files. "
+                        "The 'search' string must appear EXACTLY ONCE in "
+                        "the file; include enough surrounding context to "
+                        "make it unique. Use filesystem_write only when "
+                        "creating a brand-new file."
+                    ),
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Relative file path to patch",
+                            },
+                            "search": {
+                                "type": "string",
+                                "description": (
+                                    "Exact substring to find (must match "
+                                    "once -- include surrounding context "
+                                    "to disambiguate)"
+                                ),
+                            },
+                            "replace": {
+                                "type": "string",
+                                "description": "Replacement substring",
+                            },
+                        },
+                        "required": ["path", "search", "replace"],
+                    },
+                ),
+                self._filesystem_patch,
+            ),
             "filesystem_list": (
                 ToolDefinition(
                     name="filesystem_list",
@@ -387,6 +426,52 @@ class LocalToolProvider(ToolProvider):
         validated.write_text(content, encoding="utf-8")
 
         return f"Successfully wrote {len(content)} characters to {path}"
+
+    async def _filesystem_patch(
+        self, path: str, search: str, replace: str
+    ) -> str:
+        """Apply a surgical search-and-replace edit to an existing file.
+
+        Requires the search string to match exactly once so the edit
+        is unambiguous. This is safer than full rewrites because it
+        preserves all surrounding code.
+        """
+        self._check_blocked(path)
+        validated = _validate_path(path, self.workspace_root)
+
+        if not validated.is_file():
+            raise FileNotFoundError(f"File not found: {path}")
+
+        if not search:
+            raise ValueError(
+                "filesystem_patch 'search' must be a non-empty string"
+            )
+
+        original = validated.read_text(encoding="utf-8")
+        occurrences = original.count(search)
+
+        if occurrences == 0:
+            raise ValueError(
+                f"filesystem_patch: search string not found in {path}. "
+                f"Read the file first and copy the exact bytes, including "
+                f"whitespace and indentation."
+            )
+        if occurrences > 1:
+            raise ValueError(
+                f"filesystem_patch: search string matched {occurrences} "
+                f"times in {path} -- include more surrounding context to "
+                f"make it unique."
+            )
+
+        patched = original.replace(search, replace, 1)
+        validated.write_text(patched, encoding="utf-8")
+
+        delta = len(patched) - len(original)
+        sign = "+" if delta >= 0 else ""
+        return (
+            f"Successfully patched {path} "
+            f"({sign}{delta} chars, 1 replacement)"
+        )
 
     async def _filesystem_list(self, path: str) -> str:
         """List contents of a directory within the workspace."""

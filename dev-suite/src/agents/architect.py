@@ -21,6 +21,7 @@ class Blueprint(BaseModel):
     instructions: str
     constraints: list[str]
     acceptance_criteria: list[str]
+    summary: str = ""
 
 
 class SubTask(BaseModel):

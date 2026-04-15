@@ -113,7 +113,7 @@ class TestListTools:
 
     async def test_returns_five_tools(self, provider):
         tools = await provider.list_tools()
-        assert len(tools) == 5
+        assert len(tools) == 6
 
     async def test_returns_tool_definitions(self, provider):
         tools = await provider.list_tools()
@@ -124,7 +124,7 @@ class TestListTools:
         tools = await provider.list_tools()
         names = {t.name for t in tools}
         expected = {
-            "filesystem_read", "filesystem_write",
+            "filesystem_read", "filesystem_write", "filesystem_patch",
             "filesystem_list", "github_create_pr",
             "github_read_diff",
         }
@@ -335,6 +335,50 @@ class TestLocalToolProviderFilesystem:
     async def test_write_path_traversal_blocked(self, provider):
         with pytest.raises(PathValidationError):
             await provider._filesystem_write("../../etc/evil", "bad")
+
+    async def test_patch_single_match(self, provider, workspace):
+        (workspace / "greet.py").write_text(
+            "def greet(name):\n    return f'Hi, {name}'\n", encoding="utf-8"
+        )
+        result = await provider._filesystem_patch(
+            "greet.py", "Hi, {name}", "Hello, {name}"
+        )
+        assert "patched" in result
+        assert (workspace / "greet.py").read_text() == (
+            "def greet(name):\n    return f'Hello, {name}'\n"
+        )
+
+    async def test_patch_zero_matches_errors(self, provider, workspace):
+        (workspace / "a.txt").write_text("alpha beta gamma\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="not found"):
+            await provider._filesystem_patch("a.txt", "zeta", "delta")
+        # File must not be modified
+        assert (workspace / "a.txt").read_text() == "alpha beta gamma\n"
+
+    async def test_patch_multiple_matches_errors(self, provider, workspace):
+        (workspace / "dup.txt").write_text("foo\nfoo\nfoo\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="matched 3 times"):
+            await provider._filesystem_patch("dup.txt", "foo", "bar")
+        assert (workspace / "dup.txt").read_text() == "foo\nfoo\nfoo\n"
+
+    async def test_patch_missing_file_errors(self, provider):
+        with pytest.raises(FileNotFoundError):
+            await provider._filesystem_patch("nope.txt", "a", "b")
+
+    async def test_patch_empty_search_errors(self, provider, workspace):
+        (workspace / "x.txt").write_text("hello", encoding="utf-8")
+        with pytest.raises(ValueError, match="non-empty"):
+            await provider._filesystem_patch("x.txt", "", "world")
+
+    async def test_patch_path_traversal_blocked(self, provider):
+        with pytest.raises(PathValidationError):
+            await provider._filesystem_patch("../../etc/passwd", "a", "b")
+
+    async def test_patch_blocked_filename(self, provider, workspace):
+        (workspace / ".env").write_text("SECRET=x", encoding="utf-8")
+        from src.tools.provider import BlockedPathError
+        with pytest.raises(BlockedPathError):
+            await provider._filesystem_patch(".env", "x", "y")
 
     async def test_list_directory(self, provider):
         result = await provider._filesystem_list(".")
@@ -551,7 +595,7 @@ class TestGetTools:
         return LocalToolProvider(workspace_root=tmp_path)
 
     def test_returns_five_tools(self, provider):
-        assert len(get_tools(provider)) == 5
+        assert len(get_tools(provider)) == 6
 
     def test_tool_names_match_provider(self, provider):
         tools = get_tools(provider)

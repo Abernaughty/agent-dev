@@ -11,6 +11,8 @@ import pytest
 from src.orchestrator import (
     GraphState,
     WorkflowStatus,
+    _extract_file_paths_from_text,
+    _find_repo_root,
     _infer_relevant_files,
     _read_context_files,
     _truncate_file,
@@ -259,3 +261,97 @@ class TestGatherContextNode:
         }
         result = await gather_context_node(state)
         assert len(result["gathered_context"]) >= 1
+
+
+# -- Issue #179: cross-directory context gathering --
+
+class TestExtractFilePathsFromText:
+    def test_extracts_basic_path(self):
+        text = "Please fix dashboard/src/lib/components/BottomPanel.svelte resize logic"
+        paths = _extract_file_paths_from_text(text)
+        assert "dashboard/src/lib/components/BottomPanel.svelte" in paths
+
+    def test_extracts_multiple_paths(self):
+        text = "Update src/main.py and tests/test_main.py to add logging"
+        paths = _extract_file_paths_from_text(text)
+        assert "src/main.py" in paths
+        assert "tests/test_main.py" in paths
+
+    def test_ignores_bare_filenames(self):
+        # No separator -> not a path candidate
+        text = "See README.md for details"
+        assert _extract_file_paths_from_text(text) == []
+
+    def test_dedupes_repeated_paths(self):
+        text = "edit src/a.py. Then re-edit src/a.py."
+        assert _extract_file_paths_from_text(text) == ["src/a.py"]
+
+    def test_empty_text(self):
+        assert _extract_file_paths_from_text("") == []
+
+    def test_handles_backslash_paths(self):
+        text = "fix dashboard\\src\\lib\\foo.ts somehow"
+        paths = _extract_file_paths_from_text(text)
+        assert "dashboard/src/lib/foo.ts" in paths
+
+
+class TestFindRepoRoot:
+    def test_finds_git_parent(self, tmp_path):
+        (tmp_path / ".git").mkdir()
+        nested = tmp_path / "sub" / "deeper"
+        nested.mkdir(parents=True)
+        assert _find_repo_root(nested) == tmp_path
+
+    def test_falls_back_to_start_when_no_git(self, tmp_path):
+        nested = tmp_path / "sub"
+        nested.mkdir()
+        # No .git anywhere in the chain under tmp_path
+        assert _find_repo_root(nested) == nested
+
+
+class TestGatherContextCrossDirectory:
+    @pytest.mark.asyncio
+    async def test_finds_sibling_file_via_repo_root(self, tmp_path):
+        # Repo root with .git marker and two sibling dirs
+        (tmp_path / ".git").mkdir()
+        dev_suite = tmp_path / "dev-suite"
+        dashboard = tmp_path / "dashboard" / "src" / "lib"
+        dev_suite.mkdir()
+        dashboard.mkdir(parents=True)
+        target = dashboard / "BottomPanel.svelte"
+        target.write_text("<script>let height = 400;</script>", encoding="utf-8")
+
+        state: GraphState = {
+            "task_description": (
+                "Fix dashboard/src/lib/BottomPanel.svelte so the height "
+                "uses window.innerHeight * 0.8 instead of 400."
+            ),
+            "workspace_root": str(dev_suite),
+            "trace": [],
+            "status": WorkflowStatus.PLANNING,
+        }
+        result = await gather_context_node(state)
+        paths = [f["path"] for f in result["gathered_context"]]
+        assert any("BottomPanel.svelte" in p for p in paths), paths
+
+    @pytest.mark.asyncio
+    async def test_rejects_path_outside_repo_root(self, tmp_path):
+        (tmp_path / ".git").mkdir()
+        dev_suite = tmp_path / "dev-suite"
+        dev_suite.mkdir()
+        # File outside the repo
+        outside = tmp_path.parent / f"outside-{tmp_path.name}.txt"
+        outside.write_text("secret", encoding="utf-8")
+        try:
+            state: GraphState = {
+                "task_description": f"read {outside.as_posix()}",
+                "workspace_root": str(dev_suite),
+                "trace": [],
+                "status": WorkflowStatus.PLANNING,
+            }
+            result = await gather_context_node(state)
+            paths = [f["path"] for f in result["gathered_context"]]
+            assert not any("outside" in p for p in paths)
+        finally:
+            if outside.exists():
+                outside.unlink()
