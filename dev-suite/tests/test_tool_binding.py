@@ -286,7 +286,7 @@ class TestDeveloperNodeTools:
     async def test_dev_tools_filtered_to_dev_set(self, base_state):
         """Fix 2: DEV_TOOL_NAMES no longer includes github_create_pr."""
         from src.orchestrator import DEV_TOOL_NAMES, developer_node
-        all_tools = [FakeTool(n) for n in ["filesystem_read", "filesystem_write", "filesystem_list", "github_read_diff", "github_create_pr", "unexpected_tool"]]
+        all_tools = [FakeTool(n) for n in ["filesystem_read", "filesystem_write", "filesystem_patch", "filesystem_list", "github_read_diff", "github_create_pr", "unexpected_tool"]]
         mock_llm = MagicMock()
         mock_llm_bound = AsyncMock()
         mock_llm.bind_tools.return_value = mock_llm_bound

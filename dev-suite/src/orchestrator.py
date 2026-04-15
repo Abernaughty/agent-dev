@@ -304,7 +304,7 @@ def _infer_module(target_files: list[str]) -> str:
     return "global"
 
 
-DEV_TOOL_NAMES = {"filesystem_read", "filesystem_write", "filesystem_list", "github_read_diff"}
+DEV_TOOL_NAMES = {"filesystem_read", "filesystem_write", "filesystem_patch", "filesystem_list", "github_read_diff"}
 QA_TOOL_NAMES = {"filesystem_read", "filesystem_list", "github_read_diff"}
 
 _SECRET_PATTERNS = [
@@ -484,6 +484,50 @@ def _truncate_file(content: str, max_lines: int, tail_lines: int) -> tuple[str, 
     return "".join(head) + marker + "".join(tail), True
 
 
+_PATH_PATTERN = re.compile(
+    r"[A-Za-z0-9_./\\-]+\.(?:py|svelte|ts|tsx|js|jsx|css|md|toml|json|yaml|yml|html)\b"
+)
+
+
+def _find_repo_root(start: Path) -> Path:
+    """Walk parent directories looking for a .git entry.
+
+    Returns the first ancestor containing .git, or `start` itself if
+    none is found. Used to let context gathering reach sibling
+    directories (e.g., dashboard/ when running from dev-suite/).
+    """
+    start = start.resolve()
+    for candidate in (start, *start.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return start
+
+
+def _extract_file_paths_from_text(text: str) -> list[str]:
+    """Extract file-path-looking tokens from free-form task text.
+
+    Matches tokens ending in a known code/config extension and
+    containing at least one path separator (so plain filenames like
+    `README.md` without context aren't over-matched). Returns paths
+    in order of first appearance with duplicates removed.
+    """
+    if not text:
+        return []
+
+    seen: set[str] = set()
+    results: list[str] = []
+    for match in _PATH_PATTERN.finditer(text):
+        raw = match.group(0).strip(".,;:)('\"`")
+        # Require at least one separator to look like a path, not a bare filename
+        if "/" not in raw and "\\" not in raw:
+            continue
+        normalized = raw.replace("\\", "/")
+        if normalized not in seen:
+            seen.add(normalized)
+            results.append(normalized)
+    return results
+
+
 def _infer_relevant_files(workspace_root: Path, task_description: str) -> list[Path]:
     """Auto-infer files relevant to the task from workspace directory structure.
 
@@ -547,10 +591,21 @@ def _read_context_files(
     budget_chars: int = CONTEXT_BUDGET_CHARS,
     max_lines: int = CONTEXT_FILE_MAX_LINES,
     tail_lines: int = CONTEXT_FILE_TAIL_LINES,
+    allowed_root: Path | None = None,
 ) -> list[dict]:
-    """Read files into context dicts, respecting budget and truncation limits."""
+    """Read files into context dicts, respecting budget and truncation limits.
+
+    ``allowed_root`` is the security boundary -- paths must resolve inside
+    it to be read. Defaults to ``workspace_root`` for backward compatibility,
+    but callers can pass the git repo root to allow sibling directories
+    (e.g., reading ``dashboard/...`` while workspace is ``dev-suite/``).
+    Paths under the workspace are reported as workspace-relative; paths
+    outside the workspace but inside the repo are reported as repo-relative.
+    """
     gathered: list[dict] = []
     total_chars = 0
+    workspace_resolved = workspace_root.resolve()
+    security_root = (allowed_root or workspace_root).resolve()
 
     for fpath in file_paths:
         if total_chars >= budget_chars:
@@ -559,7 +614,7 @@ def _read_context_files(
 
         try:
             resolved = fpath.resolve()
-            if not resolved.is_relative_to(workspace_root.resolve()):
+            if not resolved.is_relative_to(security_root):
                 logger.warning("[CONTEXT] Path traversal blocked: %s", fpath)
                 continue
         except (ValueError, OSError):
@@ -586,7 +641,13 @@ def _read_context_files(
             content = content[:remaining] + "\n[... truncated to fit budget ...]"
             truncated = True
 
-        rel_path = str(resolved.relative_to(workspace_root.resolve()))
+        # Report path relative to workspace when possible, else repo root
+        if resolved.is_relative_to(workspace_resolved):
+            rel_path = str(resolved.relative_to(workspace_resolved))
+        else:
+            rel_path = str(resolved.relative_to(security_root))
+        # Normalize for cross-platform consistency
+        rel_path = rel_path.replace("\\", "/")
         gathered.append({
             "path": rel_path,
             "content": content,
@@ -612,26 +673,45 @@ async def gather_context_node(state: GraphState) -> dict:
 
     workspace_root_str = state.get("workspace_root", "")
     workspace_root = Path(workspace_root_str).resolve() if workspace_root_str else _get_workspace_root()
+    repo_root = _find_repo_root(workspace_root)
     task_description = state.get("task_description", "")
 
-    # Source 1: Explicit related files from task description
+    def _resolve_candidate(raw: str) -> Path | None:
+        """Resolve a path candidate against workspace_root then repo_root."""
+        raw = raw.strip()
+        if not raw:
+            return None
+        for base in (workspace_root, repo_root):
+            candidate = (base / raw).resolve()
+            if candidate.is_file():
+                return candidate
+        return None
+
+    # Source 1: Explicit related files from task description (# RELATED_FILES: marker)
     explicit_files: list[Path] = []
     for line in task_description.splitlines():
         stripped = line.strip()
         if stripped.upper().startswith("# RELATED_FILES:") or stripped.upper().startswith("RELATED_FILES:"):
             raw_files = stripped.split(":", 1)[1].strip()
             for f in raw_files.split(","):
-                f = f.strip()
-                if f:
-                    explicit_files.append(workspace_root / f)
+                resolved = _resolve_candidate(f)
+                if resolved is not None:
+                    explicit_files.append(resolved)
 
-    # Source 2: Auto-inferred files
+    # Source 2: File-path-looking tokens anywhere in the task description
+    mentioned_files: list[Path] = []
+    for raw in _extract_file_paths_from_text(task_description):
+        resolved = _resolve_candidate(raw)
+        if resolved is not None:
+            mentioned_files.append(resolved)
+
+    # Source 3: Auto-inferred files (workspace keyword matching)
     inferred_files = _infer_relevant_files(workspace_root, task_description)
 
-    # Merge: explicit first, then inferred (deduplicated)
+    # Merge: explicit > mentioned > inferred (deduplicated)
     seen: set[str] = set()
     ordered_files: list[Path] = []
-    for f in explicit_files + inferred_files:
+    for f in explicit_files + mentioned_files + inferred_files:
         key = str(f.resolve())
         if key not in seen:
             seen.add(key)
@@ -642,7 +722,9 @@ async def gather_context_node(state: GraphState) -> dict:
         logger.info("[CONTEXT] No files to gather for task")
         return {"gathered_context": [], "trace": trace}
 
-    gathered = _read_context_files(ordered_files, workspace_root)
+    gathered = _read_context_files(
+        ordered_files, workspace_root, allowed_root=repo_root
+    )
 
     total_tokens = sum(_estimate_tokens(f["content"]) for f in gathered)
     trace.append(
@@ -686,6 +768,19 @@ async def architect_node(state: GraphState) -> dict:
             "the existing codebase structure, imports, function signatures, and patterns.\n\n"
             + "\n\n".join(file_sections)
         )
+        source_block += (
+            "\n\n## Preservation Rules (CRITICAL when source files are attached)\n"
+            "- For targeted edits, quote the EXACT current code to change and the "
+            "EXACT replacement in `instructions`. The Developer will use "
+            "filesystem_patch with these strings as search/replace.\n"
+            "- Add a preservation constraint to `constraints` for every non-trivial "
+            "piece of existing functionality in the source files (functions, event "
+            "handlers, imports, effects, stores, components, blocks). Example: "
+            "\"Preserve the SSE log streaming subscription in onMount\".\n"
+            "- If the change is effectively a one-line fix, say so explicitly in "
+            "`instructions` and keep `target_files` minimal.\n"
+            "- NEVER instruct the Developer to rewrite an entire existing file.\n"
+        )
     system_prompt = f"""You are the Architect agent. Your job is to create a structured Blueprint
 for a coding task. You NEVER write code yourself.
 
@@ -695,7 +790,8 @@ Respond with ONLY a valid JSON object matching this schema:
   "target_files": ["list of file paths to create or modify"],
   "instructions": "clear step-by-step instructions for the developer",
   "constraints": ["list of constraints or requirements"],
-  "acceptance_criteria": ["list of testable criteria for QA"]
+  "acceptance_criteria": ["list of testable criteria for QA"],
+  "summary": "imperative one-line summary of the change (<=80 chars, used as PR title)"
 }}
 
 Do not include any text before or after the JSON.{memory_block}{source_block}"""
@@ -751,13 +847,20 @@ IMPORTANT RETRY RULES:
 5. If a fix hint is provided, follow it precisely.
 """
         if has_tools:
-            system_prompt += """\nYou have workspace tools available. Use filesystem_read to verify the current state if needed,
-then use filesystem_write to apply your targeted fix.
-After writing, provide a summary of ONLY what you changed.
+            system_prompt += """\nYou have workspace tools available. Use filesystem_read to verify the current state first.
 
-Also include the complete fixed code using the format:
-# --- FILE: path/to/file.py ---
-(file contents)"""
+EDITING RULES (STRICT):
+- NEVER rewrite an entire existing file.
+- Use filesystem_patch for surgical search-and-replace edits. This is the
+  default tool for modifying existing files. The search string must match
+  exactly once -- include enough surrounding context to make it unique.
+- Use filesystem_write ONLY for creating brand-new files.
+- PRESERVE all existing functionality not explicitly changed by the fix hint
+  or QA report. Do not delete functions, imports, handlers, or blocks that
+  are not mentioned as broken.
+- After applying your fix, provide a short text summary of ONLY what you
+  changed (the search/replace pair or the new file). Do not dump entire
+  file contents."""
         else:
             system_prompt += """\nRespond with ONLY the fixed code. Include file paths as comments:
 # --- FILE: path/to/file.py ---
@@ -767,20 +870,28 @@ Only output files that need changes. Do not repeat unchanged files."""
         system_prompt = """You are the Lead Dev agent. You receive a structured Blueprint and implement it using the tools available to you.
 
 WORKFLOW:
-1. Use filesystem_read to examine the existing files listed in target_files.
+1. Use filesystem_read to examine EVERY file listed in target_files BEFORE editing.
 2. Use filesystem_list to explore the project directory structure if needed.
-3. Implement the changes described in the Blueprint.
-4. Use filesystem_write to write each file.
-5. After writing all files, provide a summary of what you implemented.
+3. For each change:
+   - If the file already exists -> use filesystem_patch to make a targeted
+     search-and-replace edit. This is the default tool for modifying
+     existing files. Your 'search' string must appear exactly once in the
+     file; include enough surrounding context to make it unique.
+   - If the file does NOT exist yet -> use filesystem_write to create it.
+4. After applying every edit, respond with a short text summary of what
+   you changed (the search/replace pairs, or which new files you created).
 
-IMPORTANT:
-- Use filesystem_write for EACH file you need to create or modify.
-- Follow the Blueprint exactly. Respect all constraints.
-- Write clean, well-documented code.
-- After completing all file writes, respond with a text summary.
-- Also include the complete code in your final response using the format:
-  # --- FILE: path/to/file.py ---
-  (file contents)"""
+EDITING RULES (STRICT):
+- NEVER rewrite an entire existing file. filesystem_write on an existing
+  file is almost always wrong -- prefer filesystem_patch.
+- PRESERVE all existing functionality not explicitly changed by the
+  Blueprint. Do not delete functions, imports, event handlers, effects,
+  stores, components, or any other code that is not targeted by the
+  Blueprint instructions. Missing functionality is a scope-creep failure
+  and will be rejected by QA.
+- Follow the Blueprint exactly. Respect all constraints listed in it.
+- Do NOT dump full file contents in your text response. A short summary
+  of the edits is sufficient."""
     else:
         system_prompt = """You are the Lead Dev agent. You receive a structured Blueprint
 and write the code to implement it.
@@ -832,7 +943,12 @@ Write clean, well-documented code."""
 
     # -- Recover generated_code from tool-written files --
     if not content.strip() and has_tools:
-        wrote_files = [tc for tc in tool_calls_log if tc.get("tool") == "filesystem_write" and tc.get("success") and tc.get("agent") == "developer"]
+        wrote_files = [
+            tc for tc in tool_calls_log
+            if tc.get("tool") in ("filesystem_write", "filesystem_patch")
+            and tc.get("success")
+            and tc.get("agent") == "developer"
+        ]
         if wrote_files and blueprint.target_files:
             ws_from_state = state.get("workspace_root", "")
             ws_root = (Path(ws_from_state).resolve() if ws_from_state else _get_workspace_root())
@@ -875,7 +991,11 @@ async def apply_code_node(state: GraphState) -> dict:
     ws_from_state = state.get("workspace_root", "")
     workspace_root = Path(ws_from_state).resolve() if ws_from_state else _get_workspace_root()
     tool_calls_log = state.get("tool_calls_log", [])
-    wrote_via_tools = any(tc.get("tool") == "filesystem_write" and tc.get("success") for tc in tool_calls_log)
+    wrote_via_tools = any(
+        tc.get("tool") in ("filesystem_write", "filesystem_patch")
+        and tc.get("success")
+        for tc in tool_calls_log
+    )
     if wrote_via_tools and blueprint.target_files:
         disk_files = []
         for target_path in blueprint.target_files:
@@ -942,7 +1062,11 @@ async def qa_node(state: GraphState, config: RunnableConfig | None = None) -> di
         return {"status": WorkflowStatus.FAILED, "error_message": "QA received no blueprint to review", "trace": trace}
     if not generated_code:
         tool_calls_log_state = state.get("tool_calls_log", [])
-        wrote_via_tools = any(tc.get("tool") == "filesystem_write" and tc.get("success") for tc in tool_calls_log_state)
+        wrote_via_tools = any(
+            tc.get("tool") in ("filesystem_write", "filesystem_patch")
+            and tc.get("success")
+            for tc in tool_calls_log_state
+        )
         if wrote_via_tools and blueprint.target_files:
             ws_from_state = state.get("workspace_root", "")
             ws_root = (Path(ws_from_state).resolve() if ws_from_state else _get_workspace_root())
@@ -978,8 +1102,36 @@ The user did not specify acceptance criteria for this task. In this case:
 3. Do NOT invent strict formatting or cosmetic requirements.
 4. Only FAIL for genuine bugs, syntax errors, or logic errors.
 5. Subjective quality issues (indentation style, variable naming) are NOT failures."""
+    gathered_context = state.get("gathered_context") or []
+    if gathered_context:
+        system_prompt += """\n\nSCOPE-CREEP DETECTION (CRITICAL):
+The ORIGINAL versions of the target files are included below under
+"Original Source Files". Compare the Generated Code to the originals and
+FAIL (status: "fail", failure_type: "code") if ANY of the following are true:
+- Functions, imports, event handlers, effects, stores, components, or
+  blocks present in the original are missing from the generated version
+  without being explicitly called out by the Blueprint.
+- The generated file is >20% shorter than the original without a clear
+  justification in the Blueprint instructions.
+- The Blueprint described a one-line / surgical fix but the generated
+  code rewrites the whole file.
+When you detect scope creep, list the removed items in `errors` and
+set `recommendation` to describe which functionality must be restored.
+Set `exact_fix_hint` to point the Developer at filesystem_patch for
+the targeted change."""
     bp_json = blueprint.model_dump_json(indent=2)
     user_msg = f"Blueprint:\n{bp_json}\n\nGenerated Code:\n{generated_code}"
+    if gathered_context:
+        original_sections = []
+        for ctx in gathered_context:
+            header = f"# --- ORIGINAL: {ctx['path']} ---"
+            if ctx.get("truncated"):
+                header += "  (truncated)"
+            original_sections.append(f"{header}\n{ctx['content']}")
+        user_msg += (
+            "\n\nOriginal Source Files (pre-change, for scope-creep comparison):\n\n"
+            + "\n\n".join(original_sections)
+        )
     sandbox_result = state.get("sandbox_result")
     if sandbox_result is not None:
         user_msg += "\n\nSandbox Validation Results:\n"
@@ -1267,9 +1419,23 @@ async def _publish_code_async(state: dict) -> dict:
             if passed is not None or failed is not None:
                 test_summary = f"\n\n### Test Results\n- Passed: {passed or 0}\n- Failed: {failed or 0}\n"
         pr_body = (f"## Task: `{task_id}`\n\n" + f"{blueprint.instructions}\n\n" + f"### Acceptance Criteria\n{criteria_block}" + f"{test_summary}\n\n" + "### Files Changed\n" + "\n".join(f"- `{fp['path']}`" for fp in files_payload) + "\n\n---\n_Opened automatically by the agent orchestrator._")
-        pr_title = f"feat({task_id}): {blueprint.instructions[:80]}"
-        if len(blueprint.instructions) > 80:
-            pr_title = pr_title[:83] + "..."
+        # Prefer Blueprint.summary (imperative one-liner); fall back to the
+        # first non-empty line of the task description; last resort is
+        # instructions. Avoids multi-line instruction dumps in PR titles.
+        summary_source = (blueprint.summary or "").strip()
+        if not summary_source:
+            task_desc = state.get("task_description", "") or ""
+            for line in task_desc.splitlines():
+                line = line.strip()
+                if line and not line.upper().startswith(("# RELATED_FILES", "RELATED_FILES")):
+                    summary_source = line
+                    break
+        if not summary_source:
+            summary_source = blueprint.instructions.splitlines()[0] if blueprint.instructions else task_id
+        title_body = summary_source[:80]
+        if len(summary_source) > 80:
+            title_body = title_body[:77] + "..."
+        pr_title = f"feat({task_id}): {title_body}"
         trace.append("publish_code: opening PR")
         pr_result = await provider.create_pr(head=branch_name, base=pr_base, title=pr_title, body=pr_body)
         if pr_result:
