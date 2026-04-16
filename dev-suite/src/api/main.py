@@ -65,7 +65,10 @@ from .models import (
 )
 from .state import state_manager
 
-load_dotenv()
+# override=True so .env beats any stale value pre-set in the parent shell
+# (common failure mode: a prior key cached in a Windows User env var silently
+# overrides .env and produces opaque 401s).
+load_dotenv(override=True)
 
 logger = logging.getLogger(__name__)
 

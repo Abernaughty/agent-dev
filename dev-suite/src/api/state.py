@@ -34,7 +34,8 @@ from datetime import datetime, timezone
 # This was the root cause of the WORKSPACE_ROOT=dev-suite bug.
 from dotenv import load_dotenv
 
-load_dotenv()
+# override=True so .env beats any stale value pre-set in the parent shell.
+load_dotenv(override=True)
 
 from ..workspace import WorkspaceManager
 from .events import EventType, SSEEvent, event_bus
