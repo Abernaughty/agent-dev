@@ -34,8 +34,18 @@ from datetime import datetime, timezone
 # This was the root cause of the WORKSPACE_ROOT=dev-suite bug.
 from dotenv import load_dotenv
 
-# override=True so .env beats any stale value pre-set in the parent shell.
-load_dotenv(override=True)
+# override=False (default) so this module-level call can't clobber values
+# intentionally set by tests via conftest.py (the TEST_WORKSPACE_ROOT
+# override would otherwise be silently reset to .env's WORKSPACE_ROOT and
+# every test posting to /tasks with the temp workspace would 403).
+#
+# The stale-shell-env defensive override (PR #184) lives in main.py --
+# that fires when uvicorn actually starts, AFTER this singleton is built,
+# and clobbers any stale API keys before the orchestrator runs its first
+# LLM call. state.py only needs to populate WORKSPACE_ROOT and model-name
+# env vars for the state_manager singleton; those are not the variables
+# the stale-shell-env attack vector is about.
+load_dotenv()
 
 from ..workspace import WorkspaceManager
 from .events import EventType, SSEEvent, event_bus
