@@ -134,18 +134,79 @@ class ToolProvider(ABC):
 # -- Path Validation --
 
 
-def _validate_path(requested: str, workspace_root: Path) -> Path:
-    """Validate that a path is within the workspace root.
+def _find_repo_root(start: Path) -> Path:
+    """Walk parent directories looking for a ``.git`` entry.
 
-    Resolves symlinks and relative paths, then checks containment.
-    Raises PathValidationError if the path escapes the workspace.
+    Returns the first ancestor containing ``.git``, or ``start`` itself
+    if none is found. Mirrors the helper in ``orchestrator.py`` so tool
+    handlers can reach sibling directories (e.g., ``dashboard/`` when
+    the workspace is ``dev-suite/``) just like ``gather_context_node``
+    already does for reads.
     """
-    resolved = (workspace_root / requested).resolve()
+    start = start.resolve()
+    for candidate in (start, *start.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return start
 
-    if not str(resolved).startswith(str(workspace_root.resolve())):
+
+def _resolve_path_smart(
+    requested: str,
+    workspace_root: Path,
+    allowed_root: Path,
+) -> Path:
+    """Resolve ``requested`` against workspace or repo root.
+
+    Prefers workspace-relative resolution (existing behavior). Falls
+    back to repo-relative when the first path segment names a
+    top-level directory that exists in the repo but not the workspace
+    -- e.g., ``dashboard/...`` when the workspace is ``dev-suite/`` in
+    a monorepo.
+
+    This lets self-dev agents edit any file in the repo via the
+    obvious relative path without needing a ``../`` dance.
+    """
+    workspace_root = workspace_root.resolve()
+    allowed_root = allowed_root.resolve()
+
+    # No ambiguity when the two are the same.
+    if workspace_root == allowed_root:
+        return (workspace_root / requested).resolve()
+
+    parts = Path(requested).parts
+    if parts:
+        first_segment = parts[0]
+        in_workspace = (workspace_root / first_segment).exists()
+        in_repo = (allowed_root / first_segment).exists()
+        if not in_workspace and in_repo:
+            return (allowed_root / requested).resolve()
+
+    return (workspace_root / requested).resolve()
+
+
+def _validate_path(
+    requested: str,
+    workspace_root: Path,
+    allowed_root: Path | None = None,
+) -> Path:
+    """Validate that a path is within the allowed root.
+
+    ``allowed_root`` defines the security boundary (defaults to
+    ``workspace_root`` for backward compatibility). Paths resolve via
+    ``_resolve_path_smart``, which prefers workspace-relative and
+    falls back to repo-relative when the path's first segment is a
+    top-level repo dir not present in the workspace.
+
+    Raises ``PathValidationError`` if the resolved path escapes the
+    allowed root.
+    """
+    security_root = (allowed_root or workspace_root).resolve()
+    resolved = _resolve_path_smart(requested, workspace_root, security_root)
+
+    if not str(resolved).startswith(str(security_root)):
         raise PathValidationError(
             f"Path '{requested}' resolves to '{resolved}' which is outside "
-            f"workspace root '{workspace_root}'"
+            f"allowed root '{security_root}'"
         )
 
     return resolved
@@ -172,8 +233,18 @@ class LocalToolProvider(ToolProvider):
         github_owner: str | None = None,
         github_repo: str | None = None,
         blocked_patterns: list[str] | None = None,
+        allowed_root: str | Path | None = None,
     ):
         self.workspace_root = Path(workspace_root).resolve()
+        # Broader security boundary that also permits sibling directories
+        # within the same git repo (e.g., dashboard/ when workspace is
+        # dev-suite/). Defaults to the enclosing git repo root if found,
+        # else falls back to workspace_root.
+        self.allowed_root = (
+            Path(allowed_root).resolve()
+            if allowed_root is not None
+            else _find_repo_root(self.workspace_root)
+        )
         self._blocked_patterns = (
             blocked_patterns if blocked_patterns is not None
             else DEFAULT_BLOCKED_PATTERNS
@@ -408,9 +479,9 @@ class LocalToolProvider(ToolProvider):
             )
 
     async def _filesystem_read(self, path: str) -> str:
-        """Read a file within the workspace."""
+        """Read a file within the allowed root."""
         self._check_blocked(path)
-        validated = _validate_path(path, self.workspace_root)
+        validated = _validate_path(path, self.workspace_root, self.allowed_root)
 
         if not validated.is_file():
             raise FileNotFoundError(f"File not found: {path}")
@@ -418,9 +489,9 @@ class LocalToolProvider(ToolProvider):
         return validated.read_text(encoding="utf-8")
 
     async def _filesystem_write(self, path: str, content: str) -> str:
-        """Write content to a file within the workspace."""
+        """Write content to a file within the allowed root."""
         self._check_blocked(path)
-        validated = _validate_path(path, self.workspace_root)
+        validated = _validate_path(path, self.workspace_root, self.allowed_root)
 
         validated.parent.mkdir(parents=True, exist_ok=True)
         validated.write_text(content, encoding="utf-8")
@@ -437,7 +508,7 @@ class LocalToolProvider(ToolProvider):
         preserves all surrounding code.
         """
         self._check_blocked(path)
-        validated = _validate_path(path, self.workspace_root)
+        validated = _validate_path(path, self.workspace_root, self.allowed_root)
 
         if not validated.is_file():
             raise FileNotFoundError(f"File not found: {path}")
@@ -474,8 +545,8 @@ class LocalToolProvider(ToolProvider):
         )
 
     async def _filesystem_list(self, path: str) -> str:
-        """List contents of a directory within the workspace."""
-        validated = _validate_path(path, self.workspace_root)
+        """List contents of a directory within the allowed root."""
+        validated = _validate_path(path, self.workspace_root, self.allowed_root)
 
         if not validated.is_dir():
             raise NotADirectoryError(f"Not a directory: {path}")
@@ -484,7 +555,12 @@ class LocalToolProvider(ToolProvider):
         lines = []
         for entry in entries:
             prefix = "[DIR] " if entry.is_dir() else "[FILE]"
-            rel = entry.relative_to(self.workspace_root)
+            # Report relative to allowed_root (usually the repo) so entries
+            # in sibling directories still have meaningful paths.
+            try:
+                rel = entry.relative_to(self.allowed_root)
+            except ValueError:
+                rel = entry.relative_to(self.workspace_root)
             # Normalize to forward slashes for consistent cross-platform output
             rel_posix = PurePosixPath(rel)
             lines.append(f"{prefix} {rel_posix}")
