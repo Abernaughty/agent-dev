@@ -18,8 +18,6 @@ These tests pin the fix for that gap:
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
 from src.agents.architect import Blueprint
 from src.orchestrator import (
     GraphState,
