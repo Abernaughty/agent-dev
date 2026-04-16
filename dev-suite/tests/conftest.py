@@ -49,3 +49,23 @@ def pytest_collection_modifyitems(config, items):
         for item in items:
             if "live" in item.keywords:
                 item.add_marker(skip)
+
+
+@pytest.fixture(autouse=True)
+def _restore_test_workspace_root(monkeypatch):
+    """Re-assert the test WORKSPACE_ROOT override before every test.
+
+    The module-level ``os.environ["WORKSPACE_ROOT"] = _TEST_WORKSPACE``
+    above runs once at conftest import. But ``src.api.main``'s
+    ``load_dotenv(override=True)`` (PR #184, stale-shell-env defense)
+    clobbers the value back to ``.env``'s WORKSPACE_ROOT as soon as
+    ``from src.api.main import app`` is executed. Fixtures like
+    ``client()`` in test_api.py then build a fresh ``StateManager()``
+    whose ``WorkspaceManager`` reads the clobbered env and rejects
+    the temp workspace with 403.
+
+    Re-asserting with monkeypatch here means every test sees the temp
+    workspace regardless of module-import-time env manipulation, and
+    monkeypatch auto-restores the prior value after the test.
+    """
+    monkeypatch.setenv("WORKSPACE_ROOT", _TEST_WORKSPACE)
