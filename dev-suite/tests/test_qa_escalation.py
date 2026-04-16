@@ -201,6 +201,89 @@ class TestFailureReportEscalation:
 
 
 # ---------------------------------------------------------------------------
+# None-tolerance for LLM output (Layer B gate-test finding)
+# ---------------------------------------------------------------------------
+
+
+class TestFailureReportNoneTolerance:
+    """Layer B gate test crashed after 173s / $1.20 on:
+
+        Input should be a valid string [type=string_type, input_value=None]
+
+    because the QA LLM returned {"recommendation": null, ...} on a
+    passing review. The FailureReport model's docstring already
+    promises defensive defaults against LLM-emitted nulls, but this
+    field (and a few others) were missed. These tests pin the
+    None-tolerance contract so future LLM output variants don't
+    crash the orchestrator mid-retry.
+    """
+
+    def _minimal(self, **overrides):
+        data = {"task_id": "test-task", "status": "pass"}
+        data.update(overrides)
+        return FailureReport(**data)
+
+    def test_recommendation_null_coerces_to_empty_string(self):
+        r = self._minimal(recommendation=None)
+        assert r.recommendation == ""
+
+    def test_errors_null_coerces_to_empty_list(self):
+        r = self._minimal(errors=None)
+        assert r.errors == []
+
+    def test_failed_files_null_coerces_to_empty_list(self):
+        r = self._minimal(failed_files=None)
+        assert r.failed_files == []
+
+    def test_tests_passed_null_coerces_to_zero(self):
+        r = self._minimal(tests_passed=None)
+        assert r.tests_passed == 0
+
+    def test_tests_failed_null_coerces_to_zero(self):
+        r = self._minimal(tests_failed=None)
+        assert r.tests_failed == 0
+
+    def test_full_null_output_constructs_cleanly(self):
+        """Reproduces the Layer B QA output: every optional field null."""
+        r = FailureReport(
+            task_id="fix-113-resize-cap",
+            status="pass",
+            tests_passed=None,
+            tests_failed=None,
+            errors=None,
+            failed_files=None,
+            recommendation=None,
+            failure_type=None,
+            fix_complexity=None,
+            exact_fix_hint=None,
+        )
+        assert r.recommendation == ""
+        assert r.errors == []
+        assert r.failed_files == []
+        assert r.tests_passed == 0
+        assert r.tests_failed == 0
+        assert r.exact_fix_hint is None  # str | None already
+        assert r.failure_type is None
+        assert r.fix_complexity is None
+
+    def test_valid_values_still_round_trip(self):
+        """Defensive coercion doesn't clobber legitimate non-null values."""
+        r = self._minimal(
+            status="fail",
+            recommendation="Use filesystem_patch",
+            errors=["off-by-one"],
+            failed_files=["BottomPanel.svelte"],
+            tests_passed=5,
+            tests_failed=1,
+        )
+        assert r.recommendation == "Use filesystem_patch"
+        assert r.errors == ["off-by-one"]
+        assert r.failed_files == ["BottomPanel.svelte"]
+        assert r.tests_passed == 5
+        assert r.tests_failed == 1
+
+
+# ---------------------------------------------------------------------------
 # Routing logic
 # ---------------------------------------------------------------------------
 
