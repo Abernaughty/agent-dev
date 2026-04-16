@@ -161,8 +161,40 @@ echo ""
 
 CANONICAL_PROMPT='Create a Python function called greet in a new file greet.py that takes a name parameter and returns a greeting string'
 
+# Issue #105: POST /tasks requires `workspace` when workspace_type is 'local'.
+# Fetch the default workspace from GET /workspaces rather than assuming.
+DEFAULT_WS=$(curl_get "$API_URL/workspaces" 2>/dev/null | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    for w in d.get('data', []):
+        if w.get('is_default'):
+            print(w['path'])
+            break
+except Exception:
+    pass
+" 2>/dev/null || echo "")
+
+if [ -z "$DEFAULT_WS" ]; then
+    echo -e "  ${RED}FAILED${NC} -- GET /workspaces returned no default workspace"
+    exit 1
+fi
+
+printf "  ${DIM}Workspace: %s${NC}\n" "$DEFAULT_WS"
+
+# Build the request body via python3 so Windows paths (backslashes) are
+# escaped correctly as JSON -- inline shell interpolation mangles them.
+TASK_BODY=$(python3 -c "
+import json, sys
+print(json.dumps({
+    'description': sys.argv[1],
+    'create_pr': False,
+    'workspace': sys.argv[2],
+}))
+" "$CANONICAL_PROMPT" "$DEFAULT_WS")
+
 echo -e "  Submitting canonical test prompt..."
-TASK_RESPONSE=$(curl_post "$API_URL/tasks" "{\"description\": \"$CANONICAL_PROMPT\", \"create_pr\": false}" 2>/dev/null || echo "")
+TASK_RESPONSE=$(curl_post "$API_URL/tasks" "$TASK_BODY" 2>/dev/null || echo "")
 
 if [ -z "$TASK_RESPONSE" ]; then
     echo -e "  ${RED}FAILED${NC} -- POST /tasks returned empty response"
