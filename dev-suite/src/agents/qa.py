@@ -78,6 +78,35 @@ class FailureReport(BaseModel):
     fix_complexity: FixComplexity | None = None
     exact_fix_hint: str | None = None
 
+    @field_validator(
+        "recommendation", mode="before"
+    )
+    @classmethod
+    def _coerce_recommendation_none(cls, v: object) -> object:
+        """Coerce None to "" so a passing QA review (recommendation=null)
+        doesn't crash FailureReport validation."""
+        return "" if v is None else v
+
+    @field_validator("errors", "failed_files", mode="before")
+    @classmethod
+    def _coerce_list_none(cls, v: object) -> object:
+        """Coerce None to [] for list fields.
+
+        LLMs may emit `"errors": null` / `"failed_files": null` when
+        there are no items; treat as the empty-list default rather
+        than crashing.
+        """
+        return [] if v is None else v
+
+    @field_validator(
+        "tests_passed", "tests_failed", mode="before"
+    )
+    @classmethod
+    def _coerce_count_none(cls, v: object) -> object:
+        """Coerce None to 0 for test-count fields (happens on reviews
+        that have no test execution context)."""
+        return 0 if v is None else v
+
     @field_validator("failure_type", mode="before")
     @classmethod
     def normalize_failure_type(cls, v: object) -> object:
