@@ -511,6 +511,38 @@ def _find_repo_root(start: Path) -> Path:
     return start
 
 
+def _resolve_target_path(
+    target_path: str, workspace_root: Path, repo_root: Path
+) -> Path:
+    """Resolve a Blueprint target_path against the correct root.
+
+    Mirrors LocalToolProvider's _resolve_path_smart so the orchestrator's
+    read-back of tool-written files finds the same file the agent wrote
+    via filesystem_patch/filesystem_write. Required when workspace_root
+    is a monorepo subfolder (e.g., dev-suite/) and target_path points
+    to a sibling dir (e.g., dashboard/foo.svelte) -- the tool wrote it
+    at repo_root/dashboard/foo.svelte, and we need to read from the
+    same place instead of a ghost under workspace_root/dashboard/.
+
+    Prefers workspace-relative (preserves existing semantics for paths
+    that are genuinely under the workspace). Falls back to repo-relative
+    when the first segment is a top-level repo dir not present in the
+    workspace.
+    """
+    workspace_root = workspace_root.resolve()
+    repo_root = repo_root.resolve()
+    if workspace_root == repo_root:
+        return (workspace_root / target_path).resolve()
+    parts = Path(target_path).parts
+    if parts:
+        first = parts[0]
+        in_workspace = (workspace_root / first).exists()
+        in_repo = (repo_root / first).exists()
+        if not in_workspace and in_repo:
+            return (repo_root / target_path).resolve()
+    return (workspace_root / target_path).resolve()
+
+
 def _extract_file_paths_from_text(text: str) -> list[str]:
     """Extract file-path-looking tokens from free-form task text.
 
@@ -1099,9 +1131,10 @@ Write clean, well-documented code."""
         if wrote_files and blueprint.target_files:
             ws_from_state = state.get("workspace_root", "")
             ws_root = (Path(ws_from_state).resolve() if ws_from_state else _get_workspace_root())
+            repo_root = _find_repo_root(ws_root)
             recovered_parts = []
             for target_path in blueprint.target_files:
-                full_path = ws_root / target_path
+                full_path = _resolve_target_path(target_path, ws_root, repo_root)
                 if full_path.is_file():
                     try:
                         file_content = full_path.read_text(encoding="utf-8")
@@ -1137,6 +1170,7 @@ async def apply_code_node(state: GraphState) -> dict:
         return {"parsed_files": [], "trace": trace}
     ws_from_state = state.get("workspace_root", "")
     workspace_root = Path(ws_from_state).resolve() if ws_from_state else _get_workspace_root()
+    repo_root = _find_repo_root(workspace_root)
     tool_calls_log = state.get("tool_calls_log", [])
     wrote_via_tools = any(
         tc.get("tool") in ("filesystem_write", "filesystem_patch")
@@ -1146,7 +1180,7 @@ async def apply_code_node(state: GraphState) -> dict:
     if wrote_via_tools and blueprint.target_files:
         disk_files = []
         for target_path in blueprint.target_files:
-            full_path = workspace_root / target_path
+            full_path = _resolve_target_path(target_path, workspace_root, repo_root)
             if full_path.is_file():
                 try:
                     content = full_path.read_text(encoding="utf-8")
@@ -1157,7 +1191,7 @@ async def apply_code_node(state: GraphState) -> dict:
         if disk_files:
             total_chars = sum(len(f["content"]) for f in disk_files)
             trace.append(f"apply_code: read {len(disk_files)} file(s) from disk (tool-written, {total_chars:,} chars total)")
-            logger.info("[APPLY_CODE] Read %d tool-written files (%d chars) from %s", len(disk_files), total_chars, workspace_root)
+            logger.info("[APPLY_CODE] Read %d tool-written files (%d chars) from %s", len(disk_files), total_chars, repo_root)
             return {"parsed_files": disk_files, "trace": trace}
         trace.append("apply_code: tool-written files not found on disk, falling back to parser")
     if not generated_code:
@@ -1180,7 +1214,7 @@ async def apply_code_node(state: GraphState) -> dict:
     written_count = 0
     for pf in safe_files:
         try:
-            target = workspace_root / pf.path
+            target = _resolve_target_path(pf.path, workspace_root, repo_root)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(pf.content, encoding="utf-8")
             written_count += 1
@@ -1188,8 +1222,8 @@ async def apply_code_node(state: GraphState) -> dict:
         except Exception as e:
             logger.warning("[APPLY_CODE] Failed to write %s: %s", pf.path, e)
             trace.append(f"apply_code: failed to write {pf.path} -- {e}")
-    trace.append(f"apply_code: wrote {written_count} files ({total_chars:,} chars total) to {workspace_root}")
-    logger.info("[APPLY_CODE] Wrote %d files (%d chars) to %s", written_count, total_chars, workspace_root)
+    trace.append(f"apply_code: wrote {written_count} files ({total_chars:,} chars total) under {repo_root}")
+    logger.info("[APPLY_CODE] Wrote %d files (%d chars) under %s", written_count, total_chars, repo_root)
     parsed_files_data = [{"path": pf.path, "content": pf.content} for pf in safe_files]
     return {"parsed_files": parsed_files_data, "trace": trace}
 
@@ -1217,9 +1251,10 @@ async def qa_node(state: GraphState, config: RunnableConfig | None = None) -> di
         if wrote_via_tools and blueprint.target_files:
             ws_from_state = state.get("workspace_root", "")
             ws_root = (Path(ws_from_state).resolve() if ws_from_state else _get_workspace_root())
+            repo_root = _find_repo_root(ws_root)
             recovered_parts = []
             for target_path in blueprint.target_files:
-                full_path = ws_root / target_path
+                full_path = _resolve_target_path(target_path, ws_root, repo_root)
                 if full_path.is_file():
                     try:
                         file_content = full_path.read_text(encoding="utf-8")
@@ -1533,13 +1568,18 @@ async def _publish_code_async(state: dict) -> dict:
             return {"trace": trace}
         trace.append(f"publish_code: pushing {len(parsed_files)} file(s)")
         workspace_root = state.get("workspace_root", "")
-        # Issue #153: skip repo_subdir detection for remote workspaces —
+        # Issue #153: skip repo_subdir detection for remote workspaces --
         # files in a remote clone are already relative to repo root.
+        # Layer B finding: when a target_path is already repo-relative
+        # (e.g. "dashboard/...") we must NOT prepend repo_subdir, or the
+        # PR will push "dev-suite/dashboard/..." which doesn't exist.
         repo_subdir = ""
+        repo_root: Path | None = None
         if workspace_type != "github" and workspace_root:
             ws = Path(workspace_root).resolve()
             for parent in [ws, *ws.parents]:
                 if (parent / ".git").exists():
+                    repo_root = parent
                     try:
                         repo_subdir = str(ws.relative_to(parent))
                     except ValueError:
@@ -1548,8 +1588,24 @@ async def _publish_code_async(state: dict) -> dict:
         files_payload = []
         for pf in parsed_files:
             repo_path = pf["path"]
-            if repo_subdir and repo_subdir != ".":
-                repo_path = f"{repo_subdir}/{pf['path']}"
+            if (
+                repo_subdir
+                and repo_subdir != "."
+                and repo_root is not None
+            ):
+                first_segment = Path(pf["path"]).parts[0] if Path(pf["path"]).parts else ""
+                # Only prepend repo_subdir when the path is workspace-relative.
+                # If the first segment is a top-level repo dir OTHER than
+                # the workspace subdir itself, the path is already
+                # repo-relative (e.g., "dashboard/..." from a dev-suite
+                # workspace).
+                is_repo_sibling = (
+                    first_segment
+                    and first_segment != repo_subdir.split("/")[0]
+                    and (repo_root / first_segment).is_dir()
+                )
+                if not is_repo_sibling:
+                    repo_path = f"{repo_subdir}/{pf['path']}"
             files_payload.append({"path": repo_path, "content": pf["content"]})
         push_ok = await provider.push_files_batch(files=files_payload, branch=branch_name, message=f"feat({task_id}): implement {blueprint.instructions[:60]}")
         if not push_ok:
