@@ -60,9 +60,9 @@ PLANNER_MAX_GITHUB_REFS = 5
 # budget — enough turns for a few ls/read calls to orient the spec,
 # bounded so a misbehaving LLM can't drain tokens chasing the codebase.
 try:
-    MAX_PLANNER_TOOL_TURNS = int(os.getenv("MAX_PLANNER_TOOL_TURNS", "4"))
+    MAX_PLANNER_TOOL_TURNS = int(os.getenv("MAX_PLANNER_TOOL_TURNS", "6"))
 except ValueError:
-    MAX_PLANNER_TOOL_TURNS = 4
+    MAX_PLANNER_TOOL_TURNS = 6
 
 # Issue #193: loose heuristic for "the user mentioned a `#N` ref but we
 # couldn't resolve it." Used only for warning diagnostics when the
@@ -1082,7 +1082,23 @@ async def _invoke_with_optional_tools(
             trace=[],
             agent_name="planner",
         )
-        return _extract_text_from_content(response.content)
+        text = _extract_text_from_content(response.content)
+        if text.strip():
+            return text
+
+        # Loop exhausted mid-tool-call — response is a pure tool_use
+        # block with no user-facing text. We can't simply replay the
+        # loop's `current_messages` because the final tool_use has no
+        # paired tool_result (Anthropic rejects unpaired sequences),
+        # so fall back to a no-tools call on the ORIGINAL messages.
+        # The LLM loses its mid-loop learnings but produces a valid
+        # conversational response instead of a raw tool_use dump.
+        logger.warning(
+            "[PLANNER] Tool loop exhausted without final text; "
+            "retrying unbound on original messages"
+        )
+        fallback_response = await llm.ainvoke(lc_messages)
+        return _extract_text_from_content(fallback_response.content)
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "[PLANNER] Tool loop failed (%s); falling back to no-tool call",
@@ -1100,20 +1116,40 @@ def _extract_text_from_content(content: Any) -> str:
     - list of content blocks: concatenates text from all blocks
       with type='text' (Gemini 3.x, some Anthropic responses)
       e.g. [{'type': 'text', 'text': '...', 'extras': {...}}]
+    - list of only tool_use blocks (Anthropic mid-loop): returns ""
+      rather than dumping the raw dicts to the user.
     - other: falls back to str() conversion
     """
     if isinstance(content, str):
         return content
 
     if isinstance(content, list):
+        if not content:
+            return ""
         text_parts = []
+        unknown_block_seen = False
         for block in content:
-            if isinstance(block, dict) and block.get("type") == "text":
-                text_parts.append(block.get("text", ""))
+            if isinstance(block, dict):
+                btype = block.get("type")
+                if btype == "text":
+                    text_parts.append(block.get("text", ""))
+                elif btype in ("tool_use", "tool_result", "input_json_delta"):
+                    # Intermediate tool-calling blocks — not user-facing
+                    # text. Silently skip so we don't render raw dicts.
+                    continue
+                else:
+                    unknown_block_seen = True
             elif isinstance(block, str):
                 text_parts.append(block)
+            else:
+                unknown_block_seen = True
         if text_parts:
             return "\n".join(text_parts)
+        if not unknown_block_seen:
+            # Pure tool_use / empty-recognized response — no text to
+            # surface. Return empty string; caller decides how to
+            # handle (typically: force a final no-tool call).
+            return ""
 
     # Last resort — should not normally reach here
     logger.warning(
