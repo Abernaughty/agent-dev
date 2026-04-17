@@ -600,7 +600,7 @@ class TestPlannerGitHubPrefetch:
         async def fake_fetch(*args, **kwargs):
             return [fetched]
 
-        async def fake_llm(model_name, messages):
+        async def fake_llm(model_name, messages, **kwargs):
             # Capture the messages the LLM would have received
             captured_messages.append(messages)
             return '```json\n{"objective": "Fix login"}\n```'
@@ -645,7 +645,7 @@ class TestPlannerGitHubPrefetch:
             fetch_called = True
             return []
 
-        async def fake_llm(model_name, messages):
+        async def fake_llm(model_name, messages, **kwargs):
             return '```json\n{"objective": "Fix login"}\n```'
 
         with patch(
@@ -681,7 +681,7 @@ class TestPlannerGitHubPrefetch:
         async def fake_fetch(*args, **kwargs):
             return [fetched]
 
-        async def fake_llm(model_name, messages):
+        async def fake_llm(model_name, messages, **kwargs):
             return '```json\n{}\n```'
 
         with patch(
@@ -727,7 +727,7 @@ class TestPlannerGitHubPrefetch:
         async def boom(*args, **kwargs):
             raise RuntimeError("network down")
 
-        async def fake_llm(model_name, messages):
+        async def fake_llm(model_name, messages, **kwargs):
             return '```json\n{"objective": "Fix"}\n```'
 
         with patch(
@@ -785,7 +785,7 @@ class TestPlannerSystemPromptReconciliation:
         async def fake_fetch(*args, **kwargs):
             return [fetched]
 
-        async def fake_llm(model_name, messages):
+        async def fake_llm(model_name, messages, **kwargs):
             captured.append(messages)
             return '```json\n{"objective": "Fix the planner"}\n```'
 
@@ -861,7 +861,7 @@ class TestPlannerSystemPromptReconciliation:
 
         session = create_planner_session(workspace="/proj", languages=["Python"])
 
-        async def fake_llm(model_name, messages):
+        async def fake_llm(model_name, messages, **kwargs):
             return '```json\n{}\n```'
 
         with caplog.at_level(_logging.WARNING, logger="src.agents.planner"):
@@ -1031,7 +1031,7 @@ class TestPlannerGithubRepoPlumbing:
                 "source": "github_issue",
             }]
 
-        async def fake_llm(model_name, messages):
+        async def fake_llm(model_name, messages, **kwargs):
             return '```json\n{}\n```'
 
         with patch(
@@ -1072,7 +1072,7 @@ class TestPlannerGithubRepoPlumbing:
             captured_kwargs.update(kwargs)
             return []
 
-        async def fake_llm(model_name, messages):
+        async def fake_llm(model_name, messages, **kwargs):
             return '```json\n{}\n```'
 
         with patch(
@@ -1105,7 +1105,7 @@ class TestPlannerGithubRepoPlumbing:
         session = create_planner_session(workspace=str(tmp_path))
         assert session.github_repo is None
 
-        async def fake_llm(model_name, messages):
+        async def fake_llm(model_name, messages, **kwargs):
             return '```json\n{}\n```'
 
         with caplog.at_level(_logging.WARNING, logger="src.agents.planner"):
@@ -1143,3 +1143,174 @@ class TestPlannerAntiHallucination:
         # Explicitly forbids invention
         assert "must not invent" in prompt or "must not" in prompt
         assert "invent" in prompt or "guess" in prompt
+
+
+# =========================================================================
+# Planner read-only filesystem tool access
+# =========================================================================
+
+
+class TestPlannerReadOnlyTools:
+    """The Planner gets the same READONLY_TOOLS bound to its LLM as the
+    Architect's Phase 2 — so it can look up file paths / read configs
+    itself instead of asking the user, matching the Architect's reach.
+    """
+
+    def test_system_prompt_advertises_filesystem_tools(self):
+        """The system prompt must tell the LLM it can use tools so it
+        actually uses them instead of asking the user for file paths.
+        """
+        from src.agents.planner import _PLANNER_SYSTEM_PROMPT
+
+        prompt = _PLANNER_SYSTEM_PROMPT.lower()
+        assert "filesystem_list" in prompt
+        assert "filesystem_read" in prompt
+        # Pushes the LLM toward using the tools rather than asking
+        assert "do not ask the user" in prompt or "avoid asking" in prompt
+
+    def test_get_planner_readonly_tools_returns_empty_on_no_workspace(self):
+        """No workspace → no tools (nothing to scope a provider to)."""
+        from src.agents.planner import _get_planner_readonly_tools
+
+        assert _get_planner_readonly_tools("") == []
+        assert _get_planner_readonly_tools(None) == []  # type: ignore[arg-type]
+
+    def test_get_planner_readonly_tools_returns_empty_on_missing_config(
+        self, tmp_path, monkeypatch,
+    ):
+        """No mcp-config.json → graceful fallback to zero tools."""
+        from src.agents.planner import _get_planner_readonly_tools
+
+        # Point MCP config at a nonexistent file
+        monkeypatch.setenv("MCP_CONFIG_PATH", str(tmp_path / "nope.json"))
+        assert _get_planner_readonly_tools(str(tmp_path)) == []
+
+    def test_get_planner_readonly_tools_passes_readonly_filter(
+        self, tmp_path, monkeypatch,
+    ):
+        """The helper must call get_tools with tool_filter=READONLY_TOOLS
+        so write tools never reach the Planner LLM. Mocks the provider
+        stack so we assert the contract, not the provider internals.
+        """
+        from unittest.mock import MagicMock
+
+        from src.agents.planner import _get_planner_readonly_tools
+        from src.tools.mcp_bridge import READONLY_TOOLS
+
+        cfg = tmp_path / "mcp-config.json"
+        cfg.write_text('{"servers": {}}', encoding="utf-8")
+        monkeypatch.setenv("MCP_CONFIG_PATH", str(cfg))
+
+        fake_tools = [MagicMock(name="filesystem_read")]
+        get_tools_mock = MagicMock(return_value=fake_tools)
+
+        with patch("src.tools.mcp_bridge.get_tools", get_tools_mock), \
+             patch("src.tools.create_provider", MagicMock()), \
+             patch("src.tools.load_mcp_config", MagicMock()):
+            tools = _get_planner_readonly_tools(str(tmp_path))
+
+        assert tools == fake_tools
+        # The critical assertion: filter was passed so writes cannot leak
+        assert get_tools_mock.called
+        _, kwargs = get_tools_mock.call_args
+        assert kwargs.get("tool_filter") is READONLY_TOOLS
+
+    @pytest.mark.asyncio
+    async def test_send_planner_message_passes_tools_to_llm(
+        self, tmp_path, monkeypatch,
+    ):
+        """send_planner_message fetches tools and forwards them to the
+        LLM call path — even if there are none, the kwarg is passed.
+        """
+        from src.agents.planner import create_planner_session, send_planner_message
+
+        captured_kwargs: dict = {}
+
+        async def fake_llm(model_name, messages, **kwargs):
+            captured_kwargs.update(kwargs)
+            return '```json\n{}\n```'
+
+        session = create_planner_session(workspace=str(tmp_path))
+
+        with patch(
+            "src.agents.planner._call_planner_llm",
+            side_effect=fake_llm,
+        ):
+            await send_planner_message(session, "Add auth middleware")
+
+        # tools kwarg was forwarded (value is [] when no provider —
+        # proves the wire is in place without needing a real provider).
+        assert "tools" in captured_kwargs
+        assert isinstance(captured_kwargs["tools"], list)
+
+    @pytest.mark.asyncio
+    async def test_invoke_with_optional_tools_bypasses_loop_when_no_tools(
+        self,
+    ):
+        """When tools=[] or None, skip bind_tools + loop and call the
+        LLM once directly. Zero added latency for no-tool scenarios.
+        """
+        from src.agents.planner import _invoke_with_optional_tools
+
+        llm = AsyncMock()
+        llm.bind_tools = AsyncMock()  # should NOT be called
+        mock_response = AsyncMock()
+        mock_response.content = "plain response"
+        llm.ainvoke = AsyncMock(return_value=mock_response)
+
+        result = await _invoke_with_optional_tools(llm, [], tools=None)
+        assert result == "plain response"
+        llm.bind_tools.assert_not_called()
+        llm.ainvoke.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_invoke_with_optional_tools_runs_loop_when_tools_present(
+        self, monkeypatch,
+    ):
+        """When tools are provided, bind_tools + _run_tool_loop runs."""
+        from src.agents.planner import _invoke_with_optional_tools
+
+        # Mock the imported _run_tool_loop so we don't need a real LLM
+        async def fake_loop(llm_with_tools, messages, tools, **kwargs):
+            mock_resp = AsyncMock()
+            mock_resp.content = "loop response"
+            return mock_resp, 0, []
+
+        monkeypatch.setattr(
+            "src.orchestrator._run_tool_loop", fake_loop,
+        )
+
+        llm = AsyncMock()
+        bound_llm = AsyncMock()
+        llm.bind_tools = lambda _tools: bound_llm  # sync method
+
+        fake_tools = [AsyncMock(name="fake_tool_obj")]
+        result = await _invoke_with_optional_tools(llm, [], tools=fake_tools)
+        assert result == "loop response"
+
+    @pytest.mark.asyncio
+    async def test_invoke_with_optional_tools_falls_back_on_loop_error(
+        self, monkeypatch,
+    ):
+        """If the tool loop raises, fall back to a single no-tool call
+        so the Planner turn still completes (graceful degradation).
+        """
+        from src.agents.planner import _invoke_with_optional_tools
+
+        async def exploding_loop(*args, **kwargs):
+            raise RuntimeError("provider crashed")
+
+        monkeypatch.setattr(
+            "src.orchestrator._run_tool_loop", exploding_loop,
+        )
+
+        llm = AsyncMock()
+        llm.bind_tools = lambda _tools: llm
+        fallback_response = AsyncMock()
+        fallback_response.content = "fallback response"
+        llm.ainvoke = AsyncMock(return_value=fallback_response)
+
+        fake_tools = [AsyncMock(name="fake_tool_obj")]
+        result = await _invoke_with_optional_tools(llm, [], tools=fake_tools)
+        assert result == "fallback response"
+        llm.ainvoke.assert_awaited()

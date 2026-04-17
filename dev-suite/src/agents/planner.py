@@ -56,6 +56,14 @@ SESSION_TTL_SECONDS = 30 * 60
 # the context injection bounded if the user pastes a long list of refs.
 PLANNER_MAX_GITHUB_REFS = 5
 
+# Planner read-only tool loop turn cap. Matches the Architect's Phase 2
+# budget — enough turns for a few ls/read calls to orient the spec,
+# bounded so a misbehaving LLM can't drain tokens chasing the codebase.
+try:
+    MAX_PLANNER_TOOL_TURNS = int(os.getenv("MAX_PLANNER_TOOL_TURNS", "4"))
+except ValueError:
+    MAX_PLANNER_TOOL_TURNS = 4
+
 # Issue #193: loose heuristic for "the user mentioned a `#N` ref but we
 # couldn't resolve it." Used only for warning diagnostics when the
 # precise `extract_github_refs` returns nothing because no default
@@ -563,13 +571,22 @@ You are a Task Planner for an AI agent team. Your job is to help the user \
 create a clear, complete task specification before it's sent to the Architect \
 agent for blueprint generation.
 
-You do not call tools directly. However, when the user references a GitHub \
-issue or PR (e.g. "fix #42", "review issue #113"), the orchestrator \
-deterministically pre-fetches the issue/PR body and injects it as a \
-message labelled "=== PRE-FETCHED GITHUB CONTEXT ===" below. Treat that \
-block as authoritative source material — never tell the user you cannot \
-access GitHub when that block is present; summarise its contents and move \
-the task forward.
+You have read-only access to the workspace filesystem via tools \
+(filesystem_list, filesystem_read) and may also have github_read_diff. \
+Use these tools whenever doing so would avoid asking the user a question \
+you can answer yourself — e.g. finding a file path, confirming a \
+framework, or reading a config/package manifest to understand the stack. \
+Do NOT ask the user for information the filesystem can tell you. Use \
+tools sparingly and with purpose — one or two quick lookups per turn is \
+typical; do not exhaustively crawl the repo. If tools aren't available \
+this turn (no provider configured), fall back to asking the user.
+
+When the user references a GitHub issue or PR (e.g. "fix #42", "review \
+issue #113"), the orchestrator deterministically pre-fetches the issue/PR \
+body and injects it as a message labelled "=== PRE-FETCHED GITHUB CONTEXT \
+===" below. Treat that block as authoritative source material — never \
+tell the user you cannot access GitHub when that block is present; \
+summarise its contents and move the task forward.
 
 CRITICAL anti-hallucination rule: if NO "=== PRE-FETCHED GITHUB CONTEXT ===" \
 block is present below, the pre-fetch did not run (missing token, wrong \
@@ -917,9 +934,14 @@ async def send_planner_message(
     # Build messages for LLM
     llm_messages = _build_planner_messages(session)
 
+    # Read-only tools scoped to this session's workspace. Best-effort —
+    # returns [] when no provider is configured, letting the Planner
+    # gracefully degrade to the no-tool path for CLI/test scenarios.
+    tools = _get_planner_readonly_tools(session.task_spec.workspace)
+
     # Call the Planner LLM
     model_name = _get_planner_model_name()
-    response_text = await _call_planner_llm(model_name, llm_messages)
+    response_text = await _call_planner_llm(model_name, llm_messages, tools=tools)
 
     # Extract and apply TaskSpec updates
     updates = _extract_task_spec_updates(response_text)
@@ -969,22 +991,105 @@ async def send_planner_message(
     )
 
 
+def _get_planner_readonly_tools(workspace: str) -> list:
+    """Best-effort: build the read-only tool set scoped to the session's
+    workspace. Returns [] on any failure (no mcp-config.json, provider
+    init error, filtered set empty) — the Planner still works via the
+    GitHub pre-fetch alone, just without filesystem visibility.
+    """
+    if not workspace:
+        return []
+    try:
+        # Imported here to avoid a top-level dependency cycle — the tools
+        # module pulls in provider + bridge, which aren't needed when
+        # Planner is used in isolation (tests, CLI smoke).
+        from ..orchestrator import _get_mcp_config_path
+        from ..tools import create_provider, load_mcp_config
+        from ..tools.mcp_bridge import READONLY_TOOLS, get_tools
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[PLANNER] Tool imports failed: %s", exc)
+        return []
+
+    try:
+        config_path = _get_mcp_config_path()
+        if not config_path.is_file():
+            return []
+        mcp_config = load_mcp_config(str(config_path))
+        provider = create_provider(mcp_config, workspace)
+        tools = get_tools(provider, tool_filter=READONLY_TOOLS)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "[PLANNER] Tool provider init failed for workspace %s: %s",
+            workspace, exc,
+        )
+        return []
+
+    return list(tools)
+
+
 async def _call_planner_llm(
     model_name: str,
     messages: list[dict[str, str]],
+    tools: list | None = None,
 ) -> str:
-    """Call the Planner LLM. Supports Gemini and Anthropic models.
+    """Call the Planner LLM, optionally with a read-only tool loop.
 
-    This function is intentionally simple — no tools, no streaming.
-    The Planner is a lightweight validation agent, not a code generator.
+    When ``tools`` is non-empty, the LLM is given ``bind_tools(tools)``
+    and a bounded tool-calling loop (``MAX_PLANNER_TOOL_TURNS`` turns)
+    so the Planner can look up file paths / read configs without
+    asking the user. When empty, falls back to a single no-tool call.
     """
     if model_name.startswith("gemini"):
-        return await _call_gemini(model_name, messages)
+        return await _call_gemini(model_name, messages, tools=tools)
     elif model_name.startswith("claude"):
-        return await _call_anthropic(model_name, messages)
+        return await _call_anthropic(model_name, messages, tools=tools)
     else:
         # Fallback: try langchain-community ChatModel
-        return await _call_langchain_generic(model_name, messages)
+        return await _call_langchain_generic(model_name, messages, tools=tools)
+
+
+async def _invoke_with_optional_tools(
+    llm,
+    lc_messages: list,
+    tools: list | None,
+) -> str:
+    """Shared helper: run the LLM with or without a tool loop.
+
+    Centralizes the tool-loop logic so all three LLM call paths
+    (Gemini, Anthropic, generic) behave identically when tools are
+    available. Best-effort — if the loop raises, logs and falls back
+    to a single tool-free ainvoke.
+    """
+    if not tools:
+        response = await llm.ainvoke(lc_messages)
+        return _extract_text_from_content(response.content)
+
+    try:
+        from ..orchestrator import _run_tool_loop
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[PLANNER] Could not import tool loop: %s", exc)
+        response = await llm.ainvoke(lc_messages)
+        return _extract_text_from_content(response.content)
+
+    try:
+        llm_with_tools = llm.bind_tools(tools)
+        response, _tokens, _log = await _run_tool_loop(
+            llm_with_tools,
+            lc_messages,
+            tools,
+            max_turns=MAX_PLANNER_TOOL_TURNS,
+            tokens_used=0,
+            trace=[],
+            agent_name="planner",
+        )
+        return _extract_text_from_content(response.content)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[PLANNER] Tool loop failed (%s); falling back to no-tool call",
+            exc,
+        )
+        response = await llm.ainvoke(lc_messages)
+        return _extract_text_from_content(response.content)
 
 
 def _extract_text_from_content(content: Any) -> str:
@@ -1020,8 +1125,9 @@ def _extract_text_from_content(content: Any) -> str:
 async def _call_gemini(
     model_name: str,
     messages: list[dict[str, str]],
+    tools: list | None = None,
 ) -> str:
-    """Call Google Gemini via langchain-google-genai."""
+    """Call Google Gemini via langchain-google-genai, optionally with tools."""
     from langchain_google_genai import ChatGoogleGenerativeAI
 
     llm = ChatGoogleGenerativeAI(
@@ -1030,15 +1136,15 @@ async def _call_gemini(
         max_output_tokens=1024,
     )
     lc_messages = _to_langchain_messages(messages)
-    response = await llm.ainvoke(lc_messages)
-    return _extract_text_from_content(response.content)
+    return await _invoke_with_optional_tools(llm, lc_messages, tools)
 
 
 async def _call_anthropic(
     model_name: str,
     messages: list[dict[str, str]],
+    tools: list | None = None,
 ) -> str:
-    """Call Anthropic Claude via langchain-anthropic."""
+    """Call Anthropic Claude via langchain-anthropic, optionally with tools."""
     from langchain_anthropic import ChatAnthropic
 
     llm = ChatAnthropic(
@@ -1047,15 +1153,15 @@ async def _call_anthropic(
         max_tokens=1024,
     )
     lc_messages = _to_langchain_messages(messages)
-    response = await llm.ainvoke(lc_messages)
-    return _extract_text_from_content(response.content)
+    return await _invoke_with_optional_tools(llm, lc_messages, tools)
 
 
 async def _call_langchain_generic(
     model_name: str,
     messages: list[dict[str, str]],
+    tools: list | None = None,
 ) -> str:
-    """Fallback: attempt via langchain ChatOpenAI (OpenAI-compatible)."""
+    """Fallback: attempt via langchain ChatOpenAI, optionally with tools."""
     from langchain_openai import ChatOpenAI
 
     llm = ChatOpenAI(
@@ -1064,8 +1170,7 @@ async def _call_langchain_generic(
         max_tokens=1024,
     )
     lc_messages = _to_langchain_messages(messages)
-    response = await llm.ainvoke(lc_messages)
-    return _extract_text_from_content(response.content)
+    return await _invoke_with_optional_tools(llm, lc_messages, tools)
 
 
 def _to_langchain_messages(
