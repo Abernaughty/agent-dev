@@ -568,3 +568,176 @@ class TestSendPlannerMessage:
             response = await send_planner_message(session, "Override workspace")
 
         assert response.task_spec.workspace == "/safe/path"
+
+
+# =========================================================================
+# GitHub pre-fetch tests (Issue #193 PR 2)
+# =========================================================================
+
+
+class TestPlannerGitHubPrefetch:
+    @pytest.mark.asyncio
+    async def test_prefetch_populates_github_context(self, monkeypatch):
+        """User message with issue ref → github_context populated before LLM call."""
+        from src.agents.planner import create_planner_session, send_planner_message
+
+        monkeypatch.setenv("GITHUB_TOKEN", "fake-token")
+        monkeypatch.setenv("GITHUB_OWNER", "acme")
+        monkeypatch.setenv("GITHUB_REPO", "widgets")
+
+        session = create_planner_session(
+            workspace="/proj", languages=["Python"],
+        )
+
+        fetched = {
+            "path": "github://acme/widgets/issues/42",
+            "content": "Issue #42: Broken login\n\nState: open",
+            "truncated": False,
+            "source": "github_issue",
+        }
+        captured_messages: list[list[dict]] = []
+
+        async def fake_fetch(*args, **kwargs):
+            return [fetched]
+
+        async def fake_llm(model_name, messages):
+            # Capture the messages the LLM would have received
+            captured_messages.append(messages)
+            return '```json\n{"objective": "Fix login"}\n```'
+
+        with patch(
+            "src.agents.planner.fetch_refs_as_context_items",
+            side_effect=fake_fetch,
+        ), patch(
+            "src.agents.planner._call_planner_llm",
+            side_effect=fake_llm,
+        ):
+            response = await send_planner_message(
+                session, "Please fix issue #42 — login is broken"
+            )
+
+        # github_context captured from the fetch
+        assert len(response.task_spec.github_context) == 1
+        assert response.task_spec.github_context[0]["path"] == \
+            "github://acme/widgets/issues/42"
+
+        # The pre-fetch block reached the LLM as a system message
+        assert captured_messages, "LLM must have been called"
+        system_messages = [
+            m["content"] for m in captured_messages[0] if m["role"] == "system"
+        ]
+        assert any(
+            "github://acme/widgets/issues/42" in s for s in system_messages
+        )
+
+    @pytest.mark.asyncio
+    async def test_prefetch_skipped_without_token(self, monkeypatch):
+        """No GITHUB_TOKEN → no pre-fetch attempted."""
+        from src.agents.planner import create_planner_session, send_planner_message
+
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        session = create_planner_session(workspace="/proj", languages=["Python"])
+
+        fetch_called = False
+
+        async def fake_fetch(*args, **kwargs):
+            nonlocal fetch_called
+            fetch_called = True
+            return []
+
+        async def fake_llm(model_name, messages):
+            return '```json\n{"objective": "Fix login"}\n```'
+
+        with patch(
+            "src.agents.planner.fetch_refs_as_context_items",
+            side_effect=fake_fetch,
+        ), patch(
+            "src.agents.planner._call_planner_llm",
+            side_effect=fake_llm,
+        ):
+            await send_planner_message(session, "Fix issue #42")
+
+        assert not fetch_called
+        assert session.task_spec.github_context == []
+
+    @pytest.mark.asyncio
+    async def test_prefetch_dedupes_across_turns(self, monkeypatch):
+        """Mentioning the same ref twice in the session only stores it once."""
+        from src.agents.planner import create_planner_session, send_planner_message
+
+        monkeypatch.setenv("GITHUB_TOKEN", "fake-token")
+        monkeypatch.setenv("GITHUB_OWNER", "acme")
+        monkeypatch.setenv("GITHUB_REPO", "widgets")
+
+        session = create_planner_session(workspace="/proj", languages=["Python"])
+
+        fetched = {
+            "path": "github://acme/widgets/issues/42",
+            "content": "Issue #42: Broken login",
+            "truncated": False,
+            "source": "github_issue",
+        }
+
+        async def fake_fetch(*args, **kwargs):
+            return [fetched]
+
+        async def fake_llm(model_name, messages):
+            return '```json\n{}\n```'
+
+        with patch(
+            "src.agents.planner.fetch_refs_as_context_items",
+            side_effect=fake_fetch,
+        ), patch(
+            "src.agents.planner._call_planner_llm",
+            side_effect=fake_llm,
+        ):
+            await send_planner_message(session, "Fix issue #42")
+            await send_planner_message(session, "Also address issue #42 again")
+
+        assert len(session.task_spec.github_context) == 1
+
+    @pytest.mark.asyncio
+    async def test_llm_cannot_override_github_context(self, monkeypatch):
+        """Extracted JSON cannot set or clobber github_context field."""
+        from src.agents.planner import (
+            TaskSpec,
+            _apply_spec_updates,
+        )
+
+        ts = TaskSpec(
+            workspace="/p",
+            github_context=[{"path": "github://a/b/issues/1", "content": "real"}],
+        )
+        _apply_spec_updates(
+            ts,
+            {"github_context": [{"path": "github://evil/x/issues/9", "content": "fake"}]},
+        )
+        assert ts.github_context == [
+            {"path": "github://a/b/issues/1", "content": "real"}
+        ]
+
+    @pytest.mark.asyncio
+    async def test_prefetch_failure_does_not_break_message(self, monkeypatch):
+        """Network errors during pre-fetch are swallowed; user turn still succeeds."""
+        from src.agents.planner import create_planner_session, send_planner_message
+
+        monkeypatch.setenv("GITHUB_TOKEN", "fake-token")
+        session = create_planner_session(workspace="/proj", languages=["Python"])
+
+        async def boom(*args, **kwargs):
+            raise RuntimeError("network down")
+
+        async def fake_llm(model_name, messages):
+            return '```json\n{"objective": "Fix"}\n```'
+
+        with patch(
+            "src.agents.planner.fetch_refs_as_context_items",
+            side_effect=boom,
+        ), patch(
+            "src.agents.planner._call_planner_llm",
+            side_effect=fake_llm,
+        ):
+            response = await send_planner_message(session, "Fix #42")
+
+        assert response.task_spec.objective == "Fix"
+        assert session.task_spec.github_context == []

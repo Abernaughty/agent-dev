@@ -41,6 +41,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from ..tools.github_fetch import fetch_refs_as_context_items
+
 logger = logging.getLogger(__name__)
 
 # Default model for the Planner agent — lightweight and cheap.
@@ -49,6 +51,15 @@ DEFAULT_PLANNER_MODEL = "gemini-3.1-flash-lite-preview"
 
 # Session TTL in seconds (30 minutes idle timeout)
 SESSION_TTL_SECONDS = 30 * 60
+
+# Issue #193: cap GitHub refs pre-fetched per Planner message. Keeps
+# the context injection bounded if the user pastes a long list of refs.
+PLANNER_MAX_GITHUB_REFS = 5
+
+# Issue #193: per-ref body char budget for the Planner's pre-fetch.
+# Tighter than the Architect's gather_context (2000) because the
+# Planner only needs a quick orientation, not full issue bodies.
+PLANNER_GITHUB_REF_MAX_CHARS = 1200
 
 
 # ---------------------------------------------------------------------------
@@ -136,6 +147,10 @@ class TaskSpec(BaseModel):
     acceptance_criteria: list[str] = Field(default_factory=list)
     constraints: list[str] = Field(default_factory=list)
     related_files: list[str] = Field(default_factory=list)
+    # Issue #193: Planner-side pre-fetched GitHub issue/PR summaries,
+    # shape matches `gathered_context` entries. Passed through to the
+    # orchestrator on submit so the Architect doesn't re-fetch.
+    github_context: list[dict] = Field(default_factory=list)
 
     def to_description(self) -> str:
         """Serialize to a rich description string for the Architect."""
@@ -549,6 +564,34 @@ def _get_planner_model_name() -> str:
     return os.getenv("PLANNER_MODEL", DEFAULT_PLANNER_MODEL)
 
 
+def _format_github_context_block(github_context: list[dict]) -> str:
+    """Render pre-fetched GitHub issue/PR summaries for the system prompt.
+
+    Returns a human-readable block of summaries, or an empty string
+    when there's nothing to show. Called from `_build_planner_messages`
+    so the Planner LLM can reference issue/PR content that the user
+    mentioned without asking the user to paste it.
+    """
+    if not github_context:
+        return ""
+    sections: list[str] = [
+        "Pre-fetched GitHub references (from the user's message; "
+        "use these to orient the task, do not ask the user to paste "
+        "them):",
+    ]
+    for item in github_context:
+        if not isinstance(item, dict):
+            continue
+        path = item.get("path") or "github://unknown"
+        content = (item.get("content") or "").strip()
+        if not content:
+            continue
+        sections.append(f"--- {path} ---\n{content}")
+    if len(sections) == 1:
+        return ""
+    return "\n\n".join(sections)
+
+
 def _build_planner_messages(
     session: PlannerSession,
 ) -> list[dict[str, str]]:
@@ -564,6 +607,10 @@ def _build_planner_messages(
 
     messages: list[dict[str, str]] = [{"role": "system", "content": system_content}]
 
+    github_block = _format_github_context_block(session.task_spec.github_context)
+    if github_block:
+        messages.append({"role": "system", "content": github_block})
+
     for msg in session.messages:
         if msg.role == "system":
             continue  # System context is in the system prompt
@@ -571,6 +618,50 @@ def _build_planner_messages(
         messages.append({"role": role, "content": msg.content})
 
     return messages
+
+
+async def _prefetch_github_refs_for_message(
+    session: PlannerSession,
+    user_message: str,
+) -> list[dict]:
+    """Deterministically pre-fetch GitHub refs mentioned in the user message.
+
+    Populates `session.task_spec.github_context` with gathered_context-
+    shaped dicts. Dedupes against refs already in the session (so follow-up
+    messages that mention the same issue don't re-fetch). Best-effort:
+    missing GITHUB_TOKEN or network errors quietly return no new items.
+    """
+    token = os.getenv("GITHUB_TOKEN", "")
+    if not token:
+        return []
+
+    default_owner = os.getenv("GITHUB_OWNER", "")
+    default_repo = os.getenv("GITHUB_REPO", "")
+
+    existing_paths = {
+        item.get("path") for item in session.task_spec.github_context
+        if isinstance(item, dict) and item.get("path")
+    }
+
+    items = await fetch_refs_as_context_items(
+        user_message,
+        default_owner=default_owner,
+        default_repo=default_repo,
+        token=token,
+        max_refs=PLANNER_MAX_GITHUB_REFS,
+        max_chars=PLANNER_GITHUB_REF_MAX_CHARS,
+    )
+    new_items = [
+        item for item in items
+        if item.get("path") and item["path"] not in existing_paths
+    ]
+    if new_items:
+        session.task_spec.github_context.extend(new_items)
+        logger.info(
+            "[PLANNER] Pre-fetched %d GitHub ref(s) for session %s",
+            len(new_items), session.session_id,
+        )
+    return new_items
 
 
 def _extract_task_spec_updates(response_text: str) -> dict[str, Any]:
@@ -621,6 +712,8 @@ def _apply_spec_updates(task_spec: TaskSpec, updates: dict[str, Any]) -> TaskSpe
             continue
         if field_name == "workspace":
             continue  # Never override workspace from LLM output
+        if field_name == "github_context":
+            continue  # Populated deterministically by pre-fetch, not LLM
         if value is None or value == "" or value == []:
             continue
 
@@ -686,6 +779,15 @@ async def send_planner_message(
     session.messages.append(
         PlannerMessage(role="user", content=user_message)
     )
+
+    # Issue #193: deterministic GitHub pre-fetch. Scans the user's
+    # message for issue/PR refs and populates task_spec.github_context
+    # before the LLM sees the turn so the Planner can orient itself
+    # without consuming tool tokens.
+    try:
+        await _prefetch_github_refs_for_message(session, user_message)
+    except Exception as exc:  # noqa: BLE001 - best-effort pre-fetch
+        logger.debug("[PLANNER] GitHub pre-fetch failed: %s", exc)
 
     # Build messages for LLM
     llm_messages = _build_planner_messages(session)

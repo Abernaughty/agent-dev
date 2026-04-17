@@ -440,6 +440,93 @@ class TestGatherContextCrossDirectory:
         assert result["gathered_context"] == []
 
     @pytest.mark.asyncio
+    async def test_prefetched_context_is_reused(self, tmp_path, monkeypatch):
+        """Planner-supplied prefetched GitHub items are merged into gathered."""
+        from unittest.mock import AsyncMock, patch
+
+        (tmp_path / ".git").mkdir()
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+        prefetched = [
+            {
+                "path": "github://acme/widgets/issues/42",
+                "content": "Issue #42: Broken login\n\nState: open",
+                "truncated": False,
+                "source": "github_issue",
+            }
+        ]
+
+        state: GraphState = {
+            "task_description": "Please fix the login bug",
+            "workspace_root": str(tmp_path),
+            "trace": [],
+            "status": WorkflowStatus.PLANNING,
+            "prefetched_gathered_context": prefetched,
+        }
+
+        # No network needed — prefetched is reused, task has no refs
+        mock_client = AsyncMock()
+        with patch(
+            "src.tools.github_fetch.httpx.AsyncClient", return_value=mock_client
+        ):
+            result = await gather_context_node(state)
+
+        gh_items = [
+            c for c in result["gathered_context"]
+            if c.get("source") == "github_issue"
+        ]
+        assert len(gh_items) == 1
+        assert gh_items[0]["path"] == "github://acme/widgets/issues/42"
+        assert any("reused 1 pre-fetched" in t for t in result["trace"])
+
+    @pytest.mark.asyncio
+    async def test_prefetched_dedupes_with_node_fetch(
+        self, tmp_path, monkeypatch,
+    ):
+        """Task mentions an issue already in prefetched — node skips refetch."""
+        from unittest.mock import AsyncMock, patch
+
+        (tmp_path / ".git").mkdir()
+        monkeypatch.setenv("GITHUB_TOKEN", "t")
+        monkeypatch.setenv("GITHUB_OWNER", "acme")
+        monkeypatch.setenv("GITHUB_REPO", "widgets")
+
+        prefetched = [
+            {
+                "path": "github://acme/widgets/issues/42",
+                "content": "Issue #42: Broken login",
+                "truncated": False,
+                "source": "github_issue",
+            }
+        ]
+
+        # AsyncClient would raise if called — ensures no refetch
+        mock_client = AsyncMock()
+        mock_client.__aenter__.side_effect = AssertionError(
+            "no refetch expected for already-prefetched ref"
+        )
+
+        state: GraphState = {
+            "task_description": "Please address issue #42 (acme/widgets)",
+            "workspace_root": str(tmp_path),
+            "trace": [],
+            "status": WorkflowStatus.PLANNING,
+            "prefetched_gathered_context": prefetched,
+        }
+        with patch(
+            "src.tools.github_fetch.httpx.AsyncClient", return_value=mock_client
+        ):
+            result = await gather_context_node(state)
+
+        gh_items = [
+            c for c in result["gathered_context"]
+            if c.get("source") == "github_issue"
+        ]
+        # Only the prefetched item, no duplicate
+        assert len(gh_items) == 1
+        assert gh_items[0]["path"] == "github://acme/widgets/issues/42"
+
+    @pytest.mark.asyncio
     async def test_rejects_path_outside_repo_root(self, tmp_path):
         (tmp_path / ".git").mkdir()
         dev_suite = tmp_path / "dev-suite"
