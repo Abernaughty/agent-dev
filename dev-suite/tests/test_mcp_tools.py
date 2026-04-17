@@ -658,6 +658,64 @@ class TestGetTools:
 
 
 # ============================================================
+# Read-only tool filtering (issue #193)
+# ============================================================
+
+
+class TestToolFilter:
+    """Verify READONLY_TOOLS allowlist + tool_filter parameter."""
+
+    @pytest.fixture
+    def provider(self, tmp_path):
+        (tmp_path / "a.txt").write_text("a", encoding="utf-8")
+        return LocalToolProvider(workspace_root=tmp_path)
+
+    def test_readonly_tools_is_frozenset(self):
+        from src.tools.mcp_bridge import READONLY_TOOLS
+        assert isinstance(READONLY_TOOLS, frozenset)
+
+    def test_readonly_tools_excludes_writes(self):
+        from src.tools.mcp_bridge import READONLY_TOOLS
+        for name in ("filesystem_write", "filesystem_patch", "github_create_pr"):
+            assert name not in READONLY_TOOLS
+
+    def test_readonly_tools_includes_reads(self):
+        from src.tools.mcp_bridge import READONLY_TOOLS
+        assert "filesystem_read" in READONLY_TOOLS
+        assert "filesystem_list" in READONLY_TOOLS
+        assert "github_read_diff" in READONLY_TOOLS
+
+    def test_get_tools_no_filter_returns_all(self, provider):
+        assert len(get_tools(provider)) == 6
+
+    def test_get_tools_with_readonly_filter(self, provider):
+        from src.tools.mcp_bridge import READONLY_TOOLS
+        tools = get_tools(provider, tool_filter=READONLY_TOOLS)
+        names = {t.name for t in tools}
+        assert "filesystem_write" not in names
+        assert "filesystem_patch" not in names
+        assert "github_create_pr" not in names
+        # Read-only tools that exist in this provider
+        assert "filesystem_read" in names
+        assert "filesystem_list" in names
+
+    def test_get_tools_with_empty_filter(self, provider):
+        assert get_tools(provider, tool_filter=set()) == []
+
+    def test_get_tools_filter_drops_unknown_names(self, provider):
+        tools = get_tools(provider, tool_filter={"nonexistent_tool"})
+        assert tools == []
+
+    @pytest.mark.asyncio
+    async def test_aget_tools_with_readonly_filter(self, provider):
+        from src.tools.mcp_bridge import READONLY_TOOLS, aget_tools
+        tools = await aget_tools(provider, tool_filter=READONLY_TOOLS)
+        names = {t.name for t in tools}
+        assert "filesystem_write" not in names
+        assert "filesystem_read" in names
+
+
+# ============================================================
 # Integration: full filesystem round-trip
 # ============================================================
 

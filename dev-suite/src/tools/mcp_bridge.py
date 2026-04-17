@@ -32,6 +32,20 @@ from .provider import ToolProvider
 logger = logging.getLogger(__name__)
 
 
+# Read-only tool allowlist (issue #193).
+#
+# Used by agents that should be able to explore the workspace and
+# GitHub without making changes — currently the Planner and the
+# Architect's optional Phase 2. Keep this in sync with the tool
+# registry in provider.py: any tool whose handler performs only
+# reads (no filesystem writes, no GitHub mutations) belongs here.
+READONLY_TOOLS: frozenset[str] = frozenset({
+    "filesystem_read",
+    "filesystem_list",
+    "github_read_diff",
+})
+
+
 class MCPConfigError(Exception):
     """Raised when mcp-config.json is invalid or missing."""
 
@@ -228,7 +242,10 @@ def _run_async(coro):
 # -- Tool factories --
 
 
-def get_tools(provider: ToolProvider) -> list[Tool]:
+def get_tools(
+    provider: ToolProvider,
+    tool_filter: set[str] | frozenset[str] | None = None,
+) -> list[Tool]:
     """Create LangChain Tool objects from an async ToolProvider (sync).
 
     Dynamically generates Tools from the provider's list_tools()
@@ -242,16 +259,25 @@ def get_tools(provider: ToolProvider) -> list[Tool]:
 
     Args:
         provider: Any async ToolProvider
+        tool_filter: Optional allowlist of tool names. When provided,
+            only tools whose name is in the set are returned. Typically
+            set to READONLY_TOOLS for read-only agents (Planner,
+            Architect Phase 2) — see issue #193.
 
     Returns:
         List of LangChain Tool objects the agents can use.
     """
     # list_tools() is async, so we need to bridge here
     definitions = _run_async(provider.list_tools())
+    if tool_filter is not None:
+        definitions = [d for d in definitions if d.name in tool_filter]
     return _build_langchain_tools(provider, definitions)
 
 
-async def aget_tools(provider: ToolProvider) -> list[Tool]:
+async def aget_tools(
+    provider: ToolProvider,
+    tool_filter: set[str] | frozenset[str] | None = None,
+) -> list[Tool]:
     """Create LangChain Tool objects from an async ToolProvider (async).
 
     ARCH-3: Async variant of get_tools(). Avoids the _run_async bridge
@@ -259,11 +285,17 @@ async def aget_tools(provider: ToolProvider) -> list[Tool]:
 
     Args:
         provider: Any async ToolProvider
+        tool_filter: Optional allowlist of tool names. When provided,
+            only tools whose name is in the set are returned. Typically
+            set to READONLY_TOOLS for read-only agents (Planner,
+            Architect Phase 2) — see issue #193.
 
     Returns:
         List of LangChain Tool objects the agents can use.
     """
     definitions = await provider.list_tools()
+    if tool_filter is not None:
+        definitions = [d for d in definitions if d.name in tool_filter]
     return _build_langchain_tools(provider, definitions)
 
 
