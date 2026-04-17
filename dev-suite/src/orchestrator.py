@@ -64,6 +64,7 @@ from .tools.code_parser import (
     validate_paths_for_workspace,
 )
 from .tools.github_fetch import extract_github_refs, fetch_issue_or_pr
+from .tools.mcp_bridge import READONLY_TOOLS
 from .tracing import add_trace_event, create_trace_config
 
 load_dotenv()
@@ -82,6 +83,11 @@ def _safe_int(env_key: str, default: int) -> int:
 MAX_RETRIES = _safe_int("MAX_RETRIES", 3)
 TOKEN_BUDGET = _safe_int("TOKEN_BUDGET", 50000)
 MAX_TOOL_TURNS = _safe_int("MAX_TOOL_TURNS", 10)
+# Issue #193 PR 3: Architect's Phase 2 tool-loop cap. Architect only
+# needs a handful of read-only probes (list → read → maybe read again)
+# to disambiguate target_files, so we keep this tight vs. Developer's
+# MAX_TOOL_TURNS.
+MAX_ARCHITECT_TOOL_TURNS = _safe_int("MAX_ARCHITECT_TOOL_TURNS", 4)
 MAX_RETRY_FILE_CHARS = _safe_int("MAX_RETRY_FILE_CHARS", 30000)
 CONTEXT_BUDGET_CHARS = _safe_int("CONTEXT_BUDGET_CHARS", 120000)  # ~30k tokens
 CONTEXT_FILE_MAX_LINES = _safe_int("CONTEXT_FILE_MAX_LINES", 500)
@@ -958,7 +964,40 @@ async def decompose_task_node(state: GraphState) -> dict:
 # CRITICAL: All graph nodes MUST be async def on Python 3.13+.
 # Sync nodes cause "generator didn't stop after throw()" under astream().
 
-async def architect_node(state: GraphState) -> dict:
+def _blueprint_is_sufficient(blueprint: Blueprint) -> bool:
+    """Heuristic: is the Architect's Phase-1 Blueprint good enough to build?
+
+    Issue #193 PR 3 — When the Architect has no tool access, it sometimes
+    emits placeholder paths ("path/to/file.py") or an empty target_files
+    because it can't verify the codebase layout. In those cases we escalate
+    to Phase 2 (read-only tools). Otherwise the Phase-1 Blueprint is used
+    as-is, matching the pre-#193 behavior and avoiding unnecessary tool
+    cost.
+    """
+    if not blueprint.target_files:
+        return False
+    # Reject placeholder-looking paths — angle brackets, "TODO", or the
+    # literal "path/to" prefix LLMs emit when they're guessing.
+    for tf in blueprint.target_files:
+        stripped = tf.strip()
+        if not stripped:
+            return False
+        lower = stripped.lower()
+        if "<" in stripped or ">" in stripped:
+            return False
+        if lower.startswith("path/to") or lower in {"todo", "tbd", "unknown"}:
+            return False
+    # Require non-trivial instructions so an empty/handwave Blueprint
+    # doesn't squeak through.
+    if len(blueprint.instructions.strip()) < 20:
+        return False
+    return True
+
+
+async def architect_node(
+    state: GraphState,
+    config: RunnableConfig | None = None,
+) -> dict:
     trace = list(state.get("trace", []))
     trace.append("architect: starting planning")
     retry_count = state.get("retry_count", 0)
@@ -1041,19 +1080,119 @@ Do not include any text before or after the JSON.{memory_block}{source_block}"""
         user_msg += f"Recommendation: {failure_report.recommendation}\n"
         user_msg += "\nGenerate a COMPLETELY NEW Blueprint. Do not patch the old one. The previous target_files or approach was wrong."
     llm = _get_architect_llm()
-    response = await llm.ainvoke([SystemMessage(content=system_prompt), HumanMessage(content=user_msg)])
+    # Phase 1: no tools. Keep pre-#193 behavior intact — the Architect
+    # produces a Blueprint from memory + gathered_context alone. This is
+    # cheap and handles the common case where gather_context_node already
+    # surfaced the right files.
+    phase1_messages = [SystemMessage(content=system_prompt), HumanMessage(content=user_msg)]
+    response = await llm.ainvoke(phase1_messages)
+    tokens_used += _extract_token_count(response)
     try:
         raw = _extract_text_content(response.content)
         blueprint_data = _extract_json(raw)
         blueprint = Blueprint(**blueprint_data)
     except (json.JSONDecodeError, Exception) as e:
-        trace.append(f"architect: failed to parse blueprint: {e}")
-        logger.error("[ARCH] Blueprint parse failed: %s", e)
-        return {"status": WorkflowStatus.FAILED, "error_message": f"Architect failed to produce valid Blueprint: {e}", "trace": trace, "memory_context": memory_context}
-    trace.append(f"architect: blueprint created for {len(blueprint.target_files)} files")
-    tokens_used = tokens_used + _extract_token_count(response)
+        trace.append(f"architect: phase 1 failed to parse blueprint: {e}")
+        logger.error("[ARCH] Phase 1 Blueprint parse failed: %s", e)
+        blueprint = None
+
+    # Phase 2 gate (Issue #193 PR 3): escalate to read-only tools if the
+    # Phase-1 Blueprint is missing/insufficient AND tools are available.
+    # When no tools are configured (e.g. single-shot mode, tests without
+    # a provider) we fall through with whatever Phase 1 produced.
+    tool_calls_log: list[dict] = []
+    phase2_attempted = False
+    if blueprint is None or not _blueprint_is_sufficient(blueprint):
+        readonly_tools = _get_agent_tools(config, allowed_names=READONLY_TOOLS)
+        if readonly_tools:
+            phase2_attempted = True
+            reason = (
+                "phase 1 produced no parseable blueprint"
+                if blueprint is None
+                else f"phase 1 blueprint insufficient (target_files={blueprint.target_files})"
+            )
+            trace.append(f"architect: escalating to phase 2 -- {reason}")
+            logger.info(
+                "[ARCH] Phase 2 start: %d read-only tool(s) bound, reason=%s",
+                len(readonly_tools), reason,
+            )
+            # Carry Phase 1 forward as context and nudge the LLM to use
+            # the tools to verify target_files before re-emitting JSON.
+            escalation_prompt = (
+                "The previous Blueprint was insufficient -- either empty "
+                "target_files, placeholder paths, or missing instructions. "
+                "Use the read-only tools (filesystem_list, filesystem_read, "
+                "github_read_diff) to inspect the codebase, verify which "
+                "files exist, and then emit a CORRECTED JSON Blueprint "
+                "matching the schema above. Respond with ONLY the JSON "
+                "when done."
+            )
+            phase2_messages = list(phase1_messages)
+            phase2_messages.append(response)
+            phase2_messages.append(HumanMessage(content=escalation_prompt))
+            llm_with_tools = llm.bind_tools(readonly_tools)
+            response, tokens_used, new_tool_log = await _run_tool_loop(
+                llm_with_tools,
+                phase2_messages,
+                readonly_tools,
+                max_turns=MAX_ARCHITECT_TOOL_TURNS,
+                tokens_used=tokens_used,
+                trace=trace,
+                agent_name="architect",
+            )
+            tool_calls_log.extend(new_tool_log)
+            try:
+                raw = _extract_text_content(response.content)
+                blueprint_data = _extract_json(raw)
+                blueprint = Blueprint(**blueprint_data)
+                trace.append(
+                    f"architect: phase 2 blueprint parsed for "
+                    f"{len(blueprint.target_files)} file(s)"
+                )
+            except (json.JSONDecodeError, Exception) as e:
+                trace.append(f"architect: phase 2 failed to parse blueprint: {e}")
+                logger.warning("[ARCH] Phase 2 Blueprint parse failed: %s", e)
+                # If Phase 1 already gave us *something* parseable, keep it;
+                # otherwise this is a hard failure.
+                if blueprint is None:
+                    return {
+                        "status": WorkflowStatus.FAILED,
+                        "error_message": (
+                            f"Architect failed to produce valid Blueprint "
+                            f"(phase 1 + phase 2 both failed): {e}"
+                        ),
+                        "trace": trace,
+                        "memory_context": memory_context,
+                        "tool_calls_log": tool_calls_log,
+                    }
+
+    if blueprint is None:
+        # Phase 1 failed and no tools to escalate with.
+        return {
+            "status": WorkflowStatus.FAILED,
+            "error_message": "Architect failed to produce valid Blueprint",
+            "trace": trace,
+            "memory_context": memory_context,
+        }
+
+    if not phase2_attempted:
+        trace.append(
+            f"architect: phase 1 blueprint created for "
+            f"{len(blueprint.target_files)} files"
+        )
     logger.info("[ARCH] done. tokens_used now=%d", tokens_used)
-    return {"blueprint": blueprint, "status": WorkflowStatus.BUILDING, "tokens_used": tokens_used, "trace": trace, "memory_context": memory_context}
+    result = {
+        "blueprint": blueprint,
+        "status": WorkflowStatus.BUILDING,
+        "tokens_used": tokens_used,
+        "trace": trace,
+        "memory_context": memory_context,
+    }
+    # Only touch tool_calls_log if Phase 2 ran, so single-shot tasks
+    # keep a clean empty log.
+    if tool_calls_log:
+        result["tool_calls_log"] = list(state.get("tool_calls_log", [])) + tool_calls_log
+    return result
 
 
 async def developer_node(state: GraphState, config: RunnableConfig | None = None) -> dict:
