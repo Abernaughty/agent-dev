@@ -41,7 +41,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from ..tools.github_fetch import fetch_refs_as_context_items
+from ..tools.github_fetch import extract_github_refs, fetch_refs_as_context_items
 
 logger = logging.getLogger(__name__)
 
@@ -501,8 +501,14 @@ You are a Task Planner for an AI agent team. Your job is to help the user \
 create a clear, complete task specification before it's sent to the Architect \
 agent for blueprint generation.
 
-You have ZERO tool access — no filesystem, no GitHub, no sandbox. You only \
-work with information the user provides and any auto-detected project context.
+You do not call tools directly. However, when the user references a GitHub \
+issue or PR (e.g. "fix #42", "review issue #113"), the orchestrator \
+deterministically pre-fetches the issue/PR body and injects it as a \
+message labelled "=== PRE-FETCHED GITHUB CONTEXT ===" below. Treat that \
+block as authoritative source material — never tell the user you cannot \
+access GitHub when that block is present; summarise its contents and move \
+the task forward. You also work with information the user provides and \
+any auto-detected project context.
 
 Your responsibilities:
 1. Understand the user's objective
@@ -575,10 +581,12 @@ def _format_github_context_block(github_context: list[dict]) -> str:
     if not github_context:
         return ""
     sections: list[str] = [
-        "Pre-fetched GitHub references (from the user's message; "
-        "use these to orient the task, do not ask the user to paste "
-        "them):",
+        "=== PRE-FETCHED GITHUB CONTEXT ===",
+        "The orchestrator already fetched the GitHub issue/PR the user "
+        "mentioned. Use these summaries to orient the task. Do not tell "
+        "the user you cannot access GitHub — the content is below.",
     ]
+    body_count = 0
     for item in github_context:
         if not isinstance(item, dict):
             continue
@@ -587,8 +595,10 @@ def _format_github_context_block(github_context: list[dict]) -> str:
         if not content:
             continue
         sections.append(f"--- {path} ---\n{content}")
-    if len(sections) == 1:
+        body_count += 1
+    if body_count == 0:
         return ""
+    sections.append("=== END PRE-FETCHED GITHUB CONTEXT ===")
     return "\n\n".join(sections)
 
 
@@ -631,12 +641,25 @@ async def _prefetch_github_refs_for_message(
     messages that mention the same issue don't re-fetch). Best-effort:
     missing GITHUB_TOKEN or network errors quietly return no new items.
     """
-    token = os.getenv("GITHUB_TOKEN", "")
-    if not token:
-        return []
-
     default_owner = os.getenv("GITHUB_OWNER", "")
     default_repo = os.getenv("GITHUB_REPO", "")
+
+    detected_refs = extract_github_refs(
+        user_message,
+        default_owner=default_owner,
+        default_repo=default_repo,
+        max_refs=PLANNER_MAX_GITHUB_REFS,
+    )
+
+    token = os.getenv("GITHUB_TOKEN", "")
+    if not token:
+        if detected_refs:
+            logger.warning(
+                "[PLANNER] Detected %d GitHub ref(s) in session %s but "
+                "GITHUB_TOKEN is not set — pre-fetch skipped",
+                len(detected_refs), session.session_id,
+            )
+        return []
 
     existing_paths = {
         item.get("path") for item in session.task_spec.github_context
@@ -651,6 +674,12 @@ async def _prefetch_github_refs_for_message(
         max_refs=PLANNER_MAX_GITHUB_REFS,
         max_chars=PLANNER_GITHUB_REF_MAX_CHARS,
     )
+    if detected_refs and not items:
+        logger.warning(
+            "[PLANNER] Detected %d GitHub ref(s) in session %s but "
+            "fetch returned 0 items (bad token, 404, or network error)",
+            len(detected_refs), session.session_id,
+        )
     new_items = [
         item for item in items
         if item.get("path") and item["path"] not in existing_paths

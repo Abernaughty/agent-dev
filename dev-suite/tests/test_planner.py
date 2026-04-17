@@ -741,3 +741,137 @@ class TestPlannerGitHubPrefetch:
 
         assert response.task_spec.objective == "Fix"
         assert session.task_spec.github_context == []
+
+
+# =========================================================================
+# System-prompt reconciliation with pre-fetched GitHub context (Issue #193)
+# =========================================================================
+
+
+class TestPlannerSystemPromptReconciliation:
+    """Regression tests for the bug where the Planner's system prompt
+    told the LLM it had "ZERO tool access" even when the orchestrator
+    had pre-fetched GitHub issue/PR bodies. See issue #193 AC #3.
+    """
+
+    @pytest.mark.asyncio
+    async def test_prompt_does_not_claim_zero_tool_access_when_context_present(
+        self, monkeypatch,
+    ):
+        """System messages sent to the LLM must not tell it it has ZERO
+        tool access once github_context is populated, and must include
+        the PRE-FETCHED GITHUB CONTEXT marker so the LLM knows to use
+        the injected data instead of apologizing about missing tools.
+        """
+        from src.agents.planner import create_planner_session, send_planner_message
+
+        monkeypatch.setenv("GITHUB_TOKEN", "fake-token")
+        monkeypatch.setenv("GITHUB_OWNER", "Abernaughty")
+        monkeypatch.setenv("GITHUB_REPO", "agent-dev")
+
+        session = create_planner_session(workspace="/proj", languages=["Python"])
+
+        fetched = {
+            "path": "github://Abernaughty/agent-dev/issues/113",
+            "content": (
+                "Issue #113: Fix the planner\n\nState: open\n\n"
+                "Body: the planner needs real GitHub context"
+            ),
+            "truncated": False,
+            "source": "github_issue",
+        }
+        captured: list[list[dict]] = []
+
+        async def fake_fetch(*args, **kwargs):
+            return [fetched]
+
+        async def fake_llm(model_name, messages):
+            captured.append(messages)
+            return '```json\n{"objective": "Fix the planner"}\n```'
+
+        with patch(
+            "src.agents.planner.fetch_refs_as_context_items",
+            side_effect=fake_fetch,
+        ), patch(
+            "src.agents.planner._call_planner_llm",
+            side_effect=fake_llm,
+        ):
+            await send_planner_message(
+                session,
+                "Review and implement the fix for GitHub Issue #113.",
+            )
+
+        assert captured, "LLM must have been called"
+        system_content = "\n".join(
+            m["content"] for m in captured[0] if m["role"] == "system"
+        )
+
+        # The self-denial phrasing is gone.
+        assert "ZERO tool access" not in system_content
+
+        # The LLM is explicitly told not to claim no GitHub access when
+        # context is present, and the pre-fetched block is clearly marked.
+        assert "PRE-FETCHED GITHUB CONTEXT" in system_content
+        assert "github://Abernaughty/agent-dev/issues/113" in system_content
+
+    def test_context_block_has_start_and_end_markers(self):
+        """The pre-fetched block uses explicit start/end markers that
+        match the phrasing the system prompt tells the LLM to look for.
+        """
+        from src.agents.planner import _format_github_context_block
+
+        block = _format_github_context_block([
+            {
+                "path": "github://acme/widgets/issues/42",
+                "content": "Body text",
+                "source": "github_issue",
+            }
+        ])
+
+        assert "=== PRE-FETCHED GITHUB CONTEXT ===" in block
+        assert "=== END PRE-FETCHED GITHUB CONTEXT ===" in block
+        assert "github://acme/widgets/issues/42" in block
+        assert "Body text" in block
+
+    def test_context_block_empty_when_no_items_have_content(self):
+        """Empty or malformed context items produce no block at all — we
+        don't want to emit markers with no body and confuse the LLM.
+        """
+        from src.agents.planner import _format_github_context_block
+
+        assert _format_github_context_block([]) == ""
+        assert _format_github_context_block([{"path": "x", "content": ""}]) == ""
+        assert _format_github_context_block(["not-a-dict"]) == ""  # type: ignore[list-item]
+
+    @pytest.mark.asyncio
+    async def test_warns_when_refs_detected_but_no_token(
+        self, monkeypatch, caplog,
+    ):
+        """Missing GITHUB_TOKEN should log a warning when the user's
+        message actually contained refs, so operators can diagnose why
+        pre-fetch silently returned nothing.
+        """
+        import logging as _logging
+
+        from src.agents.planner import create_planner_session, send_planner_message
+
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        monkeypatch.setenv("GITHUB_OWNER", "Abernaughty")
+        monkeypatch.setenv("GITHUB_REPO", "agent-dev")
+
+        session = create_planner_session(workspace="/proj", languages=["Python"])
+
+        async def fake_llm(model_name, messages):
+            return '```json\n{}\n```'
+
+        with caplog.at_level(_logging.WARNING, logger="src.agents.planner"):
+            with patch(
+                "src.agents.planner._call_planner_llm",
+                side_effect=fake_llm,
+            ):
+                await send_planner_message(session, "Fix issue #113")
+
+        assert any(
+            "GITHUB_TOKEN is not set" in record.message
+            for record in caplog.records
+        )
