@@ -115,7 +115,11 @@ export const plannerStore = {
 	 */
 	async startSession(
 		workspace: string,
-		options?: { pin?: string }
+		options?: {
+			pin?: string;
+			workspace_type?: string;
+			github_repo?: string | null;
+		}
 	): Promise<boolean> {
 		const generation = ++requestGeneration;
 		error = null;
@@ -130,8 +134,13 @@ export const plannerStore = {
 		submittedTaskId = null;
 
 		try {
+			// Issue #193: forward workspace_type + github_repo so the
+			// Planner can resolve same-repo refs like "Issue #113" in
+			// user messages using the correct default owner/repo.
 			const payload: Record<string, string> = { workspace };
 			if (options?.pin) payload.pin = options.pin;
+			if (options?.workspace_type) payload.workspace_type = options.workspace_type;
+			if (options?.github_repo) payload.github_repo = options.github_repo;
 
 			const res = await fetch('/api/planner', {
 				method: 'POST',

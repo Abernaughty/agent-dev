@@ -875,3 +875,271 @@ class TestPlannerSystemPromptReconciliation:
             "GITHUB_TOKEN is not set" in record.message
             for record in caplog.records
         )
+
+
+# =========================================================================
+# Session-level github_repo plumbing + git-remote auto-detect (Issue #193)
+# =========================================================================
+
+
+class TestPlannerGithubRepoPlumbing:
+    """Issue #193 AC #3a-#3c: the Planner must resolve same-repo refs
+    like "Issue #113" using either an explicitly-passed github_repo
+    (from the dashboard repo picker) or one auto-detected by parsing
+    the workspace's `.git/config` — not just env vars.
+    """
+
+    def test_explicit_github_repo_stored_on_session(self, tmp_path):
+        """Passing github_repo to create_planner_session sticks it on
+        the session for downstream pre-fetch resolution.
+        """
+        from src.agents.planner import create_planner_session
+
+        session = create_planner_session(
+            workspace=str(tmp_path),
+            github_repo="Abernaughty/agent-dev",
+        )
+        assert session.github_repo == "Abernaughty/agent-dev"
+
+    def test_explicit_repo_wins_over_auto_detect(self, tmp_path):
+        """Explicit github_repo must win over the auto-detect so users
+        can override what git says (fork workflows, monorepos, etc.).
+        """
+        from src.agents.planner import create_planner_session
+
+        git_dir = tmp_path / ".git"
+        git_dir.mkdir()
+        (git_dir / "config").write_text(
+            '[remote "origin"]\n'
+            '\turl = https://github.com/wrong/repo.git\n',
+            encoding="utf-8",
+        )
+        session = create_planner_session(
+            workspace=str(tmp_path),
+            github_repo="right/repo",
+        )
+        assert session.github_repo == "right/repo"
+
+    def test_auto_detect_https_remote(self, tmp_path):
+        """HTTPS `remote.origin.url` with .git suffix parses cleanly."""
+        from src.agents.planner import create_planner_session
+
+        git_dir = tmp_path / ".git"
+        git_dir.mkdir()
+        (git_dir / "config").write_text(
+            '[core]\n'
+            '\trepositoryformatversion = 0\n'
+            '[remote "origin"]\n'
+            '\turl = https://github.com/Abernaughty/agent-dev.git\n'
+            '\tfetch = +refs/heads/*:refs/remotes/origin/*\n',
+            encoding="utf-8",
+        )
+        session = create_planner_session(workspace=str(tmp_path))
+        assert session.github_repo == "Abernaughty/agent-dev"
+
+    def test_auto_detect_ssh_remote(self, tmp_path):
+        """SSH `git@github.com:owner/repo.git` parses cleanly too."""
+        from src.agents.planner import create_planner_session
+
+        git_dir = tmp_path / ".git"
+        git_dir.mkdir()
+        (git_dir / "config").write_text(
+            '[remote "origin"]\n'
+            '\turl = git@github.com:Abernaughty/agent-dev.git\n',
+            encoding="utf-8",
+        )
+        session = create_planner_session(workspace=str(tmp_path))
+        assert session.github_repo == "Abernaughty/agent-dev"
+
+    def test_auto_detect_handles_no_dot_git_suffix(self, tmp_path):
+        """Some clones omit the `.git` suffix in the remote URL."""
+        from src.agents.planner import create_planner_session
+
+        git_dir = tmp_path / ".git"
+        git_dir.mkdir()
+        (git_dir / "config").write_text(
+            '[remote "origin"]\n'
+            '\turl = https://github.com/Abernaughty/agent-dev\n',
+            encoding="utf-8",
+        )
+        session = create_planner_session(workspace=str(tmp_path))
+        assert session.github_repo == "Abernaughty/agent-dev"
+
+    def test_auto_detect_ignores_non_github_remotes(self, tmp_path):
+        """Self-hosted Gitea/GitLab remotes don't trigger false positives."""
+        from src.agents.planner import create_planner_session
+
+        git_dir = tmp_path / ".git"
+        git_dir.mkdir()
+        (git_dir / "config").write_text(
+            '[remote "origin"]\n'
+            '\turl = https://gitlab.example.com/team/proj.git\n',
+            encoding="utf-8",
+        )
+        session = create_planner_session(workspace=str(tmp_path))
+        assert session.github_repo is None
+
+    def test_auto_detect_skips_non_origin_remote(self, tmp_path):
+        """Only the `origin` remote matters; other remotes are ignored."""
+        from src.agents.planner import create_planner_session
+
+        git_dir = tmp_path / ".git"
+        git_dir.mkdir()
+        (git_dir / "config").write_text(
+            '[remote "upstream"]\n'
+            '\turl = https://github.com/Abernaughty/agent-dev.git\n'
+            '[remote "origin"]\n'
+            '\turl = https://github.com/forkuser/agent-dev.git\n',
+            encoding="utf-8",
+        )
+        session = create_planner_session(workspace=str(tmp_path))
+        assert session.github_repo == "forkuser/agent-dev"
+
+    def test_auto_detect_returns_none_when_no_git_dir(self, tmp_path):
+        """Plain directories without a .git folder just yield None."""
+        from src.agents.planner import create_planner_session
+
+        session = create_planner_session(workspace=str(tmp_path))
+        assert session.github_repo is None
+
+    @pytest.mark.asyncio
+    async def test_session_github_repo_used_for_same_repo_refs(
+        self, tmp_path, monkeypatch,
+    ):
+        """The session's github_repo resolves "Issue #113" even when
+        GITHUB_OWNER/GITHUB_REPO env vars are unset.
+        """
+        from src.agents.planner import create_planner_session, send_planner_message
+
+        monkeypatch.setenv("GITHUB_TOKEN", "fake-token")
+        monkeypatch.delenv("GITHUB_OWNER", raising=False)
+        monkeypatch.delenv("GITHUB_REPO", raising=False)
+
+        session = create_planner_session(
+            workspace=str(tmp_path),
+            github_repo="Abernaughty/agent-dev",
+        )
+
+        captured_kwargs: dict = {}
+
+        async def fake_fetch(*args, **kwargs):
+            captured_kwargs.update(kwargs)
+            return [{
+                "path": "github://Abernaughty/agent-dev/issues/113",
+                "content": "Issue #113 body",
+                "truncated": False,
+                "source": "github_issue",
+            }]
+
+        async def fake_llm(model_name, messages):
+            return '```json\n{}\n```'
+
+        with patch(
+            "src.agents.planner.fetch_refs_as_context_items",
+            side_effect=fake_fetch,
+        ), patch(
+            "src.agents.planner._call_planner_llm",
+            side_effect=fake_llm,
+        ):
+            await send_planner_message(
+                session, "Review and implement the fix for Issue #113."
+            )
+
+        assert captured_kwargs.get("default_owner") == "Abernaughty"
+        assert captured_kwargs.get("default_repo") == "agent-dev"
+        assert any(
+            item["path"] == "github://Abernaughty/agent-dev/issues/113"
+            for item in session.task_spec.github_context
+        )
+
+    @pytest.mark.asyncio
+    async def test_env_vars_are_fallback_when_session_repo_missing(
+        self, tmp_path, monkeypatch,
+    ):
+        """Env vars still work as a fallback for CLI / headless use."""
+        from src.agents.planner import create_planner_session, send_planner_message
+
+        monkeypatch.setenv("GITHUB_TOKEN", "fake-token")
+        monkeypatch.setenv("GITHUB_OWNER", "envowner")
+        monkeypatch.setenv("GITHUB_REPO", "envrepo")
+
+        session = create_planner_session(workspace=str(tmp_path))
+        assert session.github_repo is None  # no git dir, no explicit
+
+        captured_kwargs: dict = {}
+
+        async def fake_fetch(*args, **kwargs):
+            captured_kwargs.update(kwargs)
+            return []
+
+        async def fake_llm(model_name, messages):
+            return '```json\n{}\n```'
+
+        with patch(
+            "src.agents.planner.fetch_refs_as_context_items",
+            side_effect=fake_fetch,
+        ), patch(
+            "src.agents.planner._call_planner_llm",
+            side_effect=fake_llm,
+        ):
+            await send_planner_message(session, "Fix issue #7")
+
+        assert captured_kwargs.get("default_owner") == "envowner"
+        assert captured_kwargs.get("default_repo") == "envrepo"
+
+    @pytest.mark.asyncio
+    async def test_warns_when_hash_ref_present_but_no_repo_configured(
+        self, tmp_path, monkeypatch, caplog,
+    ):
+        """The loose `#N` heuristic catches the silent-drop case so
+        operators see a breadcrumb pointing at the missing config.
+        """
+        import logging as _logging
+
+        from src.agents.planner import create_planner_session, send_planner_message
+
+        monkeypatch.setenv("GITHUB_TOKEN", "fake-token")
+        monkeypatch.delenv("GITHUB_OWNER", raising=False)
+        monkeypatch.delenv("GITHUB_REPO", raising=False)
+
+        session = create_planner_session(workspace=str(tmp_path))
+        assert session.github_repo is None
+
+        async def fake_llm(model_name, messages):
+            return '```json\n{}\n```'
+
+        with caplog.at_level(_logging.WARNING, logger="src.agents.planner"):
+            with patch(
+                "src.agents.planner._call_planner_llm",
+                side_effect=fake_llm,
+            ):
+                # "Issue #113" — extract_github_refs returns [] because
+                # no default_owner/repo, but the loose heuristic fires.
+                await send_planner_message(session, "Please look at Issue #113")
+
+        assert any(
+            "no GitHub repo is configured" in record.message
+            for record in caplog.records
+        )
+
+
+# =========================================================================
+# Anti-hallucination system prompt (Issue #193 AC #3d)
+# =========================================================================
+
+
+class TestPlannerAntiHallucination:
+    def test_system_prompt_forbids_inventing_issue_contents(self):
+        """The prompt must explicitly tell the LLM not to invent issue
+        contents when the pre-fetched block is absent — this was the
+        failure mode from the first manual smoke where the LLM made up
+        a fake #113 body.
+        """
+        from src.agents.planner import _PLANNER_SYSTEM_PROMPT
+
+        prompt = _PLANNER_SYSTEM_PROMPT.lower()
+        # Mentions the marker so the LLM can check for it
+        assert "pre-fetched github context" in prompt
+        # Explicitly forbids invention
+        assert "must not invent" in prompt or "must not" in prompt
+        assert "invent" in prompt or "guess" in prompt
