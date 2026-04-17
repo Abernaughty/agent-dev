@@ -63,6 +63,7 @@ from .tools.code_parser import (
     parse_generated_code,
     validate_paths_for_workspace,
 )
+from .tools.github_fetch import fetch_refs_as_context_items
 from .tracing import add_trace_event, create_trace_config
 
 load_dotenv()
@@ -757,21 +758,42 @@ async def gather_context_node(state: GraphState) -> dict:
             seen.add(key)
             ordered_files.append(f)
 
-    if not ordered_files:
-        trace.append("gather_context: no relevant files found")
-        logger.info("[CONTEXT] No files to gather for task")
-        return {"gathered_context": [], "trace": trace}
+    gathered: list[dict] = []
+    if ordered_files:
+        gathered = _read_context_files(
+            ordered_files, workspace_root, allowed_root=repo_root
+        )
 
-    gathered = _read_context_files(
-        ordered_files, workspace_root, allowed_root=repo_root
+    # Source 4: GitHub issue/PR pre-fetch (issue #193).
+    # Scans the task description for refs like "issue #113",
+    # "fixes #42", or "owner/repo#99" and fetches their summaries so
+    # the Architect has the context without needing tools. Best-effort:
+    # missing token, network errors, and 404s are silently skipped.
+    github_items = await fetch_refs_as_context_items(
+        task_description,
+        default_owner=os.getenv("GITHUB_OWNER", ""),
+        default_repo=os.getenv("GITHUB_REPO", ""),
+        token=os.getenv("GITHUB_TOKEN", ""),
+        max_refs=5,
+        max_chars=2000,
     )
+    if github_items:
+        gathered.extend(github_items)
+        trace.append(
+            f"gather_context: pre-fetched {len(github_items)} GitHub ref(s)"
+        )
+
+    if not gathered:
+        trace.append("gather_context: no relevant files found")
+        logger.info("[CONTEXT] No files or GitHub refs to gather for task")
+        return {"gathered_context": [], "trace": trace}
 
     total_tokens = sum(_estimate_tokens(f["content"]) for f in gathered)
     trace.append(
-        f"gather_context: gathered {len(gathered)} files (~{total_tokens} tokens)"
+        f"gather_context: gathered {len(gathered)} items (~{total_tokens} tokens)"
     )
     logger.info(
-        "[CONTEXT] Gathered %d files (~%d tokens) for Architect",
+        "[CONTEXT] Gathered %d items (~%d tokens) for Architect",
         len(gathered), total_tokens,
     )
 

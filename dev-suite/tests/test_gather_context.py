@@ -244,7 +244,7 @@ class TestGatherContextNode:
             "status": WorkflowStatus.PLANNING,
         }
         result = await gather_context_node(state)
-        assert any("gathered 1 files" in t for t in result["trace"])
+        assert any("gathered 1 items" in t for t in result["trace"])
 
     @pytest.mark.asyncio
     async def test_no_workspace_root_uses_default(self, tmp_path, monkeypatch):
@@ -333,6 +333,111 @@ class TestGatherContextCrossDirectory:
         result = await gather_context_node(state)
         paths = [f["path"] for f in result["gathered_context"]]
         assert any("BottomPanel.svelte" in p for p in paths), paths
+
+    # -- GitHub pre-fetch (issue #193) --
+
+    @pytest.mark.asyncio
+    async def test_github_ref_pre_fetch_injects_items(self, tmp_path, monkeypatch):
+        """gather_context_node pre-fetches GitHub issues referenced in task."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        (tmp_path / ".git").mkdir()
+        monkeypatch.setenv("GITHUB_TOKEN", "t")
+        monkeypatch.setenv("GITHUB_OWNER", "Abernaughty")
+        monkeypatch.setenv("GITHUB_REPO", "agent-dev")
+
+        payload = {
+            "number": 113,
+            "title": "Gate test issue",
+            "state": "open",
+            "body": "Run the end-to-end gate test",
+        }
+        response = MagicMock()
+        response.status_code = 200
+        response.json = MagicMock(return_value=payload)
+
+        mock_client = AsyncMock()
+        mock_client.__aenter__.return_value = mock_client
+        mock_client.__aexit__.return_value = None
+        mock_client.get.return_value = response
+
+        state: GraphState = {
+            "task_description": "Please fix issue #113 — it's blocking us",
+            "workspace_root": str(tmp_path),
+            "trace": [],
+            "status": WorkflowStatus.PLANNING,
+        }
+        with patch("src.tools.github_fetch.httpx.AsyncClient", return_value=mock_client):
+            result = await gather_context_node(state)
+
+        gh_items = [
+            c for c in result["gathered_context"]
+            if c.get("source") == "github_issue"
+        ]
+        assert len(gh_items) == 1
+        assert gh_items[0]["path"] == "github://Abernaughty/agent-dev/issues/113"
+        assert "Gate test issue" in gh_items[0]["content"]
+
+    @pytest.mark.asyncio
+    async def test_no_github_refs_no_fetches(self, tmp_path, monkeypatch):
+        """Tasks with no issue/PR refs don't hit the network."""
+        from unittest.mock import AsyncMock, patch
+
+        (tmp_path / ".git").mkdir()
+        monkeypatch.setenv("GITHUB_TOKEN", "t")
+        monkeypatch.setenv("GITHUB_OWNER", "o")
+        monkeypatch.setenv("GITHUB_REPO", "r")
+
+        mock_client = AsyncMock()
+        state: GraphState = {
+            "task_description": "Add a greet function to greet.py",
+            "workspace_root": str(tmp_path),
+            "trace": [],
+            "status": WorkflowStatus.PLANNING,
+        }
+        with patch("src.tools.github_fetch.httpx.AsyncClient", return_value=mock_client):
+            result = await gather_context_node(state)
+
+        # No network calls made
+        mock_client.__aenter__.assert_not_called()
+        gh_items = [
+            c for c in result.get("gathered_context", [])
+            if c.get("source") == "github_issue"
+        ]
+        assert gh_items == []
+
+    @pytest.mark.asyncio
+    async def test_github_fetch_failure_degrades_gracefully(
+        self, tmp_path, monkeypatch,
+    ):
+        """404 / missing token / network error don't break gather_context."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        (tmp_path / ".git").mkdir()
+        monkeypatch.setenv("GITHUB_TOKEN", "t")
+        monkeypatch.setenv("GITHUB_OWNER", "o")
+        monkeypatch.setenv("GITHUB_REPO", "r")
+
+        response = MagicMock()
+        response.status_code = 404
+        response.json = MagicMock(return_value={})
+
+        mock_client = AsyncMock()
+        mock_client.__aenter__.return_value = mock_client
+        mock_client.__aexit__.return_value = None
+        mock_client.get.return_value = response
+
+        state: GraphState = {
+            "task_description": "fixes #999",
+            "workspace_root": str(tmp_path),
+            "trace": [],
+            "status": WorkflowStatus.PLANNING,
+        }
+        with patch("src.tools.github_fetch.httpx.AsyncClient", return_value=mock_client):
+            result = await gather_context_node(state)
+
+        # No exception; empty gathered_context
+        assert result["gathered_context"] == []
 
     @pytest.mark.asyncio
     async def test_rejects_path_outside_repo_root(self, tmp_path):
