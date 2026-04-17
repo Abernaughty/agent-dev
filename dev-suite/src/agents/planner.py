@@ -1003,9 +1003,9 @@ def _get_planner_readonly_tools(workspace: str) -> list:
         # Imported here to avoid a top-level dependency cycle — the tools
         # module pulls in provider + bridge, which aren't needed when
         # Planner is used in isolation (tests, CLI smoke).
+        from ..orchestrator import _get_mcp_config_path
         from ..tools import create_provider, load_mcp_config
         from ..tools.mcp_bridge import READONLY_TOOLS, get_tools
-        from ..orchestrator import _get_mcp_config_path
     except Exception as exc:  # noqa: BLE001
         logger.debug("[PLANNER] Tool imports failed: %s", exc)
         return []
