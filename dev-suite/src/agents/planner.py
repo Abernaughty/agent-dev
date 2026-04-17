@@ -56,11 +56,6 @@ SESSION_TTL_SECONDS = 30 * 60
 # the context injection bounded if the user pastes a long list of refs.
 PLANNER_MAX_GITHUB_REFS = 5
 
-# Issue #193: per-ref body char budget for the Planner's pre-fetch.
-# Tighter than the Architect's gather_context (2000) because the
-# Planner only needs a quick orientation, not full issue bodies.
-PLANNER_GITHUB_REF_MAX_CHARS = 1200
-
 # Issue #193: loose heuristic for "the user mentioned a `#N` ref but we
 # couldn't resolve it." Used only for warning diagnostics when the
 # precise `extract_github_refs` returns nothing because no default
@@ -774,7 +769,6 @@ async def _prefetch_github_refs_for_message(
         default_repo=default_repo,
         token=token,
         max_refs=PLANNER_MAX_GITHUB_REFS,
-        max_chars=PLANNER_GITHUB_REF_MAX_CHARS,
     )
     if detected_refs and not items:
         logger.warning(

@@ -223,7 +223,8 @@ class TestFetchIssueOrPr:
         assert "PR #200" in result["content"]
 
     @pytest.mark.asyncio
-    async def test_body_truncated(self):
+    async def test_body_truncated_when_max_chars_set(self):
+        """Opt-in truncation still works for callers that pass a cap."""
         big_body = "X" * 5000
         payload = {"number": 1, "title": "t", "state": "open", "body": big_body}
         mock_client = AsyncMock()
@@ -239,6 +240,32 @@ class TestFetchIssueOrPr:
         assert "[truncated]" in result["content"]
         # Overall content respects budget (roughly)
         assert len(result["content"]) <= 600
+
+    @pytest.mark.asyncio
+    async def test_body_not_truncated_by_default(self):
+        """Default (max_chars=None) passes the full issue body through.
+
+        Regression for real Issue #113: a 1220-char body was silently
+        chopped mid-AC block ("Minimum h...") under the old 1200-char
+        default, dropping load-bearing context. Any arbitrary cap risks
+        the same problem, so the default is now "no truncation."
+        """
+        big_body = "Z" * 5000
+        payload = {"number": 113, "title": "t", "state": "open", "body": big_body}
+        mock_client = AsyncMock()
+        mock_client.__aenter__.return_value = mock_client
+        mock_client.__aexit__.return_value = None
+        mock_client.get.return_value = _make_response(200, payload)
+
+        with patch("src.tools.github_fetch.httpx.AsyncClient", return_value=mock_client):
+            result = await fetch_issue_or_pr("o", "r", 113, token="t")
+
+        assert result is not None
+        assert result["truncated"] is False
+        assert "[truncated]" not in result["content"]
+        # Full body survived — length strictly exceeds any previous cap.
+        assert len(result["content"]) >= 5000
+        assert result["content"].count("Z") == 5000
 
     @pytest.mark.asyncio
     async def test_non_200_returns_none(self):
