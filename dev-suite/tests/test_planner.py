@@ -1314,3 +1314,102 @@ class TestPlannerReadOnlyTools:
         result = await _invoke_with_optional_tools(llm, [], tools=fake_tools)
         assert result == "fallback response"
         llm.ainvoke.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_invoke_with_optional_tools_wraps_up_on_exhaustion(
+        self, monkeypatch,
+    ):
+        """Max-turns regression: if the loop returns a pure tool_use
+        response with no text, we retry the unbound LLM on the original
+        messages so the user sees prose instead of a raw dict dump.
+        Repro for: `Hit max tool turns (4)` + "Unexpected LLM response
+        content type: list" from the initial PR #200 smoke test.
+        """
+        from src.agents.planner import _invoke_with_optional_tools
+
+        # _run_tool_loop returns a tool_use-only response — what
+        # Anthropic sends mid-call when max turns hits.
+        exhausted_response = AsyncMock()
+        exhausted_response.content = [
+            {
+                "id": "toolu_01GxiJrS8Xj4jN4FeFT3vsJu",
+                "input": {"__arg1": "dashboard/src/lib"},
+                "name": "filesystem_list",
+                "type": "tool_use",
+            },
+        ]
+
+        async def fake_loop(*args, **kwargs):
+            return exhausted_response, 0, []
+
+        monkeypatch.setattr("src.orchestrator._run_tool_loop", fake_loop)
+
+        wrap_up_response = AsyncMock()
+        wrap_up_response.content = (
+            "Here's the task spec based on what I already know..."
+        )
+        llm = AsyncMock()
+        llm.bind_tools = lambda _tools: llm
+        llm.ainvoke = AsyncMock(return_value=wrap_up_response)
+
+        fake_tools = [AsyncMock(name="filesystem_list")]
+        result = await _invoke_with_optional_tools(llm, [], tools=fake_tools)
+        # User sees prose, not "[{'id': 'toolu_...', ...}]"
+        assert result == "Here's the task spec based on what I already know..."
+        assert "toolu_" not in result
+        assert "tool_use" not in result
+        llm.ainvoke.assert_awaited()  # The wrap-up call fired
+
+
+class TestExtractTextFromContent:
+    """Regression coverage for the raw-dict-dump bug: when Anthropic
+    returns a list of content blocks that are all tool_use (no text),
+    we must render empty string, not `str(content)`.
+    """
+
+    def test_string_content_returned_as_is(self):
+        from src.agents.planner import _extract_text_from_content
+
+        assert _extract_text_from_content("hello") == "hello"
+
+    def test_list_with_text_blocks_joins_them(self):
+        from src.agents.planner import _extract_text_from_content
+
+        content = [
+            {"type": "text", "text": "part one"},
+            {"type": "text", "text": "part two"},
+        ]
+        assert _extract_text_from_content(content) == "part one\npart two"
+
+    def test_list_with_only_tool_use_returns_empty(self):
+        """This was the bug the user hit — max-turns exhaustion left
+        Anthropic's response as a pure tool_use block, which used to
+        render as the raw dict string in the chat UI.
+        """
+        from src.agents.planner import _extract_text_from_content
+
+        content = [
+            {
+                "id": "toolu_xyz",
+                "input": {"__arg1": "dashboard/src/lib"},
+                "name": "filesystem_list",
+                "type": "tool_use",
+            },
+        ]
+        assert _extract_text_from_content(content) == ""
+
+    def test_mixed_text_and_tool_use_returns_only_text(self):
+        from src.agents.planner import _extract_text_from_content
+
+        content = [
+            {"type": "text", "text": "Let me check the filesystem."},
+            {"type": "tool_use", "name": "filesystem_list", "input": {}},
+        ]
+        assert _extract_text_from_content(content) == (
+            "Let me check the filesystem."
+        )
+
+    def test_empty_list_returns_empty_string(self):
+        from src.agents.planner import _extract_text_from_content
+
+        assert _extract_text_from_content([]) == ""
