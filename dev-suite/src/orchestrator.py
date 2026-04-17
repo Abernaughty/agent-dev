@@ -363,6 +363,12 @@ async def _execute_tool_call(tool_call, tools):
     tool = tool_map.get(tool_name)
     if not tool:
         return ToolMessage(content=f"Error: Tool '{tool_name}' not found. Available: {list(tool_map.keys())}", tool_call_id=tool_id)
+    # Pre-call log so we can see the call even if it hangs.
+    logger.info(
+        "[TOOLS] exec %s args=%s",
+        tool_name,
+        _sanitize_preview(str(tool_args))[:200],
+    )
     try:
         if hasattr(tool, "ainvoke"):
             result = await tool.ainvoke(tool_args)
@@ -370,37 +376,124 @@ async def _execute_tool_call(tool_call, tools):
             result = tool.invoke(tool_args)
         return ToolMessage(content=str(result), tool_call_id=tool_id)
     except Exception as e:
-        logger.warning("[TOOLS] Tool %s failed: %s", tool_name, e)
+        logger.warning(
+            "[TOOLS] Tool %s failed: %s (args=%s)",
+            tool_name, e,
+            _sanitize_preview(str(tool_args))[:200],
+        )
         return ToolMessage(content=f"Error executing {tool_name}: {type(e).__name__}: {e}", tool_call_id=tool_id)
 
 
-async def _run_tool_loop(llm_with_tools, messages, tools, max_turns=MAX_TOOL_TURNS, tokens_used=0, trace=None, agent_name="agent"):
+async def _run_tool_loop(
+    llm_with_tools,
+    messages,
+    tools,
+    max_turns=MAX_TOOL_TURNS,
+    tokens_used=0,
+    trace=None,
+    agent_name="agent",
+    return_messages=False,
+):
+    """Run an LLM tool-calling loop until the model stops calling tools
+    or ``max_turns`` is reached.
+
+    By default returns a 3-tuple ``(response, tokens_used, tool_calls_log)``
+    for backwards compatibility with the Architect / Developer / QA call
+    sites. When ``return_messages=True``, returns a 4-tuple with the
+    accumulated ``current_messages`` as the trailing element — needed by
+    the Planner's wrap-up path, which threads real tool results into a
+    fallback unbound call when the loop exhausts mid-tool-use.
+    """
+    import time as _time
+
     if trace is None:
         trace = []
     tool_calls_log = []
     current_messages = list(messages)
+    agent_upper = agent_name.upper()
+
+    def _wrap(value):
+        if return_messages:
+            return value[0], value[1], value[2], current_messages
+        return value
+
     if max_turns <= 0:
-        logger.warning("[%s] max_turns=%d, skipping tool loop", agent_name.upper(), max_turns)
+        logger.warning("[%s] max_turns=%d, skipping tool loop", agent_upper, max_turns)
         trace.append(f"{agent_name}: tool loop skipped (max_turns={max_turns})")
         last_msg = current_messages[-1] if current_messages else AIMessage(content="")
-        return last_msg, tokens_used, tool_calls_log
+        return _wrap((last_msg, tokens_used, tool_calls_log))
     for turn in range(max_turns):
         response = await llm_with_tools.ainvoke(current_messages)
         tokens_used += _extract_token_count(response)
         tool_calls = getattr(response, "tool_calls", None) or []
         if not tool_calls:
             trace.append(f"{agent_name}: tool loop done after {turn} tool turn(s)")
-            return response, tokens_used, tool_calls_log
+            logger.info(
+                "[%s] Tool loop done after %d turn(s); total calls=%d",
+                agent_upper, turn, len(tool_calls_log),
+            )
+            return _wrap((response, tokens_used, tool_calls_log))
         trace.append(f"{agent_name}: turn {turn + 1} -- {len(tool_calls)} tool call(s): {', '.join(tc.get('name', '?') for tc in tool_calls)}")
-        logger.info("[%s] Tool turn %d: %d calls", agent_name.upper(), turn + 1, len(tool_calls))
+        logger.info(
+            "[%s] turn %d/%d: %d tool call(s)",
+            agent_upper, turn + 1, max_turns, len(tool_calls),
+        )
         current_messages.append(response)
         for tc in tool_calls:
+            tc_name = tc.get("name", "unknown")
+            tc_args = tc.get("args", {})
+            started = _time.perf_counter()
             tool_msg = await _execute_tool_call(tc, tools)
+            elapsed_ms = int((_time.perf_counter() - started) * 1000)
             current_messages.append(tool_msg)
-            tool_calls_log.append({"agent": agent_name, "turn": turn + 1, "tool": tc.get("name", "unknown"), "args_preview": _sanitize_preview(str(tc.get("args", {}))), "result_preview": _sanitize_preview(str(tool_msg.content)), "success": not tool_msg.content.startswith("Error")})
+            result_str = str(tool_msg.content)
+            success = not result_str.startswith("Error")
+            tool_calls_log.append({
+                "agent": agent_name,
+                "turn": turn + 1,
+                "tool": tc_name,
+                "args_preview": _sanitize_preview(str(tc_args)),
+                "result_preview": _sanitize_preview(result_str),
+                "success": success,
+            })
+            logger.info(
+                "[%s] turn %d/%d: %s(%s) -> %d chars in %dms [%s]",
+                agent_upper, turn + 1, max_turns,
+                tc_name,
+                _sanitize_preview(str(tc_args))[:200],
+                len(result_str), elapsed_ms,
+                "ok" if success else "error",
+            )
+
+    # Exhaustion — compile a compact summary so "why did it exhaust?"
+    # is answerable from the log alone.
+    per_tool_counts: dict[str, int] = {}
+    failure_count = 0
+    for entry in tool_calls_log:
+        per_tool_counts[entry["tool"]] = per_tool_counts.get(entry["tool"], 0) + 1
+        if not entry["success"]:
+            failure_count += 1
+    block_types: list[str] = []
+    content = getattr(response, "content", None)
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict):
+                block_types.append(block.get("type", "?"))
+            else:
+                block_types.append(type(block).__name__)
+    elif isinstance(content, str):
+        block_types = ["str"]
+    counts_preview = ", ".join(f"{k}={v}" for k, v in per_tool_counts.items())
     trace.append(f"{agent_name}: tool loop hit max turns ({max_turns})")
-    logger.warning("[%s] Hit max tool turns (%d)", agent_name.upper(), max_turns)
-    return response, tokens_used, tool_calls_log
+    logger.warning(
+        "[%s] Hit max tool turns (%d). Total calls: %d (%s). Failures: %d. "
+        "Final response block types: %s",
+        agent_upper, max_turns, len(tool_calls_log),
+        counts_preview or "none",
+        failure_count,
+        block_types or "empty",
+    )
+    return _wrap((response, tokens_used, tool_calls_log))
 
 
 def _run_async(coro):

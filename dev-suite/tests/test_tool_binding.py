@@ -450,3 +450,62 @@ class TestMaxToolTurns:
         monkeypatch.setenv("MAX_TOOL_TURNS", "5")
         from src.orchestrator import _safe_int
         assert _safe_int("MAX_TOOL_TURNS", 10) == 5
+
+
+class TestRunToolLoopReturnMessages:
+    """The Planner opts into `return_messages=True` so its wrap-up path
+    can thread real tool results into a fallback unbound call. The
+    existing Architect / Developer / QA call sites must stay on the
+    3-tuple — this is the regression guard.
+    """
+
+    @pytest.mark.asyncio
+    async def test_default_returns_three_tuple(self):
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        from src.orchestrator import _run_tool_loop
+
+        # Model returns a final answer on turn 1 (no tool calls).
+        final = AIMessage(content="done")
+        llm = AsyncMock()
+        llm.ainvoke = AsyncMock(return_value=final)
+
+        result = await _run_tool_loop(
+            llm,
+            [HumanMessage(content="go")],
+            tools=[],
+            max_turns=3,
+            agent_name="test",
+        )
+        assert isinstance(result, tuple)
+        assert len(result) == 3
+        response, tokens, log = result
+        assert response is final
+        assert isinstance(tokens, int)
+        assert isinstance(log, list)
+
+    @pytest.mark.asyncio
+    async def test_return_messages_true_returns_four_tuple(self):
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        from src.orchestrator import _run_tool_loop
+
+        final = AIMessage(content="done")
+        llm = AsyncMock()
+        llm.ainvoke = AsyncMock(return_value=final)
+
+        result = await _run_tool_loop(
+            llm,
+            [HumanMessage(content="go")],
+            tools=[],
+            max_turns=3,
+            agent_name="test",
+            return_messages=True,
+        )
+        assert isinstance(result, tuple)
+        assert len(result) == 4
+        response, tokens, log, messages = result
+        assert response is final
+        # Original messages at minimum — loop appends more as it runs.
+        assert len(messages) >= 1
+        assert isinstance(messages, list)

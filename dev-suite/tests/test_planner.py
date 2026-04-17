@@ -1267,14 +1267,22 @@ class TestPlannerReadOnlyTools:
     async def test_invoke_with_optional_tools_runs_loop_when_tools_present(
         self, monkeypatch,
     ):
-        """When tools are provided, bind_tools + _run_tool_loop runs."""
+        """When tools are provided, bind_tools + _run_tool_loop runs.
+
+        The Planner opts into return_messages=True so the loop returns a
+        4-tuple (response, tokens, log, messages). When the final
+        response already has text, we just return it — no wrap-up.
+        """
         from src.agents.planner import _invoke_with_optional_tools
 
-        # Mock the imported _run_tool_loop so we don't need a real LLM
         async def fake_loop(llm_with_tools, messages, tools, **kwargs):
+            assert kwargs.get("return_messages") is True, (
+                "Planner must opt into return_messages so the wrap-up "
+                "can thread real tool results on exhaustion."
+            )
             mock_resp = AsyncMock()
             mock_resp.content = "loop response"
-            return mock_resp, 0, []
+            return mock_resp, 0, [], list(messages)
 
         monkeypatch.setattr(
             "src.orchestrator._run_tool_loop", fake_loop,
@@ -1316,49 +1324,175 @@ class TestPlannerReadOnlyTools:
         llm.ainvoke.assert_awaited()
 
     @pytest.mark.asyncio
-    async def test_invoke_with_optional_tools_wraps_up_on_exhaustion(
+    async def test_wrap_up_threads_real_loop_messages_not_originals(
         self, monkeypatch,
     ):
-        """Max-turns regression: if the loop returns a pure tool_use
-        response with no text, we retry the unbound LLM on the original
-        messages so the user sees prose instead of a raw dict dump.
-        Repro for: `Hit max tool turns (4)` + "Unexpected LLM response
-        content type: list" from the initial PR #200 smoke test.
+        """Hallucination regression from the PR #201 smoke: wrap-up used
+        to call the unbound LLM with only the ORIGINAL system+user
+        messages, so the LLM had zero real filesystem info and
+        fabricated paths (`BottomPanel.jsx`) + `<tool_call>` XML.
+
+        Fix: pass the loop's accumulated messages (real tool results +
+        assistant responses) to the wrap-up so the LLM has grounded
+        context.
         """
+        from langchain_core.messages import (
+            AIMessage,
+            HumanMessage,
+            SystemMessage,
+            ToolMessage,
+        )
+
         from src.agents.planner import _invoke_with_optional_tools
 
-        # _run_tool_loop returns a tool_use-only response — what
-        # Anthropic sends mid-call when max turns hits.
-        exhausted_response = AsyncMock()
-        exhausted_response.content = [
+        original_messages = [
+            SystemMessage(content="You are the Planner..."),
+            HumanMessage(content="Fix issue #113"),
+        ]
+
+        # Simulate what _run_tool_loop accumulated: original + 1 tool
+        # call round-trip + final unresolved tool_use.
+        fake_tool_call_msg = AIMessage(
+            content="",
+            tool_calls=[{
+                "id": "call_1",
+                "name": "filesystem_list",
+                "args": {"path": "dashboard/src/lib"},
+            }],
+        )
+        fake_tool_result_msg = ToolMessage(
+            content="components/\nrouter/\nstores/",
+            tool_call_id="call_1",
+        )
+        # The real loop returns a LangChain AIMessage — using a raw
+        # AsyncMock here would sneak past the isinstance check in
+        # `_is_unresolved_tail` and never get dropped, masking the bug.
+        exhausted_response = AIMessage(content=[
             {
-                "id": "toolu_01GxiJrS8Xj4jN4FeFT3vsJu",
-                "input": {"__arg1": "dashboard/src/lib"},
+                "id": "toolu_xyz",
+                "input": {"__arg1": "dashboard/src/lib/components"},
                 "name": "filesystem_list",
                 "type": "tool_use",
             },
+        ])
+        loop_final_messages = [
+            *original_messages,
+            fake_tool_call_msg,
+            fake_tool_result_msg,
+            exhausted_response,  # unresolved tail — must be dropped
         ]
 
-        async def fake_loop(*args, **kwargs):
-            return exhausted_response, 0, []
+        async def fake_loop(llm_with_tools, messages, tools, **kwargs):
+            return exhausted_response, 0, [], loop_final_messages
 
         monkeypatch.setattr("src.orchestrator._run_tool_loop", fake_loop)
 
         wrap_up_response = AsyncMock()
         wrap_up_response.content = (
-            "Here's the task spec based on what I already know..."
+            "Here's the spec — found components/ under dashboard/src/lib"
         )
+        captured_wrap_up_messages: list = []
+
+        async def capturing_ainvoke(messages):
+            captured_wrap_up_messages.extend(messages)
+            return wrap_up_response
+
         llm = AsyncMock()
         llm.bind_tools = lambda _tools: llm
-        llm.ainvoke = AsyncMock(return_value=wrap_up_response)
+        llm.ainvoke = capturing_ainvoke
 
         fake_tools = [AsyncMock(name="filesystem_list")]
-        result = await _invoke_with_optional_tools(llm, [], tools=fake_tools)
-        # User sees prose, not "[{'id': 'toolu_...', ...}]"
-        assert result == "Here's the task spec based on what I already know..."
-        assert "toolu_" not in result
-        assert "tool_use" not in result
-        llm.ainvoke.assert_awaited()  # The wrap-up call fired
+        result = await _invoke_with_optional_tools(
+            llm, original_messages, tools=fake_tools,
+        )
+        assert "components/" in result
+
+        # Real tool result must have reached the wrap-up call.
+        content_strs = [
+            str(getattr(m, "content", "")) for m in captured_wrap_up_messages
+        ]
+        assert any("components/\nrouter/" in c for c in content_strs), (
+            "Wrap-up LLM must see the real tool results, not just the "
+            "original messages — otherwise it fabricates."
+        )
+
+        # Unresolved tool_use tail must NOT be in the wrap-up messages
+        # (Anthropic would reject unpaired tool_use without tool_result).
+        assert exhausted_response not in captured_wrap_up_messages
+
+        # Explicit no-tools instruction must be appended as the final
+        # user message so the conversation ends on a user turn AND the
+        # LLM won't fabricate fake tool calls.
+        last_msg = captured_wrap_up_messages[-1]
+        assert isinstance(last_msg, HumanMessage)
+        nudge_text = str(last_msg.content).lower()
+        assert "do not call" in nudge_text or "not call" in nudge_text
+        assert "tool_call" in nudge_text  # forbids the XML tag the user saw
+        assert "invent" in nudge_text or "fabricate" in nudge_text or \
+               "do not invent" in nudge_text
+
+
+class TestIsUnresolvedTail:
+    """Unit coverage for the helper that detects a trailing assistant
+    message whose tool_use blocks weren't paired with tool_result
+    messages — needed before a wrap-up call so the sequence is valid
+    for Anthropic's paired-block requirement.
+    """
+
+    def test_empty_sequence(self):
+        from src.agents.planner import _is_unresolved_tail
+
+        assert _is_unresolved_tail([]) is False
+
+    def test_plain_assistant_text_is_resolved(self):
+        from langchain_core.messages import AIMessage
+
+        from src.agents.planner import _is_unresolved_tail
+
+        assert _is_unresolved_tail([AIMessage(content="hello")]) is False
+
+    def test_assistant_with_tool_calls_is_unresolved(self):
+        from langchain_core.messages import AIMessage
+
+        from src.agents.planner import _is_unresolved_tail
+
+        msg = AIMessage(
+            content="",
+            tool_calls=[{"id": "x", "name": "fs_list", "args": {}}],
+        )
+        assert _is_unresolved_tail([msg]) is True
+
+    def test_anthropic_tool_use_block_is_unresolved(self):
+        from langchain_core.messages import AIMessage
+
+        from src.agents.planner import _is_unresolved_tail
+
+        msg = AIMessage(content=[
+            {"id": "x", "type": "tool_use", "name": "fs", "input": {}},
+        ])
+        assert _is_unresolved_tail([msg]) is True
+
+    def test_mixed_text_and_tool_use_is_unresolved(self):
+        """If the assistant emitted text + tool_use, the tool_use still
+        needs a paired tool_result; the whole message is unresolved.
+        """
+        from langchain_core.messages import AIMessage
+
+        from src.agents.planner import _is_unresolved_tail
+
+        msg = AIMessage(content=[
+            {"type": "text", "text": "Let me check..."},
+            {"id": "x", "type": "tool_use", "name": "fs", "input": {}},
+        ])
+        assert _is_unresolved_tail([msg]) is True
+
+    def test_trailing_tool_message_is_unresolved(self):
+        from langchain_core.messages import ToolMessage
+
+        from src.agents.planner import _is_unresolved_tail
+
+        msg = ToolMessage(content="result", tool_call_id="x")
+        assert _is_unresolved_tail([msg]) is True
 
 
 class TestExtractTextFromContent:

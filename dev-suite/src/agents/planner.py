@@ -56,13 +56,17 @@ SESSION_TTL_SECONDS = 30 * 60
 # the context injection bounded if the user pastes a long list of refs.
 PLANNER_MAX_GITHUB_REFS = 5
 
-# Planner read-only tool loop turn cap. Matches the Architect's Phase 2
-# budget — enough turns for a few ls/read calls to orient the spec,
-# bounded so a misbehaving LLM can't drain tokens chasing the codebase.
+# Planner read-only tool loop turn cap. Intentionally generous — the
+# cap exists as a safety net against runaway loops, not as a cost shape.
+# Real tasks have been observed taking 6+ calls for well-documented
+# issues and 10-20+ for complex ones. 50 is high enough that realistic
+# work will never hit it and low enough that a pathological infinite
+# loop still terminates in bounded wall time. Tune via the env var if
+# the default proves too low or too high — we'll adjust as we get data.
 try:
-    MAX_PLANNER_TOOL_TURNS = int(os.getenv("MAX_PLANNER_TOOL_TURNS", "6"))
+    MAX_PLANNER_TOOL_TURNS = int(os.getenv("MAX_PLANNER_TOOL_TURNS", "50"))
 except ValueError:
-    MAX_PLANNER_TOOL_TURNS = 6
+    MAX_PLANNER_TOOL_TURNS = 50
 
 # Issue #193: loose heuristic for "the user mentioned a `#N` ref but we
 # couldn't resolve it." Used only for warning diagnostics when the
@@ -939,8 +943,22 @@ async def send_planner_message(
     # gracefully degrade to the no-tool path for CLI/test scenarios.
     tools = _get_planner_readonly_tools(session.task_spec.workspace)
 
-    # Call the Planner LLM
+    # Turn-start diagnostic log. Gives us a single line to correlate
+    # subsequent tool-loop output against — session id, model, workspace,
+    # how many read-only tools loaded, and the user message preview.
     model_name = _get_planner_model_name()
+    logger.info(
+        "[PLANNER] turn start: session=%s model=%s workspace=%s "
+        "tools_loaded=%d github_context=%d user_msg=%s",
+        session.session_id,
+        model_name,
+        session.task_spec.workspace or "<unset>",
+        len(tools),
+        len(session.task_spec.github_context),
+        (user_message[:120] + "...") if len(user_message) > 120 else user_message,
+    )
+
+    # Call the Planner LLM
     response_text = await _call_planner_llm(model_name, llm_messages, tools=tools)
 
     # Extract and apply TaskSpec updates
@@ -998,6 +1016,9 @@ def _get_planner_readonly_tools(workspace: str) -> list:
     GitHub pre-fetch alone, just without filesystem visibility.
     """
     if not workspace:
+        logger.info(
+            "[PLANNER] No workspace set; skipping tool provider init"
+        )
         return []
     try:
         # Imported here to avoid a top-level dependency cycle — the tools
@@ -1007,18 +1028,22 @@ def _get_planner_readonly_tools(workspace: str) -> list:
         from ..tools import create_provider, load_mcp_config
         from ..tools.mcp_bridge import READONLY_TOOLS, get_tools
     except Exception as exc:  # noqa: BLE001
-        logger.debug("[PLANNER] Tool imports failed: %s", exc)
+        logger.info("[PLANNER] Tool imports failed: %s", exc)
         return []
 
     try:
         config_path = _get_mcp_config_path()
         if not config_path.is_file():
+            logger.info(
+                "[PLANNER] No mcp-config.json at %s; tools disabled",
+                config_path,
+            )
             return []
         mcp_config = load_mcp_config(str(config_path))
         provider = create_provider(mcp_config, workspace)
         tools = get_tools(provider, tool_filter=READONLY_TOOLS)
     except Exception as exc:  # noqa: BLE001
-        logger.debug(
+        logger.info(
             "[PLANNER] Tool provider init failed for workspace %s: %s",
             workspace, exc,
         )
@@ -1073,7 +1098,7 @@ async def _invoke_with_optional_tools(
 
     try:
         llm_with_tools = llm.bind_tools(tools)
-        response, _tokens, _log = await _run_tool_loop(
+        response, _tokens, _log, loop_messages = await _run_tool_loop(
             llm_with_tools,
             lc_messages,
             tools,
@@ -1081,24 +1106,61 @@ async def _invoke_with_optional_tools(
             tokens_used=0,
             trace=[],
             agent_name="planner",
+            return_messages=True,
         )
         text = _extract_text_from_content(response.content)
         if text.strip():
             return text
 
-        # Loop exhausted mid-tool-call — response is a pure tool_use
-        # block with no user-facing text. We can't simply replay the
-        # loop's `current_messages` because the final tool_use has no
-        # paired tool_result (Anthropic rejects unpaired sequences),
-        # so fall back to a no-tools call on the ORIGINAL messages.
-        # The LLM loses its mid-loop learnings but produces a valid
-        # conversational response instead of a raw tool_use dump.
-        logger.warning(
-            "[PLANNER] Tool loop exhausted without final text; "
-            "retrying unbound on original messages"
+        # Loop exhausted mid-tool-call — the returned response is a pure
+        # tool_use block with no user-facing text. Build a wrap-up call
+        # that preserves the REAL tool results the loop gathered so the
+        # LLM doesn't have to fabricate. We must drop the unresolved
+        # final assistant message (its tool_use blocks have no paired
+        # tool_result; Anthropic would reject the sequence). Then
+        # append an explicit "no more tools" instruction and a final
+        # user prompt so the conversation ends on a user turn.
+        wrap_up_messages = list(loop_messages)
+        # Drop only the single trailing assistant message if it has
+        # unresolved tool_use blocks. Earlier paired tool_call /
+        # tool_result messages are valid context — we want to keep
+        # them so the wrap-up LLM has real data to summarise. Looping
+        # would erase those pairs too.
+        if _is_unresolved_tail(wrap_up_messages):
+            wrap_up_messages.pop()
+
+        from langchain_core.messages import HumanMessage
+        nudge = (
+            "You've used your tool budget for this turn. Do NOT call or "
+            "simulate any tools. Do NOT write `<tool_call>` tags, JSON "
+            "tool-call syntax, or any tool-invocation-shaped text. "
+            "Using ONLY what you've already learned from the tool "
+            "results above in this conversation, produce the final "
+            "conversational task-spec response per the system prompt, "
+            "including the hidden JSON extraction block at the end. "
+            "If the tool results were insufficient to answer, say so "
+            "plainly and ask the user for the missing information — "
+            "do not invent file paths, frameworks, or content."
         )
-        fallback_response = await llm.ainvoke(lc_messages)
-        return _extract_text_from_content(fallback_response.content)
+        wrap_up_messages.append(HumanMessage(content=nudge))
+
+        logger.info(
+            "[PLANNER] Wrap-up triggered: loop_messages=%d -> wrap_up=%d "
+            "(dropped %d unresolved tail message(s))",
+            len(loop_messages),
+            len(wrap_up_messages),
+            len(loop_messages) - (len(wrap_up_messages) - 1),
+        )
+
+        final_response = await llm.ainvoke(wrap_up_messages)
+        final_text = _extract_text_from_content(final_response.content)
+        if not final_text.strip():
+            logger.warning(
+                "[PLANNER] Wrap-up call also returned empty/non-text "
+                "(content type=%s); falling through to empty reply",
+                type(final_response.content).__name__,
+            )
+        return final_text
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "[PLANNER] Tool loop failed (%s); falling back to no-tool call",
@@ -1106,6 +1168,33 @@ async def _invoke_with_optional_tools(
         )
         response = await llm.ainvoke(lc_messages)
         return _extract_text_from_content(response.content)
+
+
+def _is_unresolved_tail(messages: list) -> bool:
+    """True if the last message in a sequence is a tool_use-bearing
+    assistant message with no paired tool_result following it, OR a
+    standalone tool_result with no assistant message preceding it.
+    Used to trim the sequence before a wrap-up call so the message
+    history is valid for Anthropic's paired-block requirement.
+    """
+    if not messages:
+        return False
+    from langchain_core.messages import AIMessage, ToolMessage
+    last = messages[-1]
+    if isinstance(last, ToolMessage):
+        # Rare: ends on a tool result with nothing consuming it.
+        # Safe to drop.
+        return True
+    if isinstance(last, AIMessage):
+        content = getattr(last, "content", None)
+        tool_calls = getattr(last, "tool_calls", None) or []
+        if tool_calls:
+            return True
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    return True
+    return False
 
 
 def _extract_text_from_content(content: Any) -> str:
