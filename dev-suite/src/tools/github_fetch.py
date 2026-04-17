@@ -170,8 +170,16 @@ def extract_github_refs(
     return refs
 
 
-def _summarize_issue_payload(data: dict, max_chars: int) -> tuple[str, bool]:
+def _summarize_issue_payload(
+    data: dict, max_chars: int | None,
+) -> tuple[str, bool]:
     """Build a compact text summary from the GitHub issue/PR JSON.
+
+    When ``max_chars`` is ``None``, the body is passed through intact —
+    arbitrary truncation risks cutting acceptance criteria or other
+    load-bearing context, so ``None`` is the default for the Planner and
+    orchestrator pre-fetch paths. Callers that need a hard cap (tests,
+    experimental budgets) can still pass an explicit int.
 
     Returns (summary_text, truncated_flag).
     """
@@ -197,12 +205,13 @@ def _summarize_issue_payload(data: dict, max_chars: int) -> tuple[str, bool]:
     if not body:
         return header, False
 
-    # Leave room for header + a blank line
-    body_budget = max(0, max_chars - len(header) - 2)
     truncated = False
-    if len(body) > body_budget:
-        body = body[:body_budget].rstrip() + "\n... [truncated]"
-        truncated = True
+    if max_chars is not None:
+        # Leave room for header + a blank line
+        body_budget = max(0, max_chars - len(header) - 2)
+        if len(body) > body_budget:
+            body = body[:body_budget].rstrip() + "\n... [truncated]"
+            truncated = True
 
     return f"{header}\n\n{body}", truncated
 
@@ -212,7 +221,7 @@ async def fetch_issue_or_pr(
     repo: str,
     number: int,
     token: str,
-    max_chars: int = 2000,
+    max_chars: int | None = None,
     timeout: float = 10.0,
 ) -> dict | None:
     """Fetch a single GitHub issue or PR as a gathered_context-shaped dict.
@@ -278,7 +287,7 @@ async def fetch_refs_as_context_items(
     default_repo: str,
     token: str,
     max_refs: int = 5,
-    max_chars: int = 2000,
+    max_chars: int | None = None,
 ) -> list[dict]:
     """Extract and fetch issue/PR refs from text as context entries.
 

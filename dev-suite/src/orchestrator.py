@@ -814,7 +814,7 @@ async def gather_context_node(state: GraphState) -> dict:
                 continue
             item = await fetch_issue_or_pr(
                 ref.owner, ref.repo, ref.number,
-                token=github_token, max_chars=2000,
+                token=github_token,
             )
             if item is not None:
                 new_github_items.append(item)
