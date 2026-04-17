@@ -209,9 +209,23 @@
 		if (!workspaceReady) return;
 
 		if (plannerStore.phase === 'idle' || plannerStore.phase === 'submitted') {
-			const options = workspacesStore.isSelectedProtected && workspacesStore.verifiedPin
-				? { pin: workspacesStore.verifiedPin }
-				: undefined;
+			// Issue #193: forward workspace_type + github_repo on start
+			// (not just on submit) so the Planner's pre-fetch can
+			// resolve same-repo issue/PR refs during the conversation.
+			const options: {
+				pin?: string;
+				workspace_type?: string;
+				github_repo?: string | null;
+			} = {
+				workspace_type: workspacesStore.workspaceType,
+				github_repo:
+					workspacesStore.workspaceType === 'github'
+						? workspacesStore.githubRepo
+						: null,
+			};
+			if (workspacesStore.isSelectedProtected && workspacesStore.verifiedPin) {
+				options.pin = workspacesStore.verifiedPin;
+			}
 
 			if (plannerStore.phase === 'submitted') {
 				plannerStore.reset();

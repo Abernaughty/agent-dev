@@ -438,6 +438,23 @@ class PlannerStartRequest(BaseModel):
         default=None,
         description="Admin PIN for protected workspaces.",
     )
+    # Issue #193: let the dashboard tell the Planner which GitHub repo
+    # to use when resolving same-repo refs like "Issue #113" in user
+    # messages. If omitted, the server auto-detects from the workspace's
+    # `.git/config` (LOCAL) or falls back to env vars.
+    workspace_type: str = Field(
+        default="local",
+        description="Workspace kind: 'local' or 'github'.",
+    )
+    github_repo: str | None = Field(
+        default=None,
+        description=(
+            "GitHub repository in 'owner/repo' format. Optional — used "
+            "as the default owner/repo when pre-fetching issue/PR refs "
+            "mentioned in user messages. Sent by REMOTE mode, "
+            "auto-detected from `.git/config` in LOCAL mode."
+        ),
+    )
 
 
 class PlannerMessageRequest(BaseModel):

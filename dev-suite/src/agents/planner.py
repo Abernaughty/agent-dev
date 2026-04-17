@@ -61,6 +61,12 @@ PLANNER_MAX_GITHUB_REFS = 5
 # Planner only needs a quick orientation, not full issue bodies.
 PLANNER_GITHUB_REF_MAX_CHARS = 1200
 
+# Issue #193: loose heuristic for "the user mentioned a `#N` ref but we
+# couldn't resolve it." Used only for warning diagnostics when the
+# precise `extract_github_refs` returns nothing because no default
+# owner/repo is configured. Intentionally wider than the real pattern.
+_LOOSE_HASH_REF_RE = re.compile(r"(?<![\w&])#\d+\b")
+
 
 # ---------------------------------------------------------------------------
 # Models
@@ -196,6 +202,12 @@ class PlannerSession(BaseModel):
     created_at: float = Field(default_factory=time.time)
     last_activity: float = Field(default_factory=time.time)
     submitted: bool = False
+    # Issue #193: default GitHub repo for resolving same-repo refs like
+    # "Issue #113" in user messages. Populated from the dashboard repo
+    # picker (REMOTE mode) or auto-detected from `.git/config` for LOCAL
+    # workspaces. Falls back to GITHUB_OWNER/GITHUB_REPO env vars when
+    # both the session value and auto-detect come up empty.
+    github_repo: str | None = None
 
     @property
     def is_expired(self) -> bool:
@@ -438,15 +450,67 @@ def build_checklist(task_spec: TaskSpec) -> ChecklistStatus:
 # ---------------------------------------------------------------------------
 
 
+_GIT_REMOTE_GITHUB_RE = re.compile(
+    r"""
+    (?:git@github\.com:|https?://(?:[^@/]+@)?github\.com/)  # ssh or https prefix
+    (?P<owner>[\w.-]+)/(?P<repo>[\w.-]+?)                  # owner/repo
+    (?:\.git)?/?\s*$                                       # optional .git + trailing slash
+    """,
+    re.VERBOSE | re.IGNORECASE,
+)
+
+
+def _detect_github_repo_from_workspace(workspace: str) -> str | None:
+    """Best-effort parse of `.git/config` for the origin GitHub repo.
+
+    Returns "owner/repo" or None. Handles both SSH (`git@github.com:o/r.git`)
+    and HTTPS (`https://github.com/o/r(.git)`) remote formats. Never raises.
+    """
+    if not workspace:
+        return None
+    try:
+        config_path = Path(workspace) / ".git" / "config"
+        if not config_path.is_file():
+            return None
+        text = config_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+    in_origin = False
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith("[") and line.endswith("]"):
+            in_origin = line.lower() == '[remote "origin"]'
+            continue
+        if not in_origin:
+            continue
+        if line.lower().startswith("url"):
+            _, _, value = line.partition("=")
+            match = _GIT_REMOTE_GITHUB_RE.search(value.strip())
+            if match:
+                owner = match.group("owner")
+                repo = match.group("repo")
+                if repo.endswith(".git"):
+                    repo = repo[:-4]
+                return f"{owner}/{repo}"
+    return None
+
+
 def create_planner_session(
     workspace: str,
     languages: list[str] | None = None,
     frameworks: list[str] | None = None,
+    github_repo: str | None = None,
 ) -> PlannerSession:
     """Create a new planner session with optional pre-populated fields.
 
     The workspace is always set. Languages and frameworks can be
     pre-populated from auto-inference (infer_workspace_stack).
+
+    If ``github_repo`` is not provided, attempts to auto-detect it by
+    parsing ``remote.origin.url`` from the workspace's ``.git/config``.
+    The resolved repo is used as the default owner/repo when the Planner
+    pre-fetches issue/PR refs like "Issue #113" from user messages.
     """
     task_spec = TaskSpec(
         workspace=workspace,
@@ -455,9 +519,12 @@ def create_planner_session(
     )
     checklist = build_checklist(task_spec)
 
+    resolved_repo = github_repo or _detect_github_repo_from_workspace(workspace)
+
     session = PlannerSession(
         task_spec=task_spec,
         checklist=checklist,
+        github_repo=resolved_repo,
     )
 
     # System message with pre-populated context — formatted with clear
@@ -507,8 +574,18 @@ deterministically pre-fetches the issue/PR body and injects it as a \
 message labelled "=== PRE-FETCHED GITHUB CONTEXT ===" below. Treat that \
 block as authoritative source material — never tell the user you cannot \
 access GitHub when that block is present; summarise its contents and move \
-the task forward. You also work with information the user provides and \
-any auto-detected project context.
+the task forward.
+
+CRITICAL anti-hallucination rule: if NO "=== PRE-FETCHED GITHUB CONTEXT ===" \
+block is present below, the pre-fetch did not run (missing token, wrong \
+repo configured, or network error). In that case you MUST NOT invent, \
+guess, or describe the issue/PR contents — doing so produces confidently \
+wrong task specs. Instead, briefly tell the user the context wasn't \
+injected and ask them to paste the issue title and body, or confirm the \
+repo configuration.
+
+You also work with information the user provides and any auto-detected \
+project context.
 
 Your responsibilities:
 1. Understand the user's objective
@@ -641,8 +718,18 @@ async def _prefetch_github_refs_for_message(
     messages that mention the same issue don't re-fetch). Best-effort:
     missing GITHUB_TOKEN or network errors quietly return no new items.
     """
-    default_owner = os.getenv("GITHUB_OWNER", "")
-    default_repo = os.getenv("GITHUB_REPO", "")
+    # Resolve default owner/repo for same-repo refs ("Issue #113" without
+    # an owner/repo prefix). Session-level value wins — that's what the
+    # dashboard repo picker or the git-remote auto-detect stored.
+    # Env vars are a fallback for CLI/testing scenarios.
+    default_owner = ""
+    default_repo = ""
+    source_repo = session.github_repo or ""
+    if source_repo and "/" in source_repo:
+        default_owner, _, default_repo = source_repo.partition("/")
+    if not default_owner or not default_repo:
+        default_owner = os.getenv("GITHUB_OWNER", "") or default_owner
+        default_repo = os.getenv("GITHUB_REPO", "") or default_repo
 
     detected_refs = extract_github_refs(
         user_message,
@@ -650,6 +737,21 @@ async def _prefetch_github_refs_for_message(
         default_repo=default_repo,
         max_refs=PLANNER_MAX_GITHUB_REFS,
     )
+
+    # Loose heuristic: catch the case where the user clearly referenced
+    # something like "Issue #113" but we had no default repo configured
+    # to resolve it. `extract_github_refs` drops same-repo refs silently
+    # when default_owner/repo are empty, so we'd otherwise have no
+    # breadcrumb in the logs pointing at the missing config.
+    if not detected_refs and (not default_owner or not default_repo):
+        if _LOOSE_HASH_REF_RE.search(user_message):
+            logger.warning(
+                "[PLANNER] Session %s message contains '#N' refs but no "
+                "GitHub repo is configured — pre-fetch skipped. Set the "
+                "dashboard repo picker, ensure the workspace has a GitHub "
+                "`remote.origin.url`, or set GITHUB_OWNER/GITHUB_REPO.",
+                session.session_id,
+            )
 
     token = os.getenv("GITHUB_TOKEN", "")
     if not token:

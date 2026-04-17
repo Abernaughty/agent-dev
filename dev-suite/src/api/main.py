@@ -363,11 +363,14 @@ async def start_planner_session(
         logger.warning("Auto-inference failed for %s: %s", body.workspace, e)
         stack = {"languages": [], "frameworks": []}
 
-    # Create session
+    # Create session (Issue #193: pass github_repo through so the
+    # Planner's deterministic pre-fetch can resolve same-repo refs
+    # like "Issue #113" in user messages).
     session = create_planner_session(
         workspace=body.workspace,
         languages=stack["languages"],
         frameworks=stack["frameworks"],
+        github_repo=body.github_repo,
     )
     planner_sessions.create(session)
 
@@ -376,11 +379,13 @@ async def start_planner_session(
     resp.message = session.messages[0].content if session.messages else ""
 
     logger.info(
-        "Planner session started: %s (workspace=%s, languages=%s, frameworks=%s)",
+        "Planner session started: %s (workspace=%s, languages=%s, "
+        "frameworks=%s, github_repo=%s)",
         session.session_id,
         body.workspace,
         stack["languages"],
         stack["frameworks"],
+        session.github_repo,
     )
 
     return _ok(resp)
