@@ -511,6 +511,10 @@ async def submit_planner_session(
         github_repo=body.github_repo if body else None,
         github_branch=body.github_branch if body else None,
         github_feature_branch=body.github_feature_branch if body else None,
+        # Issue #193: Planner pre-fetched GitHub summaries flow into
+        # the orchestrator so `gather_context_node` can reuse them
+        # instead of refetching.
+        prefetched_gathered_context=list(session.task_spec.github_context),
     )
 
     # Mark session as submitted

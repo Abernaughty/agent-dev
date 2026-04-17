@@ -116,6 +116,7 @@ class TaskRunner:
         github_repo: str | None = None,
         github_branch: str | None = None,
         github_feature_branch: str | None = None,
+        prefetched_gathered_context: list[dict] | None = None,
     ) -> None:
         """Submit a task for background execution."""
         if task_id in self._tasks:
@@ -130,6 +131,7 @@ class TaskRunner:
             github_repo=github_repo,
             github_branch=github_branch,
             github_feature_branch=github_feature_branch,
+            prefetched_gathered_context=prefetched_gathered_context,
         )
         async_task = asyncio.create_task(coro, name=f"orchestrator-{task_id}")
         self._tasks[task_id] = async_task
@@ -170,6 +172,7 @@ class TaskRunner:
         github_repo: str | None = None,
         github_branch: str | None = None,
         github_feature_branch: str | None = None,
+        prefetched_gathered_context: list[dict] | None = None,
     ) -> None:
         """Run the orchestrator via astream() and emit SSE events."""
         from .state import state_manager
@@ -272,6 +275,7 @@ class TaskRunner:
                 "github_repo": github_repo,
                 "github_branch": github_branch,
                 "github_feature_branch": github_feature_branch,
+                "prefetched_gathered_context": prefetched_gathered_context or [],
             }
 
             stream_config = {

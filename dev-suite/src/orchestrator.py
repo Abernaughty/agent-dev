@@ -63,7 +63,7 @@ from .tools.code_parser import (
     parse_generated_code,
     validate_paths_for_workspace,
 )
-from .tools.github_fetch import fetch_refs_as_context_items
+from .tools.github_fetch import extract_github_refs, fetch_issue_or_pr
 from .tracing import add_trace_event, create_trace_config
 
 load_dotenv()
@@ -130,6 +130,7 @@ class GraphState(TypedDict, total=False):
     pr_url: str | None
     pr_number: int | None
     gathered_context: list[dict] | None
+    prefetched_gathered_context: list[dict] | None
     decomposition: TaskDecomposition | None
     current_subtask_index: int
     completed_subtasks: list[dict]
@@ -160,6 +161,7 @@ class AgentState(BaseModel):
     pr_url: str | None = None
     pr_number: int | None = None
     gathered_context: list[dict] | None = None
+    prefetched_gathered_context: list[dict] | None = None
     decomposition: TaskDecomposition | None = None
     current_subtask_index: int = 0
     completed_subtasks: list[dict] = []
@@ -764,23 +766,56 @@ async def gather_context_node(state: GraphState) -> dict:
             ordered_files, workspace_root, allowed_root=repo_root
         )
 
-    # Source 4: GitHub issue/PR pre-fetch (issue #193).
+    # Source 4a: Planner-supplied pre-fetched context (issue #193 PR 2).
+    # The Planner's conversational pre-graph phase may have already
+    # fetched GitHub issue/PR summaries for refs the user mentioned.
+    # We fold those in here so the Architect sees them and we avoid
+    # a redundant second fetch in Source 4b.
+    prefetched_paths: set[str] = set()
+    prefetched_items = state.get("prefetched_gathered_context") or []
+    for item in prefetched_items:
+        if not isinstance(item, dict):
+            continue
+        path = item.get("path")
+        if not path or path in prefetched_paths:
+            continue
+        prefetched_paths.add(path)
+        gathered.append(item)
+    if prefetched_items:
+        trace.append(
+            f"gather_context: reused {len(prefetched_paths)} pre-fetched item(s)"
+        )
+
+    # Source 4b: GitHub issue/PR pre-fetch (issue #193).
     # Scans the task description for refs like "issue #113",
     # "fixes #42", or "owner/repo#99" and fetches their summaries so
     # the Architect has the context without needing tools. Best-effort:
     # missing token, network errors, and 404s are silently skipped.
-    github_items = await fetch_refs_as_context_items(
-        task_description,
-        default_owner=os.getenv("GITHUB_OWNER", ""),
-        default_repo=os.getenv("GITHUB_REPO", ""),
-        token=os.getenv("GITHUB_TOKEN", ""),
-        max_refs=5,
-        max_chars=2000,
-    )
-    if github_items:
-        gathered.extend(github_items)
+    # Refs already covered by prefetched_gathered_context are filtered
+    # out BEFORE the network call so the Planner's earlier fetch is
+    # not repeated.
+    github_token = os.getenv("GITHUB_TOKEN", "")
+    new_github_items: list[dict] = []
+    if github_token:
+        refs = extract_github_refs(
+            task_description,
+            default_owner=os.getenv("GITHUB_OWNER", ""),
+            default_repo=os.getenv("GITHUB_REPO", ""),
+            max_refs=5,
+        )
+        for ref in refs:
+            if ref.synthetic_path in prefetched_paths:
+                continue
+            item = await fetch_issue_or_pr(
+                ref.owner, ref.repo, ref.number,
+                token=github_token, max_chars=2000,
+            )
+            if item is not None:
+                new_github_items.append(item)
+    if new_github_items:
+        gathered.extend(new_github_items)
         trace.append(
-            f"gather_context: pre-fetched {len(github_items)} GitHub ref(s)"
+            f"gather_context: pre-fetched {len(new_github_items)} GitHub ref(s)"
         )
 
     if not gathered:
