@@ -345,8 +345,14 @@ async def start_planner_session(
             403,
         )
 
-    # Protected workspace check
-    if ws_mgr.is_protected(body.workspace):
+    # Protected workspace check. Track whether the PIN gate cleared so
+    # we can stamp the session as authorized for protected workspaces —
+    # otherwise every submit for a protected workspace would force the
+    # user to restart the session with the PIN again, even though they
+    # just verified it moments earlier.
+    is_protected = ws_mgr.is_protected(body.workspace)
+    pin_verified = False
+    if is_protected:
         if not body.pin:
             _error(
                 f"Workspace '{body.workspace}' is protected. Provide 'pin'.",
@@ -354,6 +360,7 @@ async def start_planner_session(
             )
         if not ws_mgr.verify_pin(body.pin):
             _error("Invalid PIN for protected workspace.", 403)
+        pin_verified = True
 
     # Auto-infer languages/frameworks
     try:
@@ -366,11 +373,17 @@ async def start_planner_session(
     # Create session (Issue #193: pass github_repo through so the
     # Planner's deterministic pre-fetch can resolve same-repo refs
     # like "Issue #113" in user messages).
+    # `authorized` is True only when the PIN was actually verified —
+    # for unprotected workspaces it stays False, and that's fine because
+    # the submit endpoint only consults this flag when the workspace is
+    # still protected at submit time. This preserves the TOCTOU guard
+    # for the "unprotected at start, newly protected at submit" case.
     session = create_planner_session(
         workspace=body.workspace,
         languages=stack["languages"],
         frameworks=stack["frameworks"],
         github_repo=body.github_repo,
+        authorized=pin_verified,
     )
     planner_sessions.create(session)
 
@@ -497,7 +510,13 @@ async def submit_planner_session(
             403,
         )
         return
-    if ws_mgr.is_protected(workspace):
+    # A protected workspace is fine IF the session was PIN-verified at
+    # start time (session.authorized=True). Reject only if the workspace
+    # is protected AND this session never cleared the PIN gate — which
+    # catches the real TOCTOU case (workspace was unprotected at start,
+    # newly protected at submit) without punishing users who already
+    # authorized moments ago.
+    if ws_mgr.is_protected(workspace) and not session.authorized:
         _error(
             f"Workspace '{workspace}' now requires re-authorization. "
             f"Start a new planner session with a PIN.",

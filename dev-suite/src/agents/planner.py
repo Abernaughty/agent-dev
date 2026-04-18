@@ -215,6 +215,14 @@ class PlannerSession(BaseModel):
     # workspaces. Falls back to GITHUB_OWNER/GITHUB_REPO env vars when
     # both the session value and auto-detect come up empty.
     github_repo: str | None = None
+    # True when the session's workspace was PIN-verified at start time,
+    # i.e. the user cleared the protected-workspace gate. Lets the submit
+    # endpoint distinguish "session was authorized for a workspace that's
+    # still protected" (allow) from "session was never authorized and
+    # workspace is now protected" (reject). Without this flag, every
+    # submit to a protected workspace was forced to re-prompt for the
+    # PIN even when the user had already verified moments earlier.
+    authorized: bool = False
 
     @property
     def is_expired(self) -> bool:
@@ -508,6 +516,7 @@ def create_planner_session(
     languages: list[str] | None = None,
     frameworks: list[str] | None = None,
     github_repo: str | None = None,
+    authorized: bool = False,
 ) -> PlannerSession:
     """Create a new planner session with optional pre-populated fields.
 
@@ -518,6 +527,11 @@ def create_planner_session(
     parsing ``remote.origin.url`` from the workspace's ``.git/config``.
     The resolved repo is used as the default owner/repo when the Planner
     pre-fetches issue/PR refs like "Issue #113" from user messages.
+
+    ``authorized`` should be True when the caller has already cleared
+    the workspace's PIN gate (or the workspace is not protected). It's
+    stored on the session so the submit endpoint doesn't re-prompt for
+    a PIN that's already been verified this session.
     """
     task_spec = TaskSpec(
         workspace=workspace,
@@ -532,6 +546,7 @@ def create_planner_session(
         task_spec=task_spec,
         checklist=checklist,
         github_repo=resolved_repo,
+        authorized=authorized,
     )
 
     # System message with pre-populated context — formatted with clear
