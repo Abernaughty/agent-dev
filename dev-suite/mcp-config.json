@@ -10,7 +10,8 @@
     "filesystem": {
       "package": "@modelcontextprotocol/server-filesystem",
       "version": "2026.1.14",
-      "integrity": "TODO: add sha256 hash after first install",
+      "integrity": "sha512-bGAfu3fWRVeF10NxvPhFBDlRen6ExSx6YkKJzoVgQMNrbdVVV4okfGGQ3KBRu9ygXYfw5/N9ermHAJXA0uys+g==",
+      "integrity_notes": "npm SRI (sha512) from `npm view @modelcontextprotocol/server-filesystem@2026.1.14 dist.integrity`; shasum1 = cc7ba7e0e34aafd153048e8a213c7030b953d683",
       "purpose": "Read/write access to project code",
       "notes": "Scoped to workspace directory only. Allowed dirs passed as CLI args.",
       "command": "npx",
@@ -20,7 +21,8 @@
     "github": {
       "package": "github/github-mcp-server",
       "version": "v0.32.0",
-      "integrity": "TODO: add sha256 hash after first install",
+      "integrity": "sha256:2763823c63bcca718ce53850a1d7fcf2f501ec84028394f1b63ce7e9f4f9be28",
+      "integrity_notes": "OCI manifest-list digest for ghcr.io/github/github-mcp-server:v0.32.0 (docker-content-digest header). Per-platform digests: amd64=sha256:65324cb2c29fa622779629c58449836bbb6cfbd733576a22c61be12d81f1d004, arm64=sha256:7a0c1576b320ee97b9d3ee4b7a9fd093b00287cdd37758872ed982b7a926bc71",
       "purpose": "Manage PRs, issues, diffs",
       "notes": "Official GitHub MCP server (Go binary). Docker image preferred. v0.32.0: context reduction for tool outputs, Copilot tools in default toolset.",
       "command": "docker",

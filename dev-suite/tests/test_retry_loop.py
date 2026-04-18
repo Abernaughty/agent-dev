@@ -567,3 +567,102 @@ class TestQALeniency:
         call_args = mock_llm.ainvoke.call_args[0][0]
         system_msg = call_args[0].content
         assert "NO ACCEPTANCE CRITERIA PROVIDED" not in system_msg
+
+    @patch("src.orchestrator._get_qa_llm")
+    async def test_qa_prompt_warns_on_sandbox_crash(self, mock_get_llm):
+        """Regression guard: when sandbox_validate_node crashed, the
+        state carries sandbox_error — QA must see a prominent warning
+        in its prompt instead of the benign "sandbox not available"
+        language used for the legitimate-skip case.
+        """
+        mock_llm = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = '{"task_id": "t1", "status": "fail", "tests_passed": 0, "tests_failed": 0, "errors": ["no real test evidence"], "failed_files": [], "is_architectural": false, "recommendation": "re-run with sandbox"}'
+        mock_response.usage_metadata = {"total_tokens": 100}
+        mock_llm.ainvoke = AsyncMock(return_value=mock_response)
+        mock_get_llm.return_value = mock_llm
+
+        state: GraphState = {
+            "trace": [],
+            "memory_writes": [],
+            "tool_calls_log": [],
+            "retry_count": 0,
+            "tokens_used": 0,
+            "status": WorkflowStatus.REVIEWING,
+            "blueprint": Blueprint(
+                task_id="sandbox-crash",
+                target_files=["script.py"],
+                instructions="Do a thing",
+                constraints=[],
+                acceptance_criteria=["It works"],
+            ),
+            "generated_code": "print('hello')",
+            "sandbox_result": None,
+            "sandbox_error": "RuntimeError: E2B connection refused",
+        }
+
+        await qa_node(state, config=None)
+
+        call_args = mock_llm.ainvoke.call_args[0][0]
+        user_msg = call_args[1].content
+
+        # Prominent block with both start and end markers
+        assert "SANDBOX VALIDATION FAILED TO RUN" in user_msg
+        assert "END SANDBOX VALIDATION FAILURE" in user_msg
+        # The real exception text reaches QA so it can reason about it
+        assert "E2B connection refused" in user_msg
+        # Explicit directive not to rubber-stamp
+        assert "BLOCKING UNKNOWN" in user_msg
+        # Benign-skip language must NOT appear (different code path)
+        assert (
+            "Sandbox validation was not available for this review"
+            not in user_msg
+        )
+
+    @patch("src.orchestrator._get_qa_llm")
+    async def test_qa_prompt_benign_skip_when_no_sandbox_error(
+        self, mock_get_llm,
+    ):
+        """When sandbox_result is None AND sandbox_error is absent,
+        that's a legitimate "no tests needed" skip — use the quiet
+        language, not the crash warning.
+        """
+        mock_llm = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = '{"task_id": "t1", "status": "pass", "tests_passed": 0, "tests_failed": 0, "errors": [], "failed_files": [], "is_architectural": false, "recommendation": ""}'
+        mock_response.usage_metadata = {"total_tokens": 100}
+        mock_llm.ainvoke = AsyncMock(return_value=mock_response)
+        mock_get_llm.return_value = mock_llm
+
+        state: GraphState = {
+            "trace": [],
+            "memory_writes": [],
+            "tool_calls_log": [],
+            "retry_count": 0,
+            "tokens_used": 0,
+            "status": WorkflowStatus.REVIEWING,
+            "blueprint": Blueprint(
+                task_id="legit-skip",
+                target_files=["README.md"],  # docs-only change
+                instructions="Fix a typo",
+                constraints=[],
+                acceptance_criteria=["Typo is fixed"],
+            ),
+            "generated_code": "# README\n\nfixed",
+            "sandbox_result": None,
+            # sandbox_error intentionally absent
+        }
+
+        await qa_node(state, config=None)
+
+        call_args = mock_llm.ainvoke.call_args[0][0]
+        user_msg = call_args[1].content
+
+        # Quiet skip language present
+        assert (
+            "Sandbox validation was not available for this review"
+            in user_msg
+        )
+        # Crash warning absent
+        assert "SANDBOX VALIDATION FAILED TO RUN" not in user_msg
+        assert "BLOCKING UNKNOWN" not in user_msg

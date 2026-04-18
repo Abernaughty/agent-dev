@@ -1188,6 +1188,67 @@ class TestPlannerAntiHallucination:
 
 
 # =========================================================================
+# Planner scope discipline — preserve optional/consider phrasing
+# =========================================================================
+
+
+class TestPlannerScopeDiscipline:
+    """Regression guard for the `task-1f0cbce0` cost overrun: the
+    Planner converted an explicit "Consider pointer events" suggestion
+    in Issue #113 into a firm "Migrate to pointer events" AC. The
+    downstream Architect + Lead Dev then treated it as mandatory,
+    producing a 7-step refactor instead of the one-line fix #113
+    actually required. The prompt now explicitly tells the Planner to
+    preserve optionality from the source material.
+    """
+
+    def test_prompt_references_optional_phrasing(self):
+        """The prompt must name the optional-marker phrases so the LLM
+        recognizes them in issue bodies and carries them through.
+        """
+        from src.agents.planner import _PLANNER_SYSTEM_PROMPT
+
+        prompt = _PLANNER_SYSTEM_PROMPT.lower()
+        # Names the specific phrases authors use for optional work
+        assert "consider" in prompt
+        assert "optionally" in prompt or "optional" in prompt
+        # Names the target field so the LLM knows what not to populate
+        assert "acceptance_criteria" in prompt or "acceptance criteria" in prompt
+
+    def test_prompt_forbids_promoting_suggestions_to_requirements(self):
+        """Explicit instruction not to promote optional items — the
+        whole point of the rule.
+        """
+        from src.agents.planner import _PLANNER_SYSTEM_PROMPT
+
+        prompt = _PLANNER_SYSTEM_PROMPT.lower()
+        # Some variant of "do not promote" must be present
+        assert (
+            "do not promote" in prompt
+            or "not promote" in prompt
+            or "do not invent" in prompt  # adjacent rule, also acceptable
+        )
+        # Explicit mention that optional inflates cost/scope
+        assert (
+            "cost" in prompt
+            or "scope" in prompt
+            or "inflates" in prompt
+        )
+
+    def test_prompt_recommends_erring_toward_optional(self):
+        """When in doubt, mark as optional — this is the tiebreak rule."""
+        from src.agents.planner import _PLANNER_SYSTEM_PROMPT
+
+        prompt = _PLANNER_SYSTEM_PROMPT.lower()
+        # Look for the tiebreak phrasing
+        assert (
+            "err on the side" in prompt
+            or "when in doubt" in prompt
+            or "default to optional" in prompt
+        )
+
+
+# =========================================================================
 # Planner read-only filesystem tool access
 # =========================================================================
 
