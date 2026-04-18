@@ -494,3 +494,154 @@ class TestAuth:
     def test_health_bypasses_auth(self, auth_client):
         r = auth_client.get("/health")
         assert r.status_code == 200
+
+
+# -- Planner submit re-authorization (regression for protected-workspace bug) --
+
+
+class TestPlannerSubmitReauth:
+    """Regression guard: the submit endpoint used to reject every
+    protected-workspace session with "now requires re-authorization"
+    even when the user had PIN-verified at start. Now the session
+    carries an `authorized` flag and submit only rejects when the
+    workspace became newly protected AND the session wasn't verified.
+    """
+
+    def _make_session_store_with(self, session):
+        """Install a single session into the planner session store."""
+        from src.agents.planner import planner_sessions
+        planner_sessions._sessions[session.session_id] = session
+        return session.session_id
+
+    def test_submit_allowed_when_session_authorized_and_protected(
+        self, client, tmp_path,
+    ):
+        """Protected workspace + session.authorized=True → submit OK
+        (this is the exact flow the bug report hit: the user just
+        PIN-verified, started the session, chatted with the Planner,
+        and clicked Submit).
+        """
+        from unittest.mock import MagicMock
+
+        from src.agents.planner import create_planner_session
+        from src.api import main as main_mod
+
+        # Minimal task spec that passes the required-fields checklist.
+        ws = str(tmp_path)
+        session = create_planner_session(
+            workspace=ws,
+            languages=["Python"],
+            authorized=True,
+        )
+        session.task_spec.objective = "Fix the bug"
+        # Re-build the checklist so required_satisfied is True.
+        from src.agents.planner import build_checklist
+        session.checklist = build_checklist(session.task_spec)
+        sid = self._make_session_store_with(session)
+
+        ws_mgr = MagicMock()
+        ws_mgr.is_allowed.return_value = True
+        ws_mgr.is_protected.return_value = True  # still protected
+        main_mod.state_manager._workspace_manager = ws_mgr
+
+        # Stub task_runner.submit and create_task so the submit doesn't
+        # actually kick off a workflow.
+        main_mod.state_manager.create_task = AsyncMock(return_value="task-xyz")
+        from src.api.runner import task_runner
+        task_runner.submit = MagicMock()
+
+        r = client.post(f"/tasks/plan/{sid}/submit")
+        assert r.status_code == 200, r.text
+        # No "re-authorization" error — the authorized flag saved us.
+        assert "re-authorization" not in r.text.lower()
+
+    def test_submit_rejected_when_newly_protected_and_not_authorized(
+        self, client, tmp_path,
+    ):
+        """Protected workspace + session.authorized=False → reject.
+        This is the real TOCTOU case: workspace was unprotected when
+        the user started the session, admin protected it mid-flight,
+        the user never entered a PIN — we must reject.
+        """
+        from unittest.mock import MagicMock
+
+        from src.agents.planner import build_checklist, create_planner_session
+        from src.api import main as main_mod
+
+        ws = str(tmp_path)
+        session = create_planner_session(
+            workspace=ws,
+            languages=["Python"],
+            authorized=False,  # never PIN-verified
+        )
+        session.task_spec.objective = "Fix the bug"
+        session.checklist = build_checklist(session.task_spec)
+        sid = self._make_session_store_with(session)
+
+        ws_mgr = MagicMock()
+        ws_mgr.is_allowed.return_value = True
+        ws_mgr.is_protected.return_value = True
+        main_mod.state_manager._workspace_manager = ws_mgr
+
+        r = client.post(f"/tasks/plan/{sid}/submit")
+        assert r.status_code == 403
+        assert "re-authorization" in r.json()["detail"].lower()
+
+    def test_submit_allowed_when_workspace_unprotected(
+        self, client, tmp_path,
+    ):
+        """Unprotected workspace → submit OK regardless of authorized flag."""
+        from unittest.mock import MagicMock
+
+        from src.agents.planner import build_checklist, create_planner_session
+        from src.api import main as main_mod
+
+        ws = str(tmp_path)
+        session = create_planner_session(
+            workspace=ws,
+            languages=["Python"],
+            authorized=False,  # never protected, never needed to verify
+        )
+        session.task_spec.objective = "Fix the bug"
+        session.checklist = build_checklist(session.task_spec)
+        sid = self._make_session_store_with(session)
+
+        ws_mgr = MagicMock()
+        ws_mgr.is_allowed.return_value = True
+        ws_mgr.is_protected.return_value = False
+        main_mod.state_manager._workspace_manager = ws_mgr
+        main_mod.state_manager.create_task = AsyncMock(return_value="task-xyz")
+        from src.api.runner import task_runner
+        task_runner.submit = MagicMock()
+
+        r = client.post(f"/tasks/plan/{sid}/submit")
+        assert r.status_code == 200, r.text
+
+    def test_submit_rejected_when_workspace_no_longer_allowed(
+        self, client, tmp_path,
+    ):
+        """Workspace removed from allowed list between start and submit
+        must still reject regardless of authorized flag.
+        """
+        from unittest.mock import MagicMock
+
+        from src.agents.planner import build_checklist, create_planner_session
+        from src.api import main as main_mod
+
+        ws = str(tmp_path)
+        session = create_planner_session(
+            workspace=ws,
+            languages=["Python"],
+            authorized=True,
+        )
+        session.task_spec.objective = "Fix the bug"
+        session.checklist = build_checklist(session.task_spec)
+        sid = self._make_session_store_with(session)
+
+        ws_mgr = MagicMock()
+        ws_mgr.is_allowed.return_value = False  # newly disallowed
+        main_mod.state_manager._workspace_manager = ws_mgr
+
+        r = client.post(f"/tasks/plan/{sid}/submit")
+        assert r.status_code == 403
+        assert "no longer in the allowed" in r.json()["detail"].lower()

@@ -1124,6 +1124,48 @@ class TestPlannerGithubRepoPlumbing:
 
 
 # =========================================================================
+# Session authorization flag (submit-time re-auth regression)
+# =========================================================================
+
+
+class TestPlannerSessionAuthorization:
+    """Regression guard for the submit-time re-auth bug where every
+    submission to a protected workspace forced a new session + PIN,
+    even when the user had just PIN-verified at session start.
+    """
+
+    def test_authorized_defaults_to_false(self, tmp_path):
+        """Unauthorized by default — callers must opt in explicitly."""
+        from src.agents.planner import create_planner_session
+
+        session = create_planner_session(workspace=str(tmp_path))
+        assert session.authorized is False
+
+    def test_create_session_with_authorized_true(self, tmp_path):
+        """API layer stamps authorized=True after PIN verification."""
+        from src.agents.planner import create_planner_session
+
+        session = create_planner_session(
+            workspace=str(tmp_path),
+            authorized=True,
+        )
+        assert session.authorized is True
+
+    def test_create_session_with_authorized_false_is_explicit(self, tmp_path):
+        """Unprotected workspaces pass authorized=False — the submit
+        endpoint only consults the flag when the workspace is still
+        protected, so this is fine.
+        """
+        from src.agents.planner import create_planner_session
+
+        session = create_planner_session(
+            workspace=str(tmp_path),
+            authorized=False,
+        )
+        assert session.authorized is False
+
+
+# =========================================================================
 # Anti-hallucination system prompt (Issue #193 AC #3d)
 # =========================================================================
 
