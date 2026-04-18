@@ -10,7 +10,7 @@
 	Issue #106: Pass workspace to tasksStore.create()
 -->
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, onDestroy } from 'svelte';
 	import { tasksStore } from '$lib/stores/tasks.svelte.js';
 	import { workspacesStore } from '$lib/stores/workspaces.svelte.js';
 
@@ -22,8 +22,10 @@
 	let { height, onResize }: Props = $props();
 
 	let isDragging = $state(false);
-	let startY = $state(0);
-	let startH = $state(0);
+	let startY = 0;
+	let startH = 0;
+	let capturedPointerId: number | null = null;
+	let capturedTarget: HTMLElement | null = null;
 
 	const tabs = ['TERMINAL', 'PROBLEMS', 'OUTPUT'];
 	let activeTab = $state('TERMINAL');
@@ -94,21 +96,52 @@
 		}
 	});
 
-	function handleMouseDown(e: MouseEvent) {
+	function handlePointerDown(e: PointerEvent) {
+		e.preventDefault();
 		isDragging = true;
 		startY = e.clientY;
 		startH = height;
+		capturedPointerId = e.pointerId;
+		capturedTarget = e.currentTarget as HTMLElement;
+		capturedTarget.setPointerCapture(e.pointerId);
+		document.body.style.userSelect = 'none';
+		window.addEventListener('pointermove', handlePointerMove);
+		window.addEventListener('pointerup', handlePointerUp);
 	}
 
-	function handleMouseMove(e: MouseEvent) {
+	function handlePointerMove(e: PointerEvent) {
 		if (!isDragging) return;
-		const newHeight = Math.max(60, Math.min(400, startH + (startY - e.clientY)));
+		const newHeight = Math.max(60, Math.min(window.innerHeight * 0.8, startH + (startY - e.clientY)));
 		onResize(newHeight);
 	}
 
-	function handleMouseUp() {
+	function handlePointerUp(e: PointerEvent) {
 		isDragging = false;
+		document.body.style.userSelect = '';
+		window.removeEventListener('pointermove', handlePointerMove);
+		window.removeEventListener('pointerup', handlePointerUp);
+		if (capturedTarget && capturedPointerId !== null) {
+			try { capturedTarget.releasePointerCapture(capturedPointerId); } catch { /* already released */ }
+		}
+		capturedPointerId = null;
+		capturedTarget = null;
 	}
+
+	function cleanupDragListeners() {
+		window.removeEventListener('pointermove', handlePointerMove);
+		window.removeEventListener('pointerup', handlePointerUp);
+		if (isDragging) {
+			isDragging = false;
+			document.body.style.userSelect = '';
+		}
+		if (capturedTarget && capturedPointerId !== null) {
+			try { capturedTarget.releasePointerCapture(capturedPointerId); } catch { /* already released */ }
+		}
+		capturedPointerId = null;
+		capturedTarget = null;
+	}
+
+	onDestroy(cleanupDragListeners);
 
 	async function handleCmd() {
 		const text = input.trim();
@@ -153,8 +186,6 @@
 	}
 </script>
 
-<svelte:window onmousemove={handleMouseMove} onmouseup={handleMouseUp} />
-
 <div
 	class="flex shrink-0 flex-col border-t"
 	style="height: {height}px; background: var(--color-bg-activity); border-color: var(--color-border);"
@@ -162,8 +193,8 @@
 	<!-- svelte-ignore a11y_no_static_element_interactions -->
 	<div
 		class="flex h-1 shrink-0 cursor-ns-resize items-center justify-center"
-		style="background: {isDragging ? 'var(--color-accent-cyan)' : 'transparent'};"
-		onmousedown={handleMouseDown}
+		style="background: {isDragging ? 'var(--color-accent-cyan)' : 'transparent'}; touch-action: none;"
+		onpointerdown={handlePointerDown}
 	>
 		<div class="h-0.5 w-10 rounded-sm" style="background: var(--color-bg-surface);"></div>
 	</div>
