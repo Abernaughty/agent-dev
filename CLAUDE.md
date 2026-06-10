@@ -6,24 +6,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A Stateful AI Workforce — a LangGraph-orchestrated team of three AI agents (Architect, Lead Dev, QA) with a SvelteKit dashboard for real-time monitoring. Agents collaborate via structured JSON blueprints, execute code in E2B sandboxes, and persist knowledge through Chroma tiered memory.
 
-## Current State (Sprint 4)
+## Current State
 
-**Phase 2 Sprint 4** — Agent tool wiring sprint. Milestone: 8 open / 22 closed.
+The core pipeline is built and working end-to-end:
 
-### Critical Gap Being Addressed
-Agents are "brains in jars" — they produce text output but cannot interact with the filesystem, run tests, or apply code changes. The ToolProvider infrastructure (ABC, LocalToolProvider, MCPToolProvider, mcp_bridge) is fully built but never wired into the orchestrator's agent nodes. Sprint 4 bridges this gap.
+- **Orchestration** — LangGraph state machine (`src/orchestrator.py`) running the 3-agent plan → build → test loop with tool binding, retry logic, multi-file task decomposition, and a Planner stage (GitHub pre-fetch, read-only filesystem tools) in front of the Architect.
+- **Execution** — E2B sandboxed micro-VMs with template routing (Python-only vs fullstack Node/pnpm/SvelteKit) and a code application pipeline that writes agent output to the workspace. Remote GitHub workspaces with optional PR creation are supported.
+- **Memory** — Chroma tiered memory (L0-Core / L0-Discovered / L1 / L2) with an approval flow for agent-discovered entries.
+- **Dashboard** — FastAPI backend (REST + SSE) and SvelteKit frontend fully wired: task timelines, blueprint/agent/memory detail views, PR lifecycle blade (diffs, reviews, task↔PR linking), chat view with Planner messages, and cost view.
 
-### Sprint 4 Issues (in order)
-1. **#79 (P1)** — Code application pipeline: parse Dev's `# --- FILE:` output, write to workspace, load into E2B sandbox
-2. **#80 (P1)** — Agent tool binding: `bind_tools()` on Dev/QA LLMs + tool execution loop in LangGraph
-3. **#81 (P2)** — Fix 7 skipped tests (sandbox creds, SSE fixtures, removed mock fallback)
-
-### Backlog
-- #58 (P2) — Multi-file task decomposition
-- #20 (P2) — Cost alerting thresholds
-- #21 (P3) — SecretsProvider ABC (Doppler)
-- #18 (P3) — Project Context MCP
-- #23 (P3) — CI/CD Pipeline MCP
+For what's planned next, see the Roadmap section in README.md and the open issues on the project board.
 
 ## Commands
 
@@ -107,9 +99,11 @@ e2b template build \
 
 LangGraph state machine orchestrating three agents in a plan -> build -> test loop:
 
-- **Architect** (Gemini 2.5 Flash) — Creates structured JSON blueprints. Never writes code.
-- **Lead Dev** (Claude Sonnet 4) — Executes blueprints. Writes and refactors code in E2B sandboxes.
-- **QA Agent** (Claude Sonnet 4) — Runs tests, audits security, writes structured failure reports.
+- **Architect** (default: `gemini-3-flash-preview`) — Creates structured JSON blueprints. Never writes code.
+- **Lead Dev** (default: `claude-sonnet-4-20250514`) — Executes blueprints. Writes and refactors code in E2B sandboxes.
+- **QA Agent** (default: `claude-sonnet-4-20250514`) — Runs tests, audits security, writes structured failure reports.
+
+Models are configurable via `ARCHITECT_MODEL` / `DEVELOPER_MODEL` / `QA_MODEL` in `dev-suite/.env`.
 
 Key modules:
 - `src/orchestrator.py` — LangGraph state machine with retry logic (max 3 attempts + token budget)

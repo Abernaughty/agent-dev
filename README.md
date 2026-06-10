@@ -37,11 +37,13 @@ agent-dev/
 **Orchestrator**: LangGraph state machine with explicit transitions. Three agents collaborate in a plan → build → test loop with structured JSON blueprints, max 3 retries per task, and human escalation on budget exhaustion.
 
 **Agent Team**:
-| Role | Model | Responsibility |
+| Role | Default Model | Responsibility |
 |---|---|---|
-| Architect | Gemini 2.5 Flash | Creates structured blueprints. Never writes code. |
-| Lead Dev | Claude Sonnet 4 | Executes blueprints. Writes and refactors code. |
-| QA Agent | Claude Sonnet 4 | Runs tests, audits security, writes failure reports. |
+| Architect | Gemini 3 Flash (preview) — `gemini-3-flash-preview` | Creates structured blueprints. Never writes code. |
+| Lead Dev | Claude Sonnet 4 — `claude-sonnet-4-20250514` | Executes blueprints. Writes and refactors code. |
+| QA Agent | Claude Sonnet 4 — `claude-sonnet-4-20250514` | Runs tests, audits security, writes failure reports. |
+
+Models are configurable per agent via `ARCHITECT_MODEL` / `DEVELOPER_MODEL` / `QA_MODEL` in `dev-suite/.env` (see `.env.example` for current defaults and options).
 
 **Memory**: Chroma with tiered metadata (L0-Core human-only, L0-Discovered agent-writable with 48h expiry, L1 module context, L2 ephemeral).
 
@@ -118,9 +120,9 @@ Set in `dashboard/.env`:
 - ✅ FastAPI dashboard backend (REST + SSE)
 - ✅ SvelteKit dashboard scaffold (VS Code layout)
 - ✅ GitHub Actions CI
-- 🚧 Dashboard data wiring (stores ↔ API)
-- 🚧 Memory approval UI (L0-Discovered review)
-- 🚧 OTEL trace propagation
+- ✅ Dashboard data wiring (stores ↔ API, PR lifecycle blade, chat view)
+- ✅ Memory approval UI (L0-Discovered review)
+- ✅ OTEL trace propagation (Langfuse v4)
 - 📋 CI/CD Pipeline MCP
 - 📋 Secrets provider integration
 - 📋 Cost alerting thresholds
