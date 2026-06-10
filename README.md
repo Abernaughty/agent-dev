@@ -10,7 +10,7 @@ A LangGraph-orchestrated AI development team with a SvelteKit dashboard for real
 agent-dev/
 ├── dev-suite/                  # Python orchestrator (LangGraph)
 │   ├── src/
-│   │   ├── agents/             # Architect, Lead Dev, QA agent definitions
+│   │   ├── agents/             # Architect, Planner, QA agent definitions
 │   │   ├── api/                # FastAPI backend (REST + SSE)
 │   │   ├── memory/             # Chroma vector store with tiered metadata
 │   │   ├── sandbox/            # E2B sandbox runner

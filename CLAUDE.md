@@ -113,7 +113,7 @@ LangGraph state machine orchestrating three agents in a plan -> build -> test lo
 
 Key modules:
 - `src/orchestrator.py` — LangGraph state machine with retry logic (max 3 attempts + token budget)
-- `src/agents/` — Agent definitions (architect.py, developer.py, qa.py)
+- `src/agents/` — Agent definitions (architect.py, planner.py, qa.py); the Lead Dev node lives in orchestrator.py
 - `src/memory/` — Chroma vector store with L0/L1/L2 tiered metadata
 - `src/sandbox/` — E2B sandbox runner with structured JSON output wrappers and template routing
 - `src/tools/` — MCP bridge (mcp_bridge.py), tool providers (provider.py, mcp_provider.py)
@@ -150,7 +150,7 @@ agent-dev/
 │   └── tasks.json              # Compound launch (FastAPI + SvelteKit)
 ├── dev-suite/                  # Python orchestrator
 │   ├── src/
-│   │   ├── agents/             # Architect, Lead Dev, QA
+│   │   ├── agents/             # Architect, Planner, QA
 │   │   ├── api/                # FastAPI backend (main, auth, events, models, state, runner)
 │   │   ├── memory/             # Chroma store + seed data
 │   │   ├── sandbox/            # E2B runner + template routing
