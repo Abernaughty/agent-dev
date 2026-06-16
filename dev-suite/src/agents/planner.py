@@ -615,6 +615,20 @@ wrong task specs. Instead, briefly tell the user the context wasn't \
 injected and ask them to paste the issue title and body, or confirm the \
 repo configuration.
 
+CRITICAL scope-preservation rule: when summarising requirements from a \
+pre-fetched GitHub issue or PR body, preserve the original author's \
+language about what is REQUIRED vs. what is OPTIONAL. If the source text \
+says "Consider X", "Optionally X", "You may want to X", "Nice to have: \
+X", "As a stretch: X", or places X in an "Optional" / "Stretch" / \
+"Follow-up" section, carry that optionality through to your task spec. \
+List such items as optional enhancements in the conversational reply \
+(e.g. "Optional: migrate to pointer events"), and OMIT them from the \
+hard `acceptance_criteria` list — only include items the issue author \
+stated as required. Do NOT promote suggestions to requirements: every \
+optional item you promote inflates the Architect's blueprint, increases \
+cost, and risks scope creep in the generated PR. When in doubt, err on \
+the side of "optional" — the user can always ask for more.
+
 You also work with information the user provides and any auto-detected \
 project context.
 

@@ -123,6 +123,11 @@ class GraphState(TypedDict, total=False):
     memory_writes: list[dict]
     trace: list[str]
     sandbox_result: SandboxResult | None
+    # Set when sandbox_validate_node caught an exception. Distinguishes
+    # "validation attempted and crashed" (value is "ExcType: message")
+    # from "validation not needed / skipped" (stays None). QA reads
+    # this to inject a blocking-unknown warning into its prompt.
+    sandbox_error: str | None
     parsed_files: list[dict]
     tool_calls_log: list[dict]
     memory_writes_flushed: list[dict]
@@ -155,6 +160,7 @@ class AgentState(BaseModel):
     memory_writes: list[dict] = []
     trace: list[str] = []
     sandbox_result: SandboxResult | None = None
+    sandbox_error: str | None = None
     parsed_files: list[dict] = []
     tool_calls_log: list[dict] = []
     workspace_root: str = ""
@@ -1638,7 +1644,30 @@ the targeted change."""
         else:
             user_msg += "\nUse these real test results to inform your review. If sandbox tests passed, weigh that heavily in your verdict."
     else:
-        user_msg += "\n\nNote: Sandbox validation was not available for this review. Evaluate the code based on the Blueprint criteria only."
+        # Distinguish "validation attempted and crashed" from "no tests
+        # needed" — the old code treated both as a benign skip, which
+        # let QA silently rubber-stamp code when the sandbox had
+        # actually errored. See sandbox_validate_node for where this
+        # field gets populated.
+        sandbox_error = state.get("sandbox_error")
+        if sandbox_error:
+            user_msg += (
+                "\n\n=== SANDBOX VALIDATION FAILED TO RUN ===\n"
+                f"Error: {sandbox_error}\n"
+                "The sandbox was supposed to execute tests for this "
+                "change but crashed before producing results. Treat "
+                "this as a BLOCKING UNKNOWN — do not mark tests as "
+                "passing without real evidence. You may still PASS "
+                "the review if the code is obviously correct from "
+                "reading it alone, but your verdict MUST explicitly "
+                "acknowledge that no tests ran, and you MUST flag "
+                "any change that carries non-trivial runtime risk "
+                "(async code, error paths, I/O, state machines) as "
+                "needing re-validation once the sandbox is working.\n"
+                "=== END SANDBOX VALIDATION FAILURE ==="
+            )
+        else:
+            user_msg += "\n\nNote: Sandbox validation was not available for this review. Evaluate the code based on the Blueprint criteria only."
     messages = [SystemMessage(content=system_prompt), HumanMessage(content=user_msg)]
     llm = _get_qa_llm()
     if has_tools:
@@ -1762,9 +1791,25 @@ async def sandbox_validate_node(state: GraphState) -> dict:
         logger.info("[SANDBOX] Validation complete: exit=%d, passed=%s, failed=%s", result.exit_code, result.tests_passed, result.tests_failed)
         return {"sandbox_result": result, "trace": trace}
     except Exception as e:
-        logger.warning("[SANDBOX] Validation failed with error: %s", e)
-        trace.append(f"sandbox_validate: error -- {type(e).__name__}: {e}")
-        return {"sandbox_result": None, "trace": trace}
+        # exc_info=True ensures the full traceback is always in the log
+        # even when str(e) is empty (E2B SDK errors, subprocess crashes
+        # with empty stderr, bare RuntimeError(), etc.) — the old format
+        # silently rendered these as "Validation failed with error: ".
+        err_type = type(e).__name__
+        err_msg = str(e) if str(e) else "<no message>"
+        logger.warning(
+            "[SANDBOX] Validation crashed: %s: %s", err_type, err_msg,
+            exc_info=True,
+        )
+        trace.append(f"sandbox_validate: error -- {err_type}: {err_msg}")
+        # Surface to QA via sandbox_error so it knows validation was
+        # attempted and failed (not "no tests needed"). qa_node reads
+        # this and injects a blocking-unknown warning into its prompt.
+        return {
+            "sandbox_result": None,
+            "sandbox_error": f"{err_type}: {err_msg}",
+            "trace": trace,
+        }
 
 
 async def flush_memory_node(state: GraphState) -> dict:

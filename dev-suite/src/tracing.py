@@ -41,6 +41,31 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 
+# Silence upstream SDK log noise that isn't actionable:
+#   - `opentelemetry.context`: emits a ValueError traceback on every
+#     context-detach race in async code paths. The error is caught
+#     internally by the library; the traceback is information only.
+#   - `langfuse`: emits "Unknown observation type: event, falling back
+#     to span" for trace events it doesn't classify. Benign, verbose.
+# Tightening to ERROR means genuine SDK errors still surface, while
+# these two known-benign categories stop drowning the backend log.
+# Configurable via env for operators who want the full firehose back.
+def _configure_tracing_loggers() -> None:
+    otel_level = os.getenv("OTEL_CONTEXT_LOG_LEVEL", "ERROR").upper()
+    langfuse_level = os.getenv("LANGFUSE_LOG_LEVEL", "ERROR").upper()
+    try:
+        logging.getLogger("opentelemetry.context").setLevel(otel_level)
+    except ValueError:
+        logging.getLogger("opentelemetry.context").setLevel(logging.ERROR)
+    try:
+        logging.getLogger("langfuse").setLevel(langfuse_level)
+    except ValueError:
+        logging.getLogger("langfuse").setLevel(logging.ERROR)
+
+
+_configure_tracing_loggers()
+
+
 # -- Secret Redaction --
 # Same patterns as sandbox/e2b_runner.py for consistency
 

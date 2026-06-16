@@ -357,3 +357,79 @@ class TestSandboxValidateGraphIntegration:
             if e.source == "sandbox_validate"
         }
         assert "qa" in sandbox_targets
+
+
+class TestSandboxValidateCrashVisibility:
+    """Regression guard for the silent-sandbox-crash bug: validation
+    could fail with an empty exception message, log as `[SANDBOX]
+    Validation failed with error: ` with nothing after, and let QA
+    rubber-stamp the code because `sandbox_result=None` was
+    indistinguishable from "no tests needed."
+    """
+
+    async def test_empty_exception_message_still_surfaces_type(
+        self, caplog,
+    ):
+        """Even when str(e) is empty, the exception TYPE and traceback
+        must reach the log so operators can diagnose.
+        """
+        import logging as _logging
+
+        state = _make_state(["src/main.py", "tests/test_main.py"])
+
+        def raise_empty():
+            raise RuntimeError()  # str(e) == ""
+
+        with patch(
+            "src.orchestrator._run_sandbox_tests",
+            side_effect=lambda *a, **kw: raise_empty(),
+        ):
+            with caplog.at_level(_logging.WARNING, logger="src.orchestrator"):
+                result = await sandbox_validate_node(state)
+
+        assert result["sandbox_result"] is None
+        # New: sandbox_error populated with type + "<no message>" sentinel
+        assert result.get("sandbox_error") == "RuntimeError: <no message>"
+        # Log contains the type name and a real traceback (exc_info=True)
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any("RuntimeError" in m for m in msgs)
+        # At least one record carried exc_info — the stdlib sets
+        # record.exc_info to the sys.exc_info() tuple when exc_info=True.
+        assert any(r.exc_info is not None for r in caplog.records)
+
+    async def test_nonempty_exception_message_preserved(self, caplog):
+        """When the exception does have a message, preserve it verbatim."""
+        import logging as _logging
+
+        state = _make_state(["src/main.py", "tests/test_main.py"])
+
+        with patch(
+            "src.orchestrator._run_sandbox_tests",
+            side_effect=RuntimeError("E2B connection refused"),
+        ):
+            with caplog.at_level(_logging.WARNING, logger="src.orchestrator"):
+                result = await sandbox_validate_node(state)
+
+        assert result["sandbox_result"] is None
+        assert result.get("sandbox_error") == (
+            "RuntimeError: E2B connection refused"
+        )
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any("E2B connection refused" in m for m in msgs)
+
+    async def test_no_sandbox_error_on_clean_run(self):
+        """Happy path: sandbox_error stays absent when validation succeeds."""
+        state = _make_state(["src/main.py", "tests/test_main.py"])
+
+        with patch("src.orchestrator._run_sandbox_tests") as mock_run:
+            mock_run.return_value = SandboxResult(
+                exit_code=0,
+                tests_passed=5,
+                tests_failed=0,
+                output_summary="5 passed in 1.2s",
+            )
+            result = await sandbox_validate_node(state)
+
+        assert result["sandbox_result"] is not None
+        # Either the key is absent, or None — both mean "no crash."
+        assert not result.get("sandbox_error")
